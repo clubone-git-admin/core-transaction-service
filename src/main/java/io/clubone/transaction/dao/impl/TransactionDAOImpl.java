@@ -1,0 +1,897 @@
+package io.clubone.transaction.dao.impl;
+
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.time.OffsetDateTime;
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.dao.DataAccessException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.stereotype.Repository;
+import io.clubone.transaction.dao.TransactionDAO;
+import io.clubone.transaction.v2.vo.BundlePriceCycleBandDTO;
+import io.clubone.transaction.v2.vo.CalculationMode;
+import io.clubone.transaction.v2.vo.DiscountDetailDTO;
+import io.clubone.transaction.v2.vo.InvoiceEntityDiscountDTO;
+import io.clubone.transaction.v2.vo.InvoiceEntityPriceBandDTO;
+import io.clubone.transaction.vo.BundleComponent;
+import io.clubone.transaction.vo.BundleItemPriceDTO;
+import io.clubone.transaction.vo.EntityTypeDTO;
+import io.clubone.transaction.vo.InvoiceDTO;
+import io.clubone.transaction.vo.InvoiceEntityDTO;
+import io.clubone.transaction.vo.InvoiceEntityRow;
+import io.clubone.transaction.vo.InvoiceEntityTaxDTO;
+import io.clubone.transaction.vo.InvoiceFlatRow;
+import io.clubone.transaction.vo.InvoiceSummaryDTO;
+import io.clubone.transaction.vo.ItemPriceDTO;
+import io.clubone.transaction.vo.TaxRateAllocationDTO;
+import io.clubone.transaction.vo.TransactionDTO;
+import io.clubone.transaction.vo.TransactionEntityDTO;
+import io.clubone.transaction.vo.TransactionEntityTaxDTO;
+
+@Repository
+public class TransactionDAOImpl implements TransactionDAO {
+
+	@Autowired
+	@Qualifier("cluboneJdbcTemplate")
+	private JdbcTemplate cluboneJdbcTemplate;
+
+	private static final Logger logger = LoggerFactory.getLogger(TransactionDAOImpl.class);
+
+	private static final String ENTITY_TYPE_SQL = """
+			SELECT entity_type
+			FROM "transaction".lu_entity_type let
+			WHERE let.entity_type_id = ?
+			""";
+
+	private static final String ITEM_PRICE_SQL = """
+						WITH RECURSIVE ancestors AS (
+			  SELECT l.level_id, l.parent_level_id, 0 AS depth
+			  FROM location.levels l
+			  WHERE l.level_id = ?
+			  UNION ALL
+			  SELECT p.level_id, p.parent_level_id, a.depth + 1
+			  FROM location.levels p
+			  JOIN ancestors a ON a.parent_level_id = p.level_id
+			),
+			level_candidates AS (
+			  SELECT level_id, depth FROM ancestors
+			  UNION ALL
+			  SELECT NULL::uuid AS level_id, 100000 AS depth
+			)
+			SELECT
+			  i.item_description,
+			  eff_ip.price AS "itemPrice",
+			  i.tax_group_id,
+			  eff_ip.price_level_id
+			FROM items.item i
+			JOIN LATERAL (
+			  SELECT ip.price,
+			         ip.level_id AS price_level_id
+			  FROM items.item_price ip
+			  JOIN level_candidates lc
+			    ON (ip.level_id = lc.level_id)
+			    OR (ip.level_id IS NULL AND lc.level_id IS NULL)
+			  WHERE ip.item_id = ?
+			  ORDER BY lc.depth ASC
+			  LIMIT 1
+			) eff_ip ON TRUE
+			WHERE i.item_id = ?;
+						""";
+
+	private static final String INVOICE_SUMMARY_SQL = """
+			SELECT
+			    i.client_role_id,
+			    i.total_amount,
+			    i.level_id
+			FROM "transaction".invoice i
+			WHERE i.invoice_id = ?
+			""";
+
+	private static final String UPDATE_TRANSACTION_CLIENT_AGREEMENT_SQL = """
+			UPDATE "transaction"."transaction"
+			SET client_agreement_id = ?
+			WHERE transaction_id = ?
+			""";
+
+	private static final String TAX_RATE_SQL = """
+			SELECT
+			    tr.tax_rate_id,
+			    tra.tax_rate_percentage
+			FROM finance.tax_rate tr
+			JOIN finance.tax_rate_allocation tra
+			  ON tra.tax_rate_id = tr.tax_rate_id
+			WHERE tr.tax_group_id = ?
+			  AND tr.level_id = '9dcc30ea-e4cd-49b4-8e47-3e9bd8a5de0e'
+			""";
+
+	private static final String BUNDLE_PRICE_BAND_SQL = "SELECT unit_price, down_payment_units "
+			+ "FROM bundles_new.bundle_price_cycle_band " + "WHERE price_cycle_band_id = ?";
+
+	@Override
+	public UUID saveInvoice(InvoiceDTO dto) {
+		UUID invoiceId = UUID.randomUUID();
+		String sql = """
+				INSERT INTO transaction.invoice (
+				    invoice_id, invoice_number, invoice_date, client_role_id, billing_address,
+				    invoice_status_id, total_amount, sub_total, tax_amount, discount_amount,
+				    is_paid, created_on
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+				""";
+
+		cluboneJdbcTemplate.update(sql, invoiceId, dto.getInvoiceNumber(), dto.getInvoiceDate(), dto.getClientRoleId(),
+				dto.getBillingAddress(), dto.getInvoiceStatusId(), dto.getTotalAmount(), dto.getSubTotal(),
+				dto.getTaxAmount(), dto.getDiscountAmount(), dto.isPaid());
+
+		return invoiceId;
+	}
+
+	@Override
+	public UUID saveInvoiceV3(InvoiceDTO dto) {
+		// 0) Canonical totals from line items (prevents header/lines mismatch)
+		BigDecimal subtotal = dto.getSubTotal();
+		BigDecimal discountSum = dto.getDiscountAmount();
+		BigDecimal taxSum = dto.getTaxAmount();
+		BigDecimal totalSum = dto.getTotalAmount();
+
+		subtotal = subtotal.setScale(2, RoundingMode.HALF_UP);
+		discountSum = discountSum.setScale(2, RoundingMode.HALF_UP);
+		taxSum = taxSum.setScale(2, RoundingMode.HALF_UP);
+		totalSum = totalSum.setScale(2, RoundingMode.HALF_UP);
+
+		// Optionally compare with dto values and log if different
+		if (dto.getTotalAmount() != null
+				&& totalSum.compareTo(dto.getTotalAmount().setScale(2, RoundingMode.HALF_UP)) != 0) {
+			logger.info("Invoice header total differs from computed: provided={}, computed={}", dto.getTotalAmount(),
+					totalSum);
+		}
+
+		UUID invoiceId = UUID.randomUUID();
+
+		// 1) Insert invoice header (include created_by only if your table has it)
+		final String insertInvoiceSql = """
+				INSERT INTO transaction.invoice (
+				    invoice_id, invoice_number, invoice_date, client_role_id,level_id, billing_address,
+				    invoice_status_id, total_amount, sub_total, tax_amount, discount_amount, is_paid, created_on/*, created_by*/
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW()/*, ?*/)
+				""";
+
+		// If your invoice table has created_by, pass dto.getCreatedBy() as the last
+		// param and uncomment above columns.
+		cluboneJdbcTemplate.update(insertInvoiceSql, invoiceId, dto.getInvoiceNumber(), dto.getInvoiceDate(),
+				dto.getClientRoleId(), dto.getLevelId(), dto.getBillingAddress(), dto.getInvoiceStatusId(), totalSum, // use
+																														// computed
+				// canonical totals
+				subtotal, taxSum, discountSum, Boolean.TRUE.equals(dto.isPaid())
+		/* , dto.getCreatedBy() */
+		);
+
+		// 2) Resolve BUNDLE type id once (for parent/child grouping)
+		UUID bundleTypeId = cluboneJdbcTemplate.queryForObject(
+				"SELECT entity_type_id FROM transaction.lu_entity_type WHERE LOWER(entity_type) = LOWER('BUNDLE')",
+				UUID.class);
+
+		UUID lastBundleHeaderId = null;
+
+		// 3) Insert invoice entities
+		final String insertEntitySql = """
+				INSERT INTO transaction.invoice_entity (
+				    invoice_entity_id, parent_invoice_entity_id, invoice_id,
+				    entity_type_id, entity_id, entity_description,
+				    quantity, unit_price, discount_amount, tax_amount, total_amount,
+				    created_on, created_by
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?)
+				""";
+
+		// 4) Insert taxes per entity
+		final String insertTaxSql = """
+				INSERT INTO transaction.invoice_entity_tax (
+				    invoice_entity_tax_id, invoice_entity_id, tax_rate_id, tax_rate, tax_amount,
+				    created_on, created_by
+				) VALUES (?, ?, ?, ?, ?, NOW(), ?)
+				""";
+
+		// [NEW] 5) Insert discounts per entity
+		final String insertDiscountSql = """
+				INSERT INTO transaction.invoice_entity_discount (
+				    invoice_entity_discount_id, invoice_entity_id, discount_id, discount_amount,
+				    adjustment_type_id, calculation_type_id, is_active, created_on, created_by
+				) VALUES (?, ?, ?, ?, ?, ?, true, NOW(), ?)
+				""";
+
+		// 5b) Insert price bands per entity (after invoice_entity insert)
+		final String insertPriceBandSql = """
+				INSERT INTO transaction.invoice_entity_price_band (
+				    invoice_entity_price_band_id,
+				    invoice_entity_id,
+				    price_cycle_band_id,
+				    unit_price,
+				    is_price_overridden,
+				    is_active,
+				    created_on,
+				    created_by,
+				    modified_on,
+				    modified_by
+				) VALUES (?, ?, ?, ?, COALESCE(?, false), true, NOW(), ?, NOW(), ?)
+				""";
+
+		for (InvoiceEntityDTO li : dto.getLineItems()) {
+			UUID ieId = null;
+			if (li.getInvoiceEntityId() != null) {
+				ieId = li.getInvoiceEntityId();
+			} else {
+				ieId = UUID.randomUUID();
+			}
+
+			// Attach to last bundle header if not explicitly given and this isn’t a bundle
+			// header
+			UUID parentId = li.getParentInvoiceEntityId();
+			boolean isBundleHeader = bundleTypeId.equals(li.getEntityTypeId());
+			System.out.println("isBundleHeader " + isBundleHeader);
+			System.out.println("lastBundleHeaderId " + lastBundleHeaderId);
+			/*
+			 * if (parentId == null) { if (lastBundleHeaderId != null && !isBundleHeader) {
+			 * parentId = lastBundleHeaderId; } } else { // Setting null for item purchase
+			 * parentId = null; }
+			 */
+
+			cluboneJdbcTemplate.update(insertEntitySql, ieId, parentId, invoiceId, li.getEntityTypeId(),
+					li.getEntityId(), li.getEntityDescription(), li.getQuantity(), li.getUnitPrice(),
+					li.getDiscountAmount(), li.getTaxAmount(), li.getTotalAmount(), // ensure this equals (qty*unit -
+																					// discount + tax) rounded to 2
+					dto.getCreatedBy() // if you don’t store created_by, replace with null and drop the column
+			);
+
+			if (isBundleHeader) {
+				lastBundleHeaderId = ieId;
+			}
+
+			if (li.getTaxes() != null && !li.getTaxes().isEmpty()) {
+				for (InvoiceEntityTaxDTO t : li.getTaxes()) {
+					UUID ietId = UUID.randomUUID();
+					cluboneJdbcTemplate.update(insertTaxSql, ietId, ieId, t.getTaxRateId(), t.getTaxRate(),
+							t.getTaxAmount(), dto.getCreatedBy());
+				}
+			}
+
+			// [NEW] Insert discounts (each applied discount row)
+			if (li.getDiscounts() != null && !li.getDiscounts().isEmpty()) {
+				for (InvoiceEntityDiscountDTO d : li.getDiscounts()) {
+					UUID iedId = UUID.randomUUID();
+
+					// Defensive: ensure mandatory FKs are present
+					UUID discountId = d.getDiscountId();
+					BigDecimal discountAmt = d.getDiscountAmount() == null ? BigDecimal.ZERO : d.getDiscountAmount();
+					UUID adjustmentTypeId = d.getAdjustmentTypeId(); // must exist in discount.lu_adjustment_type
+					UUID calculationTypeId = d.getCalculationTypeId(); // must exist in discount.lu_calculation_type
+
+					// You can add validations here if needed:
+					// Objects.requireNonNull(discountId, "discountId is required on
+					// InvoiceEntityDiscountDTO");
+
+					cluboneJdbcTemplate.update(insertDiscountSql, iedId, ieId, discountId, discountAmt,
+							adjustmentTypeId, calculationTypeId, dto.getCreatedBy());
+				}
+			}
+
+			// [NEW] Insert price bands tied to this invoice_entity line
+			if (li.getPriceBands() != null && !li.getPriceBands().isEmpty()) {
+				for (InvoiceEntityPriceBandDTO pb : li.getPriceBands()) {
+					UUID iepbId = UUID.randomUUID();
+					UUID priceCycleBandId = pb.getPriceCycleBandId(); // must not be null
+					BigDecimal unitPrice = pb.getUnitPrice() == null ? BigDecimal.ZERO : pb.getUnitPrice();
+					Boolean overridden = Boolean.TRUE.equals(pb.getIsPriceOverridden());
+
+					cluboneJdbcTemplate.update(insertPriceBandSql, iepbId, // invoice_entity_price_band_id
+							ieId, // invoice_entity_id (this line’s id)
+							priceCycleBandId, // price_cycle_band_id
+							unitPrice, // unit_price (numeric(12,3))
+							overridden, // is_price_overridden
+							dto.getCreatedBy(), // created_by
+							dto.getCreatedBy() // modified_by (you can use same user)
+					);
+				}
+			}
+
+		}
+
+		return invoiceId;
+	}
+
+	/** Helpers */
+	private static BigDecimal nvl(BigDecimal v) {
+		return v != null ? v : BigDecimal.ZERO;
+	}
+
+	private static BigDecimal toBD(Integer v) {
+		return v != null ? BigDecimal.valueOf(v.longValue()) : BigDecimal.ZERO;
+	}
+
+	@Override
+	public UUID saveTransaction(TransactionDTO dto) {
+		// Inside TransactionDAOImpl.saveTransaction(TransactionDTO dto)
+
+		UUID transactionId = UUID.randomUUID();
+
+		// 1) Insert transaction header (now also sets created_by)
+		String sql = """
+				    INSERT INTO transaction.transaction (
+				        transaction_id, client_agreement_id, client_payment_transaction_id,
+				        level_id, invoice_id, transaction_date, created_on, created_by
+				    ) VALUES (?, ?, ?, ?, ?, ?, NOW(), ?)
+				""";
+
+		cluboneJdbcTemplate.update(sql, transactionId, dto.getClientAgreementId(), dto.getClientPaymentTransactionId(),
+				dto.getLevelId(), dto.getInvoiceId(), dto.getTransactionDate(), dto.getCreatedBy() // <-- added
+		);
+
+		// 2) Resolve BUNDLE type id once (for header detection)
+		UUID bundleTypeId = cluboneJdbcTemplate.queryForObject(
+				"SELECT entity_type_id FROM transaction.lu_entity_type WHERE LOWER(entity_type) = LOWER('BUNDLE')",
+				UUID.class);
+
+		// We'll remember the last bundle header's TE id
+		UUID lastBundleHeaderId = null;
+
+		for (TransactionEntityDTO entity : dto.getLineItems()) {
+			UUID teId = UUID.randomUUID();
+
+			// Decide parent: if caller didn't set it and we have a recent bundle header,
+			// attach to it
+			UUID parentIdToUse = entity.getParentTransactionEntityId();
+			boolean isBundleHeader = bundleTypeId.equals(entity.getEntityTypeId());
+			if (parentIdToUse == null && lastBundleHeaderId != null && !isBundleHeader) {
+				parentIdToUse = lastBundleHeaderId;
+			}
+
+			String entitySql = """
+					    INSERT INTO transaction.transaction_entity (
+					        transaction_entity_id, parent_transaction_entity_id, transaction_id,
+					        entity_type_id, entity_id, entity_description,
+					        quantity, unit_price, discount_amount, tax_amount, total_amount,
+					        created_on, created_by
+					    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?)
+					""";
+
+			cluboneJdbcTemplate.update(entitySql, teId, parentIdToUse, transactionId, entity.getEntityTypeId(),
+					entity.getEntityId(), entity.getEntityDescription(), entity.getQuantity(), entity.getUnitPrice(),
+					entity.getDiscountAmount(), entity.getTaxAmount(), entity.getTotalAmount(), dto.getCreatedBy() // <--
+																													// added
+			);
+
+			// If this row is a BUNDLE header, remember it so subsequent rows attach to it
+			if (isBundleHeader) {
+				lastBundleHeaderId = teId;
+			}
+
+			// 3) Taxes (null-safe) — also include created_by
+			if (entity.getTaxes() != null && !entity.getTaxes().isEmpty()) {
+				for (TransactionEntityTaxDTO tax : entity.getTaxes()) {
+					UUID taxId = UUID.randomUUID();
+					String taxSql = """
+							    INSERT INTO transaction.transaction_entity_tax (
+							        transaction_entity_tax_id, transaction_entity_id, tax_rate_id,
+							        tax_rate, tax_amount, created_on, created_by
+							    ) VALUES (?, ?, ?, ?, ?, NOW(), ?)
+							""";
+					cluboneJdbcTemplate.update(taxSql, taxId, teId, tax.getTaxRateId(), tax.getTaxRate(),
+							tax.getTaxAmount(), dto.getCreatedBy() // <-- added
+					);
+				}
+			}
+		}
+
+		return transactionId;
+
+	}
+
+	@Override
+	public String findInvoiceNumber(UUID invoiceId) {
+		return cluboneJdbcTemplate.queryForObject("SELECT invoice_number FROM transaction.invoice WHERE invoice_id = ?",
+				String.class, invoiceId);
+	}
+
+	@Override
+	public UUID findTransactionIdByInvoiceId(UUID invoiceId) {
+		List<UUID> ids = cluboneJdbcTemplate.query("""
+				    SELECT transaction_id FROM transaction.transaction WHERE invoice_id = ?
+				""", (rs, rn) -> UUID.fromString(rs.getString(1)), invoiceId);
+		return ids.isEmpty() ? null : ids.get(0);
+	}
+
+	@Override
+	public UUID findClientPaymentTxnIdByTransactionId(UUID transactionId) {
+		return cluboneJdbcTemplate.queryForObject("""
+				    SELECT client_payment_transaction_id
+				      FROM transaction.transaction
+				     WHERE transaction_id = ?
+				""", UUID.class, transactionId);
+	}
+
+	@Override
+	public UUID findInvoiceStatusIdByName(String statusName) {
+		return cluboneJdbcTemplate.queryForObject("""
+				    SELECT invoice_status_id
+				      FROM transaction.lu_invoice_status
+				     WHERE status_name = ?
+				""", UUID.class, statusName);
+	}
+
+	@Override
+	public void updateInvoiceStatusAndPaidFlag(UUID invoiceId, UUID statusId, boolean paid, UUID modifiedBy) {
+		cluboneJdbcTemplate.update("""
+				    UPDATE transaction.invoice
+				       SET invoice_status_id = ?, is_paid = ?, modified_on = NOW(), modified_by = ?
+				     WHERE invoice_id = ?
+				""", statusId, paid, modifiedBy, invoiceId);
+	}
+
+	@Override
+	public String currentInvoiceStatusName(UUID invoiceId) {
+		return cluboneJdbcTemplate.queryForObject("""
+				    SELECT s.status_name
+				      FROM transaction.invoice i
+				      JOIN transaction.lu_invoice_status s ON s.invoice_status_id = i.invoice_status_id
+				     WHERE i.invoice_id = ?
+				""", String.class, invoiceId);
+	}
+
+	@Override
+	public List<BundleComponent> findBundleComponents(UUID bundleId) {
+		// TODO Auto-generated method stub
+		return null;
+	}
+
+	@Override
+	public UUID findEntityTypeIdByName(String name) {
+		String sql = """
+				    SELECT entity_type_id
+				    FROM transaction.lu_entity_type
+				    WHERE LOWER(entity_type) = LOWER(?)
+				      AND is_active = true
+				    LIMIT 1
+				""";
+		return cluboneJdbcTemplate.queryForObject(sql, UUID.class, name);
+	}
+
+	private static final String SQL = """
+						WITH RECURSIVE ancestors AS (
+			  SELECT l.level_id, l.parent_level_id, 0 AS depth
+			  FROM location.levels l
+			  WHERE l.level_id = ?
+			  UNION ALL
+			  SELECT p.level_id, p.parent_level_id, a.depth + 1
+			  FROM location.levels p
+			  JOIN ancestors a ON a.parent_level_id = p.level_id
+			),
+			level_candidates AS (
+			  SELECT level_id, depth FROM ancestors
+			  UNION ALL
+			  SELECT NULL::uuid AS level_id, 100000 AS depth
+			)
+			SELECT DISTINCT
+			  b.description,
+			  bi.item_id,
+			  i.item_description,
+			  bi.item_quantity,
+			  ip.price AS "itemPrice",
+			  i.tax_group_id,
+			  eff_bp.price,
+			  biro.is_continuous,
+			  birr.recurrence_count,
+			  eff_bp.price_level_id
+			FROM bundles_new.bundle b
+			JOIN bundles_new.bundle_location bl
+			  ON bl.bundle_id = b.bundle_id
+			JOIN bundles_new.bundle_item bi
+			  ON bi.bundle_id = b.bundle_id
+			LEFT JOIN bundles_new.bundle_item_recurring_option biro
+			  ON biro.bundle_item_id = bi.bundle_item_id
+			LEFT JOIN bundles_new.bundle_item_recurring_recurrence birr
+			  ON birr.recurring_option_id = biro.recurring_option_id
+
+			LEFT JOIN LATERAL (
+			  SELECT bp.price,
+			         blp.level_id AS price_level_id
+			  FROM bundles_new.bundle_price bp
+			 JOIN bundles_new.bundle_location blp
+			    ON blp.bundle_location_id = bp.bundle_location_id
+			   AND blp.bundle_id = b.bundle_id           -- keep it within this bundle
+			  JOIN level_candidates lc
+			    ON (blp.level_id = lc.level_id) OR (blp.level_id IS NULL AND lc.level_id IS NULL)
+			  WHERE bp.bundle_item_id = bi.bundle_item_id
+			  ORDER BY lc.depth ASC
+			  LIMIT 1
+			) eff_bp ON TRUE
+
+			JOIN items.item i
+			  ON i.item_id = bi.item_id
+			JOIN items.item_price ip
+			  ON ip.item_id = i.item_id
+
+			WHERE b.bundle_id = ?
+			  AND bl.level_id IN (SELECT level_id FROM ancestors);
+						""";
+
+	private static final RowMapper<BundleItemPriceDTO> ROW_MAPPER = new RowMapper<>() {
+		@Override
+		public BundleItemPriceDTO mapRow(ResultSet rs, int rowNum) throws SQLException {
+			String description = rs.getString("description");
+			UUID itemId = (UUID) rs.getObject("item_id");
+			String itemDescription = rs.getString("item_description");
+
+			BigDecimal itemQuantity = rs.getBigDecimal("item_quantity");
+			BigDecimal itemPrice = rs.getBigDecimal("itemPrice"); // alias from SQL
+			UUID taxGroupId = (UUID) rs.getObject("tax_group_id");
+			BigDecimal bundlePrice = rs.getBigDecimal("price"); // bp.price
+
+			Boolean isContinuous = (Boolean) rs.getObject("is_continuous"); // handles nullable boolean
+			Integer recurrenceCount = (Integer) rs.getObject("recurrence_count"); // handles nullable int
+
+			return new BundleItemPriceDTO(description, itemId, itemDescription, itemQuantity, itemPrice, taxGroupId,
+					bundlePrice, isContinuous, recurrenceCount);
+		}
+	};
+
+	@Override
+	public List<BundleItemPriceDTO> getBundleItemsWithPrices(UUID bundleId, UUID levelId) {
+		return cluboneJdbcTemplate.query(SQL, ROW_MAPPER, levelId, bundleId);
+	}
+
+	private static final RowMapper<EntityTypeDTO> ENTITY_TYPE_ROW_MAPPER = new RowMapper<>() {
+		@Override
+		public EntityTypeDTO mapRow(ResultSet rs, int rowNum) throws SQLException {
+			return new EntityTypeDTO(rs.getString("entity_type"));
+		}
+	};
+
+	@Override
+	public Optional<EntityTypeDTO> getEntityTypeById(UUID entityTypeId) {
+		return cluboneJdbcTemplate.query(ENTITY_TYPE_SQL, ENTITY_TYPE_ROW_MAPPER, entityTypeId).stream().findFirst();
+	}
+
+	private static final RowMapper<ItemPriceDTO> ITEM_PRICE_ROW_MAPPER = new RowMapper<>() {
+		@Override
+		public ItemPriceDTO mapRow(ResultSet rs, int rowNum) throws SQLException {
+			ItemPriceDTO dto = new ItemPriceDTO();
+			dto.setItemDescription(rs.getString("item_description"));
+			dto.setItemPrice(rs.getBigDecimal("itemPrice"));
+			dto.setTaxGroupId((UUID) rs.getObject("tax_group_id"));
+			return dto;
+		}
+	};
+
+	@Override
+	public Optional<ItemPriceDTO> getItemPriceByItemAndLevel(UUID itemId, UUID levelId) {
+		return cluboneJdbcTemplate.query(ITEM_PRICE_SQL, ITEM_PRICE_ROW_MAPPER, levelId, itemId, itemId).stream()
+				.findFirst();
+	}
+
+	@Override
+	public UUID saveTransactionV3(TransactionDTO dto) {
+		// Inside TransactionDAOImpl.saveTransaction(TransactionDTO dto)
+
+		UUID transactionId = UUID.randomUUID();
+
+		// 1) Insert transaction header (now also sets created_by)
+		String sql = """
+				    INSERT INTO transaction.transaction (
+				        transaction_id, client_agreement_id, client_payment_transaction_id,
+				        level_id, invoice_id, transaction_date, created_on, created_by
+				    ) VALUES (?, ?, ?, ?, ?, ?, NOW(), ?)
+				""";
+
+		cluboneJdbcTemplate.update(sql, transactionId, dto.getClientAgreementId(), dto.getClientPaymentTransactionId(),
+				dto.getLevelId(), dto.getInvoiceId(), dto.getTransactionDate(), dto.getCreatedBy() // <-- added
+		);
+
+		return transactionId;
+	}
+
+	private static final RowMapper<InvoiceSummaryDTO> INVOICE_SUMMARY_ROW_MAPPER = new RowMapper<>() {
+		@Override
+		public InvoiceSummaryDTO mapRow(ResultSet rs, int rowNum) throws SQLException {
+			InvoiceSummaryDTO dto = new InvoiceSummaryDTO();
+			dto.setClientRoleId((UUID) rs.getObject("client_role_id"));
+			dto.setTotalAmount(rs.getBigDecimal("total_amount"));
+			dto.setLevelId((UUID) rs.getObject("level_id"));
+			return dto;
+		}
+	};
+
+	@Override
+	public Optional<InvoiceSummaryDTO> getInvoiceSummaryById(UUID invoiceId) {
+		return cluboneJdbcTemplate.query(INVOICE_SUMMARY_SQL, INVOICE_SUMMARY_ROW_MAPPER, invoiceId).stream()
+				.findFirst();
+	}
+
+	@Override
+	public int updateClientAgreementId(UUID transactionId, UUID clientAgreementId) {
+		return cluboneJdbcTemplate.update(UPDATE_TRANSACTION_CLIENT_AGREEMENT_SQL, clientAgreementId, transactionId);
+	}
+
+	private static final RowMapper<TaxRateAllocationDTO> TAX_RATE_ROW_MAPPER = new RowMapper<>() {
+		@Override
+		public TaxRateAllocationDTO mapRow(ResultSet rs, int rowNum) throws SQLException {
+			TaxRateAllocationDTO dto = new TaxRateAllocationDTO();
+			dto.setTaxRateId((UUID) rs.getObject("tax_rate_id"));
+			dto.setTaxRatePercentage(rs.getBigDecimal("tax_rate_percentage"));
+			return dto;
+		}
+	};
+
+	@Override
+	public List<TaxRateAllocationDTO> getTaxRatesByGroupAndLevel(UUID taxGroupId, UUID levelId) {
+		return cluboneJdbcTemplate.query(TAX_RATE_SQL, TAX_RATE_ROW_MAPPER, taxGroupId);
+	}
+
+	@Override
+	public List<InvoiceFlatRow> findInvoicesWithLatestTxnByClientRole(UUID clientRoleId) {
+		String sql = """
+				SELECT
+				    i.invoice_id,
+				    i.invoice_number,
+				    i.invoice_date::date AS invoice_date,
+				    i.total_amount,
+				    i.sub_total,
+				    i.tax_amount,
+				    i.discount_amount,
+				    lt.transaction_code,
+				    lt.client_agreement_id,
+				    lt.client_payment_transaction_id,
+				    lt.transaction_date
+				FROM "transaction".invoice i
+				LEFT JOIN (
+				    SELECT DISTINCT ON (t.invoice_id)
+				        t.invoice_id,
+				        t.transaction_code,
+				        t.client_agreement_id,
+				        t.client_payment_transaction_id,
+				        t.transaction_date
+				    FROM "transaction"."transaction" t
+				    ORDER BY t.invoice_id, t.transaction_date DESC NULLS LAST
+				) lt ON lt.invoice_id = i.invoice_id
+				WHERE i.client_role_id = ?
+				""";
+
+		return cluboneJdbcTemplate.query(sql, (rs, rowNum) -> mapInvoiceFlatRow(rs), clientRoleId);
+	}
+
+	@Override
+	public List<InvoiceEntityRow> findEntitiesByInvoiceIds(List<UUID> invoiceIds) {
+		if (invoiceIds.isEmpty()) {
+			return Collections.emptyList();
+		}
+
+		// Build a dynamic IN clause (?, ?, ?, ...)
+		String inSql = String.join(",", Collections.nCopies(invoiceIds.size(), "?"));
+		String sql = """
+				SELECT
+				    ie.invoice_id,
+				    ie.invoice_entity_id,
+				    ie.parent_invoice_entity_id,
+				    ie.entity_description,
+				    ie.entity_id,
+				    ie.quantity,
+				    ie.unit_price,
+				    ie.discount_amount,
+				    ie.tax_amount,
+				    ie.total_amount
+				FROM "transaction".invoice_entity ie
+				WHERE ie.invoice_id IN (%s)
+				ORDER BY ie.parent_invoice_entity_id NULLS FIRST, ie.invoice_entity_id
+				""".formatted(inSql);
+
+		return cluboneJdbcTemplate.query(sql, (rs, rowNum) -> mapInvoiceEntityRow(rs), invoiceIds.toArray());
+	}
+
+	private InvoiceFlatRow mapInvoiceFlatRow(ResultSet rs) throws SQLException {
+		InvoiceFlatRow r = new InvoiceFlatRow();
+		r.setInvoiceId(UUID.fromString(rs.getString("invoice_id")));
+		r.setInvoiceNumber(rs.getString("invoice_number"));
+		r.setInvoiceDate(rs.getDate("invoice_date").toLocalDate());
+		r.setTotalAmount(rs.getBigDecimal("total_amount"));
+		r.setSubTotal(rs.getBigDecimal("sub_total"));
+		r.setTaxAmount(rs.getBigDecimal("tax_amount"));
+		r.setDiscountAmount(rs.getBigDecimal("discount_amount"));
+		r.setTransactionCode(rs.getString("transaction_code"));
+
+		String ca = rs.getString("client_agreement_id");
+		r.setClientAgreementId(ca == null ? null : UUID.fromString(ca));
+
+		String cpt = rs.getString("client_payment_transaction_id");
+		r.setClientPaymentTransactionId(cpt == null ? null : UUID.fromString(cpt));
+
+		OffsetDateTime odt = rs.getObject("transaction_date", OffsetDateTime.class);
+		r.setTransactionDate(odt);
+		return r;
+	}
+
+	private InvoiceEntityRow mapInvoiceEntityRow(ResultSet rs) throws SQLException {
+		InvoiceEntityRow r = new InvoiceEntityRow();
+		r.setInvoiceId(UUID.fromString(rs.getString("invoice_id")));
+		r.setInvoiceEntityId(UUID.fromString(rs.getString("invoice_entity_id")));
+
+		String parent = rs.getString("parent_invoice_entity_id");
+		r.setParentInvoiceEntityId(parent == null ? null : UUID.fromString(parent));
+
+		r.setEntityDescription(rs.getString("entity_description"));
+
+		String entId = rs.getString("entity_id");
+		r.setEntityId(entId == null ? null : UUID.fromString(entId));
+
+		r.setQuantity(rs.getBigDecimal("quantity"));
+		r.setUnitPrice(rs.getBigDecimal("unit_price"));
+		r.setDiscountAmount(rs.getBigDecimal("discount_amount"));
+		r.setTaxAmount(rs.getBigDecimal("tax_amount"));
+		r.setTotalAmount(rs.getBigDecimal("total_amount"));
+		return r;
+	}
+
+	@Override
+	public UUID findTaxGroupIdForItem(UUID itemId, UUID levelId) {
+		// Look for item_price scoped to given level
+		final String sql = """
+				    SELECT i.tax_group_id
+				    FROM items.item_price ip
+				    JOIN items.item i ON i.item_id = ip.item_id
+				    WHERE ip.item_id = ?
+				      AND ip.level_id = ?
+				      AND COALESCE(ip.is_active, true) = true
+				      AND (ip.valid_from IS NULL OR ip.valid_from <= now())
+				      AND (ip.valid_to IS NULL OR ip.valid_to >= now())
+				    ORDER BY ip.created_on DESC
+				    LIMIT 1
+				""";
+
+		UUID tg = firstUuid(sql, itemId, levelId);
+		if (tg != null)
+			return tg;
+
+		// fallback: no level-specific row, get default item.tax_group_id
+		final String fallback = """
+				    SELECT i.tax_group_id
+				    FROM items.item i
+				    WHERE i.item_id = ?
+				    LIMIT 1
+				""";
+		return firstUuid(fallback, itemId);
+	}
+
+	private UUID firstUuid(String sql, Object... params) {
+		try {
+			List<UUID> list = cluboneJdbcTemplate.query(sql, ps -> {
+				for (int i = 0; i < params.length; i++) {
+					ps.setObject(i + 1, params[i]);
+				}
+			}, (rs, rn) -> {
+				try {
+					return rs.getObject(1, UUID.class);
+				} catch (Throwable ignore) {
+					Object o = rs.getObject(1);
+					return (o == null) ? null : (o instanceof UUID ? (UUID) o : UUID.fromString(o.toString()));
+				}
+			});
+			return (list == null || list.isEmpty()) ? null : list.get(0);
+		} catch (DataAccessException dae) {
+			return null;
+		}
+	}
+
+	@Override
+	public Optional<DiscountDetailDTO> findBestDiscountForItemByIds(UUID itemId, UUID levelId, List<UUID> discountIds) {
+		if (discountIds == null || discountIds.isEmpty())
+			return Optional.empty();
+
+		String inPlaceholders = discountIds.stream().map(x -> "?").collect(java.util.stream.Collectors.joining(", "));
+
+		final String sql = """
+						SELECT
+				d.discount_id,
+				d.calculation_type_id,
+				d.adjustment_type_id,
+				ct.name           AS calc_name,
+				d.adjustment_amount,
+				d.min_discount_percent,
+				d.max_discount_percent,
+				di.item_id,
+				d.apply_to_level_id,
+				d.created_on FROM discount.discount d
+						LEFT JOIN discount.discount_item di
+						       ON di.discount_id = d.discount_id
+						      AND COALESCE(di.is_active, true) = true
+						      AND di.item_id = ?
+						JOIN discount.lu_calculation_type ct
+						      ON ct.calculation_type_id = d.calculation_type_id
+						WHERE d.discount_id IN (%s)
+						  AND COALESCE(d.is_active, true) = true
+						  AND d.start_date <= CURRENT_DATE
+						  AND (d.end_date IS NULL OR d.end_date >= CURRENT_DATE)
+						  AND (d.apply_to_level_id IS NULL OR d.apply_to_level_id = ?)
+						  AND (d.available_for_any_item = true OR di.item_id IS NOT NULL)
+						ORDER BY
+						  CASE WHEN di.item_id IS NOT NULL THEN 0 ELSE 1 END,      -- item-specific first
+						  CASE WHEN d.apply_to_level_id = ? THEN 0
+						       WHEN d.apply_to_level_id IS NULL THEN 1 ELSE 2 END, -- exact level match first
+						  d.created_on DESC
+						LIMIT 1
+						""".formatted(inPlaceholders); // or String.format(...)
+
+		// Bind: itemId, <discountIds...>, levelId, levelId
+		java.util.List<Object> params = new java.util.ArrayList<>();
+		params.add(itemId);
+		params.addAll(discountIds);
+		params.add(levelId);
+		params.add(levelId);
+
+		try {
+			java.util.List<DiscountDetailDTO> out = cluboneJdbcTemplate.query(sql, params.toArray(),
+					(rs, rn) -> mapDiscount(rs));
+			return (out == null || out.isEmpty()) ? Optional.empty() : java.util.Optional.of(out.get(0));
+		} catch (org.springframework.dao.DataAccessException e) {
+			return Optional.empty();
+		}
+	}
+
+	/** Map row to DiscountDetailDTO with calc-name interpretation. */
+	private DiscountDetailDTO mapDiscount(ResultSet rs) throws SQLException {
+		DiscountDetailDTO dto = new DiscountDetailDTO();
+		dto.setDiscountId(rs.getObject("discount_id", UUID.class));
+		dto.setCalculationTypeId(rs.getObject("calculation_type_id", UUID.class));
+		dto.setAdjustmentTypeId(rs.getObject("adjustment_type_id", UUID.class));
+
+		String calcName = rs.getString("calc_name"); // "Percentage Based", "Amount Based - Quantity Price", "Amount
+														// Based - Total Price"
+		BigDecimal adj = rs.getBigDecimal("adjustment_amount");
+		BigDecimal minP = rs.getBigDecimal("min_discount_percent");
+		BigDecimal maxP = rs.getBigDecimal("max_discount_percent");
+
+		if ("Percentage Based".equalsIgnoreCase(calcName)) {
+			BigDecimal pct = (adj == null ? BigDecimal.ZERO : adj);
+			if (minP != null && pct.compareTo(minP) < 0)
+				pct = minP;
+			if (maxP != null && pct.compareTo(maxP) > 0)
+				pct = maxP;
+			dto.setCalculationMode(CalculationMode.PERCENTAGE);
+			dto.setDiscountRate(scale2(pct));
+			dto.setDiscountAmount(null);
+		} else if ("Amount Based - Quantity Price".equalsIgnoreCase(calcName)) {
+			dto.setCalculationMode(CalculationMode.AMOUNT_PER_QTY);
+			dto.setDiscountRate(null);
+			dto.setDiscountAmount(scale2(adj));
+		} else { // Amount Based - Total Price
+			dto.setCalculationMode(CalculationMode.AMOUNT_PER_LINE);
+			dto.setDiscountRate(null);
+			dto.setDiscountAmount(scale2(adj));
+		}
+		return dto;
+	}
+
+	private static BigDecimal scale2(BigDecimal v) {
+		return v == null ? null : v.setScale(2, java.math.RoundingMode.HALF_UP);
+	}
+
+	private static final RowMapper<BundlePriceCycleBandDTO> BUNDLE_PRICE_CYCLE_ROW_MAPPER = new RowMapper<>() {
+		@Override
+		public BundlePriceCycleBandDTO mapRow(ResultSet rs, int rowNum) throws SQLException {
+			BigDecimal unitPrice = rs.getBigDecimal("unit_price");
+			Integer downPaymentUnits = (Integer) rs.getObject("down_payment_units"); // handles NULLs
+			return new BundlePriceCycleBandDTO(unitPrice, downPaymentUnits);
+		}
+	};
+
+	@Override
+	public List<BundlePriceCycleBandDTO> findByPriceCycleBandId(UUID priceCycleBandId) {
+		return cluboneJdbcTemplate.query(BUNDLE_PRICE_BAND_SQL, BUNDLE_PRICE_CYCLE_ROW_MAPPER, priceCycleBandId);
+	}
+
+}
