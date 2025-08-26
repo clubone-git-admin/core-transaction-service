@@ -20,16 +20,13 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.CollectionUtils;
-
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
 import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.request.CreateInvoiceRequest;
 import io.clubone.transaction.request.CreateInvoiceRequestV3;
 import io.clubone.transaction.request.CreateTransactionRequest;
 import io.clubone.transaction.request.FinalizeTransactionRequest;
-import io.clubone.transaction.request.InvoiceResponseDTO;
 import io.clubone.transaction.request.InvoiceResponseDTO;
 import io.clubone.transaction.request.TransactionLineItemRequest;
 import io.clubone.transaction.response.CreateInvoiceResponse;
@@ -188,7 +185,7 @@ public class TransactionServiceImpl implements TransactionService {
 		if (existingTxn != null) {
 			UUID existingCpt = transactionDAO.findClientPaymentTxnIdByTransactionId(existingTxn);
 			String status = transactionDAO.currentInvoiceStatusName(req.getInvoiceId());
-			return new FinalizeTransactionResponse(req.getInvoiceId(), status, existingCpt, existingTxn);
+			return new FinalizeTransactionResponse(req.getInvoiceId(), status, existingCpt, existingTxn, "");
 		}
 
 		// Validate totals vs line items
@@ -308,7 +305,7 @@ public class TransactionServiceImpl implements TransactionService {
 		UUID paidStatusId = transactionDAO.findInvoiceStatusIdByName("PAID");
 		transactionDAO.updateInvoiceStatusAndPaidFlag(req.getInvoiceId(), paidStatusId, true, req.getCreatedBy());
 
-		return new FinalizeTransactionResponse(req.getInvoiceId(), "PAID", clientPaymentTransactionId, transactionId);
+		return new FinalizeTransactionResponse(req.getInvoiceId(), "PAID", clientPaymentTransactionId, transactionId, "");
 	}
 
 	@Override
@@ -499,15 +496,19 @@ public class TransactionServiceImpl implements TransactionService {
 		if (existingTxn != null) {
 			UUID existingCpt = transactionDAO.findClientPaymentTxnIdByTransactionId(existingTxn);
 			String status = transactionDAO.currentInvoiceStatusName(req.getInvoiceId());
-			return new FinalizeTransactionResponse(req.getInvoiceId(), status, existingCpt, existingTxn);
+			return new FinalizeTransactionResponse(req.getInvoiceId(), status, existingCpt, existingTxn, "");
 		}
 
 		Optional<InvoiceSummaryDTO> invoiceSummary = transactionDAO.getInvoiceSummaryById(req.getInvoiceId());
 		if (invoiceSummary.isPresent() && invoiceSummary.get() != null) {
 			req.setClientRoleId(invoiceSummary.get().getClientRoleId());
 			req.setTotalAmount(invoiceSummary.get().getTotalAmount());
+			if(req.getAmountToPayNow().compareTo(req.getTotalAmount())==0) {
+				return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null, "Price not matching with invoice created");
+			}
 			req.setLevelId(invoiceSummary.get().getLevelId());
 		}
+		
 		// Validate totals vs line items
 		/*
 		 * BigDecimal lineSum =
@@ -555,7 +556,7 @@ public class TransactionServiceImpl implements TransactionService {
 		System.out.println("paidStatusId " + paidStatusId);
 		transactionDAO.updateInvoiceStatusAndPaidFlag(req.getInvoiceId(), paidStatusId, true, req.getCreatedBy());
 
-		return new FinalizeTransactionResponse(req.getInvoiceId(), "PAID", clientPaymentTransactionId, transactionId);
+		return new FinalizeTransactionResponse(req.getInvoiceId(), "PAID", clientPaymentTransactionId, transactionId, "");
 	}
 
 	@Override

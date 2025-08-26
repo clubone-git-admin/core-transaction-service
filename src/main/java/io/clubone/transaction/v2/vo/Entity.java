@@ -1,5 +1,6 @@
 package io.clubone.transaction.v2.vo;
 
+import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
 
@@ -9,8 +10,9 @@ import lombok.Data;
 @Data
 public class Entity {
 
-	private String type;
+	private UUID entityTypeId;
 	private UUID entityId;
+	private LocalDate startDate;
 	private Integer quantity;
 	List<UUID> discountIds;
 	private UUID promotionId;

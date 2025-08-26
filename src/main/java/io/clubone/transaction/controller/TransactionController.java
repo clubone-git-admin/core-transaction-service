@@ -3,6 +3,8 @@ package io.clubone.transaction.controller;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -30,80 +32,80 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public class TransactionController {
 
-    private final TransactionService transactionService;
+	private final TransactionService transactionService;
 
-    @PostMapping("/invoice")
-    public ResponseEntity<Map<String, Object>> createInvoice(@RequestBody InvoiceDTO dto) {
-        UUID invoiceId = transactionService.createInvoice(dto);
-        return ResponseEntity.ok(Map.of("invoiceId", invoiceId));
-    }
+	@PostMapping("/invoice")
+	public ResponseEntity<Map<String, Object>> createInvoice(@RequestBody InvoiceDTO dto) {
+		UUID invoiceId = transactionService.createInvoice(dto);
+		return ResponseEntity.ok(Map.of("invoiceId", invoiceId));
+	}
 
-    @PostMapping("/transaction")
-    public ResponseEntity<Map<String, Object>> createTransaction(@RequestBody TransactionDTO dto) {
-        UUID txnId = transactionService.createTransaction(dto);
-        return ResponseEntity.ok(Map.of("transactionId", txnId));
-    }
-    
-    @PostMapping("/finalize")
-    public ResponseEntity<CreateTransactionResponse> createAndFinalizeTransaction(
-            @RequestBody CreateTransactionRequest request) {
+	@PostMapping("/transaction")
+	public ResponseEntity<Map<String, Object>> createTransaction(@RequestBody TransactionDTO dto) {
+		UUID txnId = transactionService.createTransaction(dto);
+		return ResponseEntity.ok(Map.of("transactionId", txnId));
+	}
 
-    	UUID transactionId = transactionService.createAndFinalizeTransaction(request);
-        return ResponseEntity.ok(new CreateTransactionResponse(transactionId));
-    }
-    
-    /**
-     * Step 1: Create an invoice with status = PENDING_PAYMENT
-     */
-    @PostMapping("v2/invoice")
-    public ResponseEntity<CreateInvoiceResponse> createInvoice(@RequestBody CreateInvoiceRequest request) {
-        CreateInvoiceResponse response = transactionService.createInvoice(request);
-        return ResponseEntity.ok(response);
-    }
+	@PostMapping("/finalize")
+	public ResponseEntity<CreateTransactionResponse> createAndFinalizeTransaction(
+			@RequestBody CreateTransactionRequest request) {
 
-    /**
-     * Step 2: Finalize transaction after payment is completed
-     */
-    @PostMapping("v2/finalize")
-    public ResponseEntity<FinalizeTransactionResponse> finalizeTransaction(
-            @RequestBody FinalizeTransactionRequest request) {
-        FinalizeTransactionResponse response = transactionService.finalizeTransaction(request);
-        return ResponseEntity.ok(response);
-    }
-    
-    @PostMapping("v3/invoice")
-    public ResponseEntity<CreateInvoiceResponse> createInvoiceV3(@RequestBody CreateInvoiceRequestV3 request) {
-        CreateInvoiceResponse response = transactionService.createInvoiceV3(request);
-        return ResponseEntity.ok(response);
-    }
+		UUID transactionId = transactionService.createAndFinalizeTransaction(request);
+		return ResponseEntity.ok(new CreateTransactionResponse(transactionId));
+	}
 
-    /**
-     * Step 2: Finalize transaction after payment is completed
-     */
-    @PostMapping("v3/finalize")
-    public ResponseEntity<FinalizeTransactionResponse> finalizeTransactionv3(
-            @RequestBody FinalizeTransactionRequest request) {
-        FinalizeTransactionResponse response = transactionService.finalizeTransactionV3(request);
-        return ResponseEntity.ok(response);
-    }
-    
-    @PutMapping("/{transactionId}/client-agreement/{clientAgreementId}")
-    public ResponseEntity<?> updateClientAgreementPath(
-            @PathVariable UUID transactionId,
-            @PathVariable UUID clientAgreementId) {
+	/**
+	 * Step 1: Create an invoice with status = PENDING_PAYMENT
+	 */
+	@PostMapping("v2/invoice")
+	public ResponseEntity<CreateInvoiceResponse> createInvoice(@RequestBody CreateInvoiceRequest request) {
+		CreateInvoiceResponse response = transactionService.createInvoice(request);
+		return ResponseEntity.ok(response);
+	}
 
-        boolean updated = transactionService.setClientAgreement(transactionId, clientAgreementId);
-        if (!updated) {
-            return ResponseEntity.notFound().build();
-        }
-        return ResponseEntity.ok(Map.of(
-                "transactionId", transactionId,
-                "clientAgreementId", clientAgreementId,
-                "status", "UPDATED"));
-    }
-    
-    @GetMapping("/invoice/{clientRoleId}")
-    public List<InvoiceResponseDTO> getInvoicesByClient(@PathVariable("clientRoleId") UUID clientRoleId) {
-        return transactionService.getInvoicesByClientRole(clientRoleId);
-    }
+	/**
+	 * Step 2: Finalize transaction after payment is completed
+	 */
+	@PostMapping("v2/finalize")
+	public ResponseEntity<FinalizeTransactionResponse> finalizeTransaction(
+			@RequestBody FinalizeTransactionRequest request) {
+		FinalizeTransactionResponse response = transactionService.finalizeTransaction(request);
+		return ResponseEntity.ok(response);
+	}
+
+	@PostMapping("v3/invoice")
+	public ResponseEntity<CreateInvoiceResponse> createInvoiceV3(@RequestBody CreateInvoiceRequestV3 request) {
+		CreateInvoiceResponse response = transactionService.createInvoiceV3(request);
+		return ResponseEntity.ok(response);
+	}
+
+	/**
+	 * Step 2: Finalize transaction after payment is completed
+	 */
+	@PostMapping("v3/finalize")
+	public ResponseEntity<FinalizeTransactionResponse> finalizeTransactionv3(
+			@RequestBody FinalizeTransactionRequest request) {
+		FinalizeTransactionResponse response = transactionService.finalizeTransactionV3(request);
+		if (StringUtils.isEmpty(response.getMessage()))
+			return ResponseEntity.ok(response);
+		else
+			return ResponseEntity.badRequest().body(response);
+	}
+
+	@PutMapping("/{transactionId}/client-agreement/{clientAgreementId}")
+	public ResponseEntity<?> updateClientAgreementPath(@PathVariable UUID transactionId,
+			@PathVariable UUID clientAgreementId) {
+
+		boolean updated = transactionService.setClientAgreement(transactionId, clientAgreementId);
+		if (!updated) {
+			return ResponseEntity.notFound().build();
+		}
+		return ResponseEntity.ok(
+				Map.of("transactionId", transactionId, "clientAgreementId", clientAgreementId, "status", "UPDATED"));
+	}
+
+	@GetMapping("/invoice/{clientRoleId}")
+	public List<InvoiceResponseDTO> getInvoicesByClient(@PathVariable("clientRoleId") UUID clientRoleId) {
+		return transactionService.getInvoicesByClientRole(clientRoleId);
+	}
 }

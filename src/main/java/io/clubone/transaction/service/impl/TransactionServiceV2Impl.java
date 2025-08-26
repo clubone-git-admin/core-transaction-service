@@ -14,6 +14,7 @@ import java.util.function.BiConsumer;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.CollectionUtils;
 
 import io.clubone.transaction.dao.TransactionDAO;
@@ -26,6 +27,7 @@ import io.clubone.transaction.v2.vo.Entity;
 import io.clubone.transaction.v2.vo.InvoiceEntityDiscountDTO;
 import io.clubone.transaction.v2.vo.InvoiceRequest;
 import io.clubone.transaction.v2.vo.Item;
+import io.clubone.transaction.vo.EntityTypeDTO;
 import io.clubone.transaction.vo.InvoiceDTO;
 import io.clubone.transaction.vo.InvoiceEntityDTO;
 import io.clubone.transaction.vo.InvoiceEntityTaxDTO;
@@ -38,6 +40,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	private TransactionDAO transactionDAO;
 
 	@Override
+	@Transactional(rollbackFor = Exception.class)
 	public CreateInvoiceResponse createInvoice(InvoiceRequest request) {
 		final UUID agreementTypeId = transactionDAO.findEntityTypeIdByName("Agreement");
 		final UUID bundleTypeId = transactionDAO.findEntityTypeIdByName("Bundle");
@@ -77,7 +80,9 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 		if (request.getEntities() != null) {
 			for (Entity e : request.getEntities()) {
-				String t = e.getType() == null ? "" : e.getType().trim().toLowerCase();
+				Optional<EntityTypeDTO> entityTypeOpt = transactionDAO.getEntityTypeById(e.getEntityTypeId());
+				String t = entityTypeOpt.get().getEntityType();
+				t=t.toLowerCase();
 
 				switch (t) {
 				case "agreement": {
@@ -90,6 +95,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 					agreement.setUnitPrice(BigDecimal.ZERO);
 					agreement.setDiscountAmount(BigDecimal.ZERO);
 					agreement.setTaxAmount(BigDecimal.ZERO);
+					agreement.setContractStartDate(e.getStartDate());
 					lines.add(agreement);
 
 					if (e.getBundles() != null) {
@@ -140,6 +146,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 					bundle.setUnitPrice(BigDecimal.ZERO);
 					bundle.setDiscountAmount(BigDecimal.ZERO);
 					bundle.setTaxAmount(BigDecimal.ZERO);
+					bundle.setContractStartDate(e.getStartDate());
 
 					lines.add(bundle);
 
@@ -168,7 +175,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 										e.getDiscountIds()); // candidate discount ids
 
 								best.ifPresent(d -> {
-									BigDecimal qty = BigDecimal.valueOf(def(it.getQuantity(), 1));
+									BigDecimal qty = BigDecimal.valueOf(def(itemLine.getQuantity(), 1));
 									BigDecimal lineSub = nz(itemLine.getUnitPrice()).multiply(qty); // base for %
 									BigDecimal discAmt = BigDecimal.ZERO;
 
@@ -327,6 +334,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		System.out.println("buildItemLineFromPayload");
 		line.setEntityId(UUID.randomUUID());
 		line.setParentInvoiceEntityId(parentId);
+		line.setPricePlanTemplateId(it.getPricePlanTemplateId());
 		line.setEntityTypeId(itemTypeId);
 		line.setEntityId(it.getEntityId());
 		line.setEntityDescription("Item");
@@ -346,16 +354,14 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		line.setTaxAmount(BigDecimal.ZERO);
 		line.setUpsellItem(Boolean.TRUE.equals(it.getUpsellItem()));
 
-		/*if (it.getDiscountIds() != null && !it.getDiscountIds().isEmpty()) {
-			List<InvoiceEntityDiscountDTO> discounts = new ArrayList<>();
-			for (UUID dId : it.getDiscountIds()) {
-				InvoiceEntityDiscountDTO d = new InvoiceEntityDiscountDTO();
-				d.setDiscountId(dId);
-				d.setDiscountAmount(BigDecimal.ZERO); // plug discount engine if any
-				discounts.add(d);
-			}
-			line.setDiscounts(discounts);
-		}*/
+		/*
+		 * if (it.getDiscountIds() != null && !it.getDiscountIds().isEmpty()) {
+		 * List<InvoiceEntityDiscountDTO> discounts = new ArrayList<>(); for (UUID dId :
+		 * it.getDiscountIds()) { InvoiceEntityDiscountDTO d = new
+		 * InvoiceEntityDiscountDTO(); d.setDiscountId(dId);
+		 * d.setDiscountAmount(BigDecimal.ZERO); // plug discount engine if any
+		 * discounts.add(d); } line.setDiscounts(discounts); }
+		 */
 
 		return line;
 	}
@@ -382,7 +388,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			return;
 		}
 
-		BigDecimal qty = BigDecimal.valueOf(def(it.getQuantity(), 1));
+		BigDecimal qty = BigDecimal.valueOf(def(line.getQuantity(), 1));
 		BigDecimal base = nz(line.getUnitPrice()).multiply(qty);
 
 		List<InvoiceEntityTaxDTO> taxes = new ArrayList<>();
@@ -429,33 +435,38 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	private static BigDecimal lineSub(InvoiceEntityDTO line) {
 		return nz(line.getUnitPrice()).multiply(BigDecimal.valueOf(def(line.getQuantity(), 1)));
 	}
-	
-	
-	
-	
+
 	// --- small utils ---
-	//private static BigDecimal nz(BigDecimal v) { return v == null ? BigDecimal.ZERO : v; }
-	//private static BigDecimal scale2(BigDecimal v) { return (v == null ? BigDecimal.ZERO : v).setScale(2, RoundingMode.HALF_UP); }
-	private static <T> List<T> nvlList(List<T> v) { return v == null ? Collections.emptyList() : v; }
-	//private static int def(Integer v, int d) { return v == null ? d : v; }
+	// private static BigDecimal nz(BigDecimal v) { return v == null ?
+	// BigDecimal.ZERO : v; }
+	// private static BigDecimal scale2(BigDecimal v) { return (v == null ?
+	// BigDecimal.ZERO : v).setScale(2, RoundingMode.HALF_UP); }
+	private static <T> List<T> nvlList(List<T> v) {
+		return v == null ? Collections.emptyList() : v;
+	}
+	// private static int def(Integer v, int d) { return v == null ? d : v; }
 
 	// Merge discount ids from different scopes without duplicates; order preserved
 	private static List<UUID> mergeDiscountIds(List<UUID>... lists) {
-	    LinkedHashSet<UUID> s = new LinkedHashSet<>();
-	    for (List<UUID> l : lists) if (l != null) s.addAll(l);
-	    return new ArrayList<>(s);
+		LinkedHashSet<UUID> s = new LinkedHashSet<>();
+		for (List<UUID> l : lists)
+			if (l != null)
+				s.addAll(l);
+		return new ArrayList<>(s);
 	}
 
-	/** Promotion precedence: item > bundle > agreement. Returns the first non-null. */
+	/**
+	 * Promotion precedence: item > bundle > agreement. Returns the first non-null.
+	 */
 	private static UUID resolvePromotion(UUID itemPromo, UUID bundlePromo, UUID agreementPromo) {
-	    return itemPromo != null ? itemPromo : (bundlePromo != null ? bundlePromo : agreementPromo);
+		return itemPromo != null ? itemPromo : (bundlePromo != null ? bundlePromo : agreementPromo);
 	}
 
 	/** Compute line-subtotal (gross before adjustments). */
-	/*private static BigDecimal lineSub(InvoiceEntityDTO line) {
-	    BigDecimal q = BigDecimal.valueOf(def(line.getQuantity(), 1));
-	    return nz(line.getUnitPrice()).multiply(q);
-	}*/
-
+	/*
+	 * private static BigDecimal lineSub(InvoiceEntityDTO line) { BigDecimal q =
+	 * BigDecimal.valueOf(def(line.getQuantity(), 1)); return
+	 * nz(line.getUnitPrice()).multiply(q); }
+	 */
 
 }

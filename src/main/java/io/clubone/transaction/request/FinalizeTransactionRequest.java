@@ -18,6 +18,9 @@ public class FinalizeTransactionRequest {
     private BigDecimal subTotal;
     private BigDecimal taxAmount;
     private BigDecimal discountAmount;
+    private BigDecimal amountToPayNow;
+    private BigDecimal recurringAmount;
+    private BigDecimal totalContractAmount;
 
     private String paymentGatewayCode;
     private String paymentMethodCode;

@@ -1,6 +1,7 @@
 package io.clubone.transaction.vo;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
 
@@ -14,7 +15,9 @@ public class InvoiceEntityDTO {
 	private UUID invoiceEntityId;
 	private UUID entityTypeId;
 	private UUID entityId;
+	private UUID pricePlanTemplateId;
 	private String entityDescription;
+	private LocalDate contractStartDate;
 	private int quantity;
 	private BigDecimal unitPrice;
 	private BigDecimal discountAmount;

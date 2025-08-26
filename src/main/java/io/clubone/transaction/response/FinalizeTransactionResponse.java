@@ -11,4 +11,5 @@ public class FinalizeTransactionResponse {
     private String invoiceStatus;
     private UUID clientPaymentTransactionId;
     private UUID transactionId;
+    private String message;
 }
