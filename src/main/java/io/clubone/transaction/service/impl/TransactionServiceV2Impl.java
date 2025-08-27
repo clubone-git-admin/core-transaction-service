@@ -360,24 +360,27 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 		        // Full unit price (2 dp)
 		        BigDecimal fullUnit = scale2(bd(band.getUnitPrice().doubleValue()));
+		        System.out.println("Full Unit "+fullUnit);
 
 		        if (isProrateApplicable) {
 		            // Proration only for Access
-		        	System.out.println("here");
+		        	System.out.println("here "+dpUnits);
 		            LocalDate start = (line.getContractStartDate() != null) ? line.getContractStartDate() : LocalDate.now();
 		            BigDecimal factor = transactionUtils.prorateFactorForCurrentMonth(start);
-		            BigDecimal proratedUnit = scale2(fullUnit.multiply(factor)); // round to 2 dp
+		            BigDecimal proratedUnit = scale2(fullUnit.multiply(factor)); 
+		            System.out.println("proratedUnit "+proratedUnit);// round to 2 dp
 
 		            if (dpUnits <= 1) {
 		                // Only one unit: charge prorated for the current month
 		            	System.out.println("here2");
-		                line.setQuantity(1);
+		                line.setQuantity(dpUnits);
 		                line.setUnitPrice(proratedUnit);
 		            } else {
 		            	System.out.println("here1");
 		                // First unit prorated on the current line
 		            	BigDecimal remainingunitDownPayment=band.getUnitPrice().multiply(BigDecimal.valueOf(dpUnits-1));
-		                line.setQuantity(1);
+		                System.out.println("remainingunitDownPayment "+remainingunitDownPayment);
+		            	line.setQuantity(1);
 		                line.setUnitPrice(proratedUnit.add(remainingunitDownPayment));		               
 		            }
 		        } else {
