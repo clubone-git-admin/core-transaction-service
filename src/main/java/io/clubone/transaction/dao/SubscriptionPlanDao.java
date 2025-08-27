@@ -3,6 +3,7 @@ package io.clubone.transaction.dao;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import io.clubone.transaction.request.SubscriptionPlanCreateRequest;
 import io.clubone.transaction.v2.vo.*;
@@ -81,4 +82,6 @@ public interface SubscriptionPlanDao {
 	UUID subscriptionInstanceStatusId(String code); // from client_subscription_billing.lu_subscription_instance_status
 
 	UUID billingStatusId(String code);
+
+	Optional<UUID> findClientPaymentMethodIdByTransactionId(UUID transactionId);
 }

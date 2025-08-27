@@ -188,8 +188,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    invoice_entity_id, parent_invoice_entity_id, invoice_id,
 				    entity_type_id, entity_id, entity_description,
 				    quantity, unit_price, discount_amount, tax_amount, total_amount,
-				    created_on, created_by
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?)
+				    created_on, created_by,price_plan_template_id,contract_start_date
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?,?,?)
 				""";
 
 		// 4) Insert taxes per entity
@@ -248,7 +248,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 					li.getEntityId(), li.getEntityDescription(), li.getQuantity(), li.getUnitPrice(),
 					li.getDiscountAmount(), li.getTaxAmount(), li.getTotalAmount(), // ensure this equals (qty*unit -
 																					// discount + tax) rounded to 2
-					dto.getCreatedBy() // if you don’t store created_by, replace with null and drop the column
+					dto.getCreatedBy() ,li.getPricePlanTemplateId(),li.getContractStartDate()// if you don’t store created_by, replace with null and drop the column
 			);
 
 			if (isBundleHeader) {
@@ -585,13 +585,13 @@ public class TransactionDAOImpl implements TransactionDAO {
 		// 1) Insert transaction header (now also sets created_by)
 		String sql = """
 				    INSERT INTO transaction.transaction (
-				        transaction_id, client_agreement_id, client_payment_transaction_id,
-				        level_id, invoice_id, transaction_date, created_on, created_by
-				    ) VALUES (?, ?, ?, ?, ?, ?, NOW(), ?)
+				        transaction_id,  client_payment_transaction_id,
+				         invoice_id, transaction_date, created_on, created_by
+				    ) VALUES (?,  ?,  ?, ?, NOW(), ?)
 				""";
 
-		cluboneJdbcTemplate.update(sql, transactionId, dto.getClientAgreementId(), dto.getClientPaymentTransactionId(),
-				dto.getLevelId(), dto.getInvoiceId(), dto.getTransactionDate(), dto.getCreatedBy() // <-- added
+		cluboneJdbcTemplate.update(sql, transactionId,  dto.getClientPaymentTransactionId(),
+				 dto.getInvoiceId(), dto.getTransactionDate(), dto.getCreatedBy() // <-- added
 		);
 
 		return transactionId;

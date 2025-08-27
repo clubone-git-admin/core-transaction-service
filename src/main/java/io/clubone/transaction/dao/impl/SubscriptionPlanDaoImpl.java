@@ -1,6 +1,7 @@
 package io.clubone.transaction.dao.impl;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import io.clubone.transaction.dao.SubscriptionPlanDao;
 import io.clubone.transaction.dao.utils.DaoUtils;
@@ -72,6 +73,16 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 			SELECT subscription_instance_status_id
 			FROM client_subscription_billing.lu_subscription_instance_status
 			WHERE status_name = ? AND COALESCE(is_active, true) = true
+			""";
+
+	private static final String SQL_FIND_CPM_BY_TXN = """
+			    SELECT cpt.client_payment_method_id
+			    FROM client_payments.client_payment_transaction cpt
+			    JOIN "transaction"."transaction" t
+			      ON t.client_payment_transaction_id = cpt.client_payment_transaction_id
+			    WHERE t.transaction_id = ?
+			      AND COALESCE(t.is_active, true) = true
+			    LIMIT 1
 			""";
 
 	@Override
@@ -400,6 +411,16 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 		} catch (EmptyResultDataAccessException ex) {
 			log.error("No billing_status found for code='{}'", code);
 			throw ex;
+		}
+	}
+
+	@Override
+	public Optional<UUID> findClientPaymentMethodIdByTransactionId(UUID transactionId) {
+		try {
+			UUID id = cluboneJdbcTemplate.queryForObject(SQL_FIND_CPM_BY_TXN, UUID.class, transactionId);
+			return Optional.ofNullable(id);
+		} catch (EmptyResultDataAccessException e) {
+			return Optional.empty();
 		}
 	}
 }
