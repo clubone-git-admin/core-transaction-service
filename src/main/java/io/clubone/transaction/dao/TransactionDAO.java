@@ -68,5 +68,7 @@ public interface TransactionDAO {
 	Optional<String> findTypeNameByBundleItemId(UUID bundleItemId);
 	
 	boolean isProrateApplicable(UUID planTemplateId);
+	
+	List<io.clubone.transaction.v2.vo.InvoiceSummaryDTO> findByClientRole(UUID clientRoleId, Integer limit, Integer offset);
 
 }

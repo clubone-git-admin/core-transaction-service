@@ -28,6 +28,7 @@ import io.clubone.transaction.v2.vo.DiscountDetailDTO;
 import io.clubone.transaction.v2.vo.Entity;
 import io.clubone.transaction.v2.vo.InvoiceEntityDiscountDTO;
 import io.clubone.transaction.v2.vo.InvoiceRequest;
+import io.clubone.transaction.v2.vo.InvoiceSummaryDTO;
 import io.clubone.transaction.v2.vo.Item;
 import io.clubone.transaction.vo.EntityTypeDTO;
 import io.clubone.transaction.vo.InvoiceDTO;
@@ -642,4 +643,11 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	 * nz(line.getUnitPrice()).multiply(q); }
 	 */
 
+	 @Override
+	    public List<InvoiceSummaryDTO> listInvoicesByClientRole(UUID clientRoleId, Integer limit, Integer offset) {
+	        if (clientRoleId == null) {
+	            throw new IllegalArgumentException("clientRoleId is required");
+	        }
+	        return transactionDAO.findByClientRole(clientRoleId, limit, offset);
+	    }
 }

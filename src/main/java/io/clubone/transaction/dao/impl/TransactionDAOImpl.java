@@ -4,6 +4,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.time.OffsetDateTime;
 import java.util.Collections;
 import java.util.List;
@@ -119,31 +120,64 @@ public class TransactionDAOImpl implements TransactionDAO {
 			+ "FROM bundles_new.bundle_price_cycle_band " + "WHERE price_cycle_band_id = ?";
 
 	private static final String SQL_TYPE_NAME_BY_BUNDLE_ITEM_ID = """
-		    SELECT lit.type_name
-		    FROM bundles_new.bundle_item bi
-		    JOIN items.item it          ON it.item_id = bi.item_id
-		    JOIN items.lu_itemtypes lit ON lit.item_type_id = it.item_type_id
-		    WHERE bi.bundle_item_id = ?
-		      AND COALESCE(bi.is_active, true) = true
-		    LIMIT 1
-		""";
-	
-	 private static final String SQL_IS_PRORATE_APPLICABLE = """
-		        SELECT EXISTS (
-		            SELECT 1
-		            FROM bundles_new.bundle_plan_template          bpt
-		            JOIN bundles_new.lu_proration_strategy         ps  ON ps.proration_strategy_id = bpt.default_proration_strategy_id
-		            JOIN client_subscription_billing.lu_subscription_frequency sf
-		                                                              ON sf.subscription_frequency_id = bpt.subscription_frequency_id
-		            WHERE bpt.plan_template_id = ?
-		              AND COALESCE(bpt.is_active, true) = true
-		              AND COALESCE(ps.is_active,  true) = true
-		              AND COALESCE(sf.is_active,  true) = true
-		              AND UPPER(ps.code) = 'DAILY'
-		              AND UPPER(sf.frequency_name) = 'MONTHLY'
-		        );
-		    """;
-	
+			    SELECT lit.type_name
+			    FROM bundles_new.bundle_item bi
+			    JOIN items.item it          ON it.item_id = bi.item_id
+			    JOIN items.lu_itemtypes lit ON lit.item_type_id = it.item_type_id
+			    WHERE bi.bundle_item_id = ?
+			      AND COALESCE(bi.is_active, true) = true
+			    LIMIT 1
+			""";
+
+	private static final String SQL_IS_PRORATE_APPLICABLE = """
+			    SELECT EXISTS (
+			        SELECT 1
+			        FROM bundles_new.bundle_plan_template          bpt
+			        JOIN bundles_new.lu_proration_strategy         ps  ON ps.proration_strategy_id = bpt.default_proration_strategy_id
+			        JOIN client_subscription_billing.lu_subscription_frequency sf
+			                                                          ON sf.subscription_frequency_id = bpt.subscription_frequency_id
+			        WHERE bpt.plan_template_id = ?
+			          AND COALESCE(bpt.is_active, true) = true
+			          AND COALESCE(ps.is_active,  true) = true
+			          AND COALESCE(sf.is_active,  true) = true
+			          AND UPPER(ps.code) = 'DAILY'
+			          AND UPPER(sf.frequency_name) = 'MONTHLY'
+			    );
+			""";
+
+	private static final String SQL_INVOICE_SUMMARY = """
+			WITH pay AS (
+			    SELECT t.invoice_id, COALESCE(SUM(cpt.amount)::numeric(10,2), 0)::numeric(10,2) AS paid_amount
+			    FROM "transaction"."transaction" t
+			    JOIN client_payments.client_payment_transaction cpt
+			      ON cpt.client_payment_transaction_id = t.client_payment_transaction_id
+			    GROUP BY t.invoice_id
+			)
+			SELECT
+			    i.invoice_id,
+			    i.invoice_number,
+			    i.invoice_date,
+			    COALESCE(i.total_amount, 0)::numeric(10,2) AS amount,
+			    COALESCE(p.paid_amount, 0)::numeric(10,2)   AS paid_amount,
+			    0::numeric(10,2)                             AS write_off_amount,
+			    GREATEST(
+			        COALESCE(i.total_amount,0) - COALESCE(p.paid_amount,0) - 0,
+			        0
+			    )::numeric(10,2) AS balance_due,
+			    s.status_name,
+			    i.created_by
+			FROM "transaction".invoice i
+			JOIN "transaction".lu_invoice_status s
+			  ON s.invoice_status_id = i.invoice_status_id
+			LEFT JOIN pay p
+			  ON p.invoice_id = i.invoice_id
+			WHERE i.client_role_id = ?
+			  AND COALESCE(i.is_active, true) = true
+			ORDER BY i.invoice_date DESC, i.invoice_number
+			LIMIT COALESCE(?, 100)
+			OFFSET COALESCE(?, 0)
+			""";
+
 	@Override
 	public UUID saveInvoice(InvoiceDTO dto) {
 		UUID invoiceId = UUID.randomUUID();
@@ -934,11 +968,46 @@ public class TransactionDAOImpl implements TransactionDAO {
 			return Optional.empty();
 		}
 	}
-	
-	 @Override
-	    public boolean isProrateApplicable(UUID planTemplateId) {
-	        Boolean ok = cluboneJdbcTemplate.queryForObject(SQL_IS_PRORATE_APPLICABLE, Boolean.class, planTemplateId);
-	        return ok != null && ok;
-	    }
+
+	@Override
+	public boolean isProrateApplicable(UUID planTemplateId) {
+		Boolean ok = cluboneJdbcTemplate.queryForObject(SQL_IS_PRORATE_APPLICABLE, Boolean.class, planTemplateId);
+		return ok != null && ok;
+	}
+
+	@Override
+	public List<io.clubone.transaction.v2.vo.InvoiceSummaryDTO> findByClientRole(UUID clientRoleId, Integer limit, Integer offset) {
+		return cluboneJdbcTemplate.query(SQL_INVOICE_SUMMARY, ps -> {
+			ps.setObject(1, clientRoleId);
+			ps.setObject(2, limit);
+			ps.setObject(3, offset);
+		}, (rs, rn) -> {
+			io.clubone.transaction.v2.vo.InvoiceSummaryDTO dto = new io.clubone.transaction.v2.vo.InvoiceSummaryDTO();
+			dto.setInvoiceId((UUID) rs.getObject("invoice_id"));
+			dto.setInvoiceNumber(rs.getString("invoice_number"));
+
+			Timestamp ts = rs.getTimestamp("invoice_date");
+			dto.setInvoiceDate(ts != null ? ts.toLocalDateTime().toLocalDate() : null);
+
+			dto.setAmount(rs.getBigDecimal("amount"));
+			dto.setBalanceDue(rs.getBigDecimal("balance_due"));
+			dto.setWriteOff(rs.getBigDecimal("write_off_amount"));
+			dto.setStatus(rs.getString("status_name"));
+
+			dto.setCreatedBy((UUID) rs.getObject("created_by"));
+			dto.setSalesRep(null); // No people table in schema; map externally if desired
+
+			// Safety: ensure scale(2)
+			dto.setAmount(s2(dto.getAmount()));
+			dto.setBalanceDue(s2(dto.getBalanceDue()));
+			dto.setWriteOff(s2(dto.getWriteOff()));
+			return dto;
+		});
+	}
+
+	private static BigDecimal s2(BigDecimal v) {
+		return v == null ? null : v.setScale(2, java.math.RoundingMode.HALF_UP);
+		// Frontend can do currency formatting ($) as in the screenshot.
+	}
 
 }
