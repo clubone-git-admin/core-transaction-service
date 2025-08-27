@@ -514,7 +514,7 @@ public class TransactionServiceImpl implements TransactionService {
 		if (invoiceSummary.isPresent() && invoiceSummary.get() != null) {
 			req.setClientRoleId(invoiceSummary.get().getClientRoleId());
 			req.setTotalAmount(invoiceSummary.get().getTotalAmount());
-			if (req.getAmountToPayNow().compareTo(req.getTotalAmount()) != 0) {
+			if (req.getAmountToPayNow().compareTo(req.getTotalAmount()) >= 0.02) {
 				return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null,
 						"Price not matching with invoice created");
 			}
