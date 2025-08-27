@@ -92,6 +92,18 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 			    RETURNING subscription_plan_term_id
 			""";
 
+	private static final String SQL_BILLING_DAY_RULE = """
+			    SELECT sf.frequency_name, sdr.billing_day
+			    FROM client_subscription_billing.lu_subscription_billing_day_rule sdr
+			    JOIN client_subscription_billing.lu_subscription_frequency sf
+			      ON sf.subscription_frequency_id = sdr.subscription_frequency_id
+			    WHERE sdr.subscription_billing_day_rule_id = ?
+			      AND (?::uuid IS NULL OR sf.subscription_frequency_id = ?::uuid)
+			      AND COALESCE(sf.is_active,  true) = true
+			      AND COALESCE(sdr.is_active, true) = true
+			    LIMIT 1
+			""";
+
 	@Override
 	public UUID insertSubscriptionPlan(SubscriptionPlanCreateRequest req, UUID createdBy) {
 		final String sql = """
@@ -446,6 +458,16 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 				// DATE
 				createdBy, createdBy // set modified_by same as created_by initially
 		);
+	}
+
+	@Override
+	public Optional<BillingRule> findRule(UUID frequencyId, UUID dayRuleId) {
+		List<BillingRule> list = cluboneJdbcTemplate.query(SQL_BILLING_DAY_RULE, ps -> {
+			ps.setObject(1, dayRuleId);
+			ps.setObject(2, frequencyId); // nullable guard in SQL
+			ps.setObject(3, frequencyId);
+		}, (rs, rn) -> new BillingRule(rs.getString("frequency_name"), rs.getString("billing_day")));
+		return list.isEmpty() ? Optional.empty() : Optional.of(list.get(0));
 	}
 
 }

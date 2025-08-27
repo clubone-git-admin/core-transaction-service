@@ -1,6 +1,7 @@
 package io.clubone.transaction.service.impl;
 
 import io.clubone.transaction.dao.SubscriptionPlanDao;
+import io.clubone.transaction.dao.SubscriptionPlanDao.BillingRule;
 import io.clubone.transaction.request.SubscriptionPlanBatchCreateRequest;
 import io.clubone.transaction.request.SubscriptionPlanCreateRequest;
 import io.clubone.transaction.response.PlanCreateResult;
@@ -21,9 +22,12 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.sql.SQLException;
+import java.time.DayOfWeek;
 import java.time.LocalDate;
+import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 @Service
@@ -58,7 +62,9 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 			Integer interval = request.getIntervalCount(); // e.g., 1, 3, 12
 			UUID dayRuleId = request.getSubscriptionBillingDayRuleId();
 
-			LocalDate nextBill = computeNextBillingDate(start, freqId, interval, dayRuleId);
+			LocalDate nextBill = computeNextBillingDate(start, freqId, interval, dayRuleId,
+					request.getCyclePrices().get(0).getCycleStart());
+			UUID priceCycleBandId=request.getCyclePrices().get(0).getPriceCycleBandId();
 
 			// Resolve status IDs for instance + billing
 			UUID instanceStatusId = dao
@@ -80,7 +86,7 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 			long chargedMinor = grossInclTax.movePointRight(2).setScale(0, RoundingMode.HALF_UP).longValueExact();
 
 			SubscriptionPlanDao.BillingHistoryRow row = new SubscriptionPlanDao.BillingHistoryRow(instanceId,
-					chargedMinor, 1, nextBill, billingStatusScheduledId, null, // set if you know current band
+					chargedMinor, 1, nextBill, billingStatusScheduledId, priceCycleBandId, // set if you know current band
 					null, null, null, netExTax, taxTotal, null, null, null, null, Boolean.FALSE, null, null, null,
 					null);
 			dao.insertSubscriptionBillingHistory(row);
@@ -198,10 +204,135 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 	 * Very simple starting point. Replace with your real rules: - SAME_DAY_AS_START
 	 * -> start - FIXED_DAY_OF_MONTH -> adjust to that day in start month - etc.,
 	 * then advance by interval/frequency when needed.
+	 * 
+	 * @param cycleStart
 	 */
-	private LocalDate computeNextBillingDate(LocalDate start, UUID frequencyId, Integer interval, UUID dayRuleId) {
-		// TODO: decide by your lookup/enum values behind frequencyId/dayRuleId
-		return start;
+	public LocalDate computeNextBillingDate(LocalDate start, UUID frequencyId, Integer interval, UUID dayRuleId,
+			Integer cycleStart) {
+		cycleStart=cycleStart-1;
+
+		if (start == null)
+			start = LocalDate.now();
+		int effInterval = (interval != null && interval > 0) ? interval : 1;
+		int skip = Math.max(0, (cycleStart == null ? 1 : cycleStart) - 1); // skip (cycleStart-1)
+
+		BillingRule rule = dao.findRule(frequencyId, dayRuleId)
+				.orElseThrow(() -> new IllegalArgumentException("Invalid frequency/day rule"));
+
+		String freq = rule.frequencyName() == null ? "" : rule.frequencyName().trim().toUpperCase();
+		String billingDay = rule.billingDay() == null ? "" : rule.billingDay().trim();
+
+// Move forward by 'skip' * interval units
+		LocalDate anchor = switch (freq) {
+		case "DAILY" -> start.plusDays((long) skip * effInterval);
+		case "WEEKLY" -> start.plusWeeks((long) skip * effInterval);
+		case "MONTHLY" -> start.plusMonths((long) skip * effInterval);
+		case "QUARTERLY" -> start.plusMonths((long) skip * effInterval * 3L);
+		case "YEARLY" -> start.plusYears((long) skip * effInterval);
+		default -> start.plusMonths((long) skip * effInterval); // sensible default
+		};
+
+// Align to billing day according to frequency
+		return alignToBillingDay(anchor, freq, billingDay);
+	}
+
+	private LocalDate alignToBillingDay(LocalDate anchor, String freq, String billingDay) {
+		switch (freq) {
+		case "DAILY":
+// No special alignment; "next" is the anchor itself for daily cadence
+			return anchor;
+
+		case "WEEKLY": {
+			DayOfWeek target = parseDayOfWeek(billingDay);
+// If anchor already on target DoW, keep it; else move forward to the next target DoW
+			int diff = (target.getValue() - anchor.getDayOfWeek().getValue() + 7) % 7;
+			return diff == 0 ? anchor : anchor.plusDays(diff);
+		}
+
+		case "MONTHLY":
+		case "QUARTERLY":
+		case "YEARLY": {
+// For MONTHLY/QUARTERLY: billing_day usually "1".."31" or "LAST"
+// For YEARLY: support "MM-DD" (e.g., "03-15"). If plain number, treat like monthly day-of-month.
+			if (billingDay.equalsIgnoreCase("LAST") || billingDay.equalsIgnoreCase("LAST_DAY")) {
+				return anchor.withDayOfMonth(anchor.lengthOfMonth());
+			}
+			if (billingDay.matches("\\d{1,2}-\\d{1,2}")) { // YEARLY like "MM-DD"
+				String[] parts = billingDay.split("-");
+				int mm = Integer.parseInt(parts[0]);
+				int dd = Integer.parseInt(parts[1]);
+// set same year as anchor; clamp day to month length
+				int safeDay = Math.min(dd, YearMonth.of(anchor.getYear(), mm).lengthOfMonth());
+				LocalDate candidate = LocalDate.of(anchor.getYear(), mm, safeDay);
+// if candidate before anchor, push to next year
+				return !candidate.isBefore(anchor) ? candidate
+						: LocalDate.of(anchor.getYear() + 1, mm,
+								Math.min(dd, YearMonth.of(anchor.getYear() + 1, mm).lengthOfMonth()));
+			}
+// else numeric day-of-month
+			int day = parseIntSafe(billingDay, anchor.getDayOfMonth());
+			int dom = Math.min(day, anchor.lengthOfMonth());
+// If moving to same month's DOM yields a date before anchor (e.g., anchor is 25th, billing day 15),
+// treat current anchor as already past; move to next period and set DOM again.
+			LocalDate candidate = anchor.withDayOfMonth(dom);
+			if (candidate.isBefore(anchor)) {
+// advance one period matching freq granularity
+				candidate = switch (freq) {
+				case "MONTHLY" ->
+					anchor.plusMonths(1).withDayOfMonth(Math.min(day, anchor.plusMonths(1).lengthOfMonth()));
+				case "QUARTERLY" ->
+					anchor.plusMonths(3).withDayOfMonth(Math.min(day, anchor.plusMonths(3).lengthOfMonth()));
+				case "YEARLY" -> anchor.plusYears(1).withDayOfMonth(Math.min(day, anchor.plusYears(1).lengthOfMonth())); // rarely
+																															// used
+				default -> candidate;
+				};
+			}
+			return candidate;
+		}
+
+		default:
+			return anchor;
+		}
+	}
+
+	private static DayOfWeek parseDayOfWeek(String s) {
+		if (s == null || s.isBlank())
+			return DayOfWeek.MONDAY;
+		String u = s.trim().toUpperCase(Locale.ROOT);
+// Accept "MON", "MONDAY", etc.
+		switch (u) {
+		case "MON":
+		case "MONDAY":
+			return DayOfWeek.MONDAY;
+		case "TUE":
+		case "TUESDAY":
+			return DayOfWeek.TUESDAY;
+		case "WED":
+		case "WEDNESDAY":
+			return DayOfWeek.WEDNESDAY;
+		case "THU":
+		case "THURSDAY":
+			return DayOfWeek.THURSDAY;
+		case "FRI":
+		case "FRIDAY":
+			return DayOfWeek.FRIDAY;
+		case "SAT":
+		case "SATURDAY":
+			return DayOfWeek.SATURDAY;
+		case "SUN":
+		case "SUNDAY":
+			return DayOfWeek.SUNDAY;
+		default:
+			return DayOfWeek.MONDAY;
+		}
+	}
+
+	private static int parseIntSafe(String s, int fallback) {
+		try {
+			return Integer.parseInt(s.trim());
+		} catch (Exception e) {
+			return fallback;
+		}
 	}
 
 	/** Placeholder: derive first cycle amount. Replace with your pricing engine. */

@@ -212,8 +212,7 @@ public class SubscriptionPlanHelper {
 
 			// dates (fallback end date if null)
 			LocalDate start = r.contractStartDate != null ? r.contractStartDate : LocalDate.now();
-			LocalDate end = (r.contractEndDate != null) ? r.contractEndDate
-					: computeEndDate(start, r.totalCycles, r.intervalCount, r.subscriptionFrequency);
+			LocalDate end = computeEndDate(start, r.totalCycles, r.intervalCount, r.subscriptionFrequency);
 			req.setContractStartDate(start);
 			req.setContractEndDate(end);
 
@@ -251,7 +250,7 @@ public class SubscriptionPlanHelper {
 		int interval = (intervalCount != null && intervalCount > 0) ? intervalCount : 1;
 
 		String f = subscriptionFrequencyName == null ? "" : subscriptionFrequencyName.trim().toUpperCase();
-
+		System.out.println("subscriptionFrequencyName "+subscriptionFrequencyName);
 		switch (f) {
 		case "DAILY":
 			return start.plusDays((long) cycles * interval);
