@@ -1,11 +1,13 @@
 package io.clubone.transaction.v2.vo;
 
 import java.time.LocalDate;
+import java.util.UUID;
 
 public class PlanTermDTO {
 	private Integer remainingCycles; // required by table
 	private Boolean isActive = true;
-	private LocalDate endDate; // required
+	private LocalDate endDate;
+	//private UUID subscriptionPlanId;// required
 
 	public Integer getRemainingCycles() {
 		return remainingCycles;

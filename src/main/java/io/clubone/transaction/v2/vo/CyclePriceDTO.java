@@ -10,6 +10,7 @@ public class CyclePriceDTO {
  private BigDecimal unitPrice;         // required
  private UUID priceCycleBandId;        // nullable
  private Boolean allowPosPriceOverride = false;
+ private Integer downPaymentUnits;
  // Optional window override
  private BigDecimal windowOverrideUnitPrice;
  private UUID windowOverriddenBy;
@@ -61,6 +62,12 @@ public String getWindowOverrideNote() {
 }
 public void setWindowOverrideNote(String windowOverrideNote) {
 	this.windowOverrideNote = windowOverrideNote;
+}
+public Integer getDownPaymentUnits() {
+	return downPaymentUnits;
+}
+public void setDownPaymentUnits(Integer downPaymentUnits) {
+	this.downPaymentUnits = downPaymentUnits;
 }
 
  

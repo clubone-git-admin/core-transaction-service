@@ -4,6 +4,7 @@ import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -15,6 +16,7 @@ import io.clubone.transaction.request.SubscriptionPlanCreateRequest;
 import io.clubone.transaction.v2.vo.CyclePriceDTO;
 import io.clubone.transaction.v2.vo.DiscountCodeDTO;
 import io.clubone.transaction.v2.vo.EntitlementDTO;
+import io.clubone.transaction.v2.vo.PlanTermDTO;
 
 @Repository
 public class SubscriptionPlanHelper {
@@ -22,7 +24,7 @@ public class SubscriptionPlanHelper {
 	@Autowired
 	@Qualifier("cluboneJdbcTemplate")
 	private JdbcTemplate cluboneJdbcTemplate;
-	
+
 	@Autowired
 	private SubscriptionPlanDao subscriptionPlanDao;
 
@@ -113,7 +115,8 @@ public class SubscriptionPlanHelper {
 				        ieb.is_price_overridden,
 				        bpcb.start_cycle AS cycle_start,
 				        bpcb.end_cycle   AS cycle_end,
-				        bpcb.allow_pos_price_override
+				        bpcb.allow_pos_price_override,
+				        bpcb.down_payment_units
 				    FROM "transaction".invoice_entity_price_band  AS ieb
 				    JOIN bundles_new.bundle_price_cycle_band      AS bpcb
 				      ON bpcb.price_cycle_band_id = ieb.price_cycle_band_id
@@ -133,6 +136,7 @@ public class SubscriptionPlanHelper {
 			dto.setCycleStart((Integer) rs.getObject("cycle_start")); // null-safe
 			dto.setCycleEnd((Integer) rs.getObject("cycle_end")); // may be null (open-ended)
 			dto.setAllowPosPriceOverride(rs.getBoolean("allow_pos_price_override"));
+			dto.setDownPaymentUnits((Integer) rs.getObject("down_payment_units"));
 
 			return dto;
 		}, invoiceEntityId);
@@ -188,9 +192,7 @@ public class SubscriptionPlanHelper {
 	/** Build one SubscriptionPlanCreateRequest per qualifying invoice entity */
 	public List<SubscriptionPlanCreateRequest> buildRequests(UUID invoiceId, UUID transactionId) {
 		List<InvoiceEntityPlanRow> rows = fetchInvoiceEntitiesWithPlan(invoiceId, transactionId);
-		UUID cpmId = subscriptionPlanDao
-			    .findClientPaymentMethodIdByTransactionId(transactionId)
-			    .orElse(null);
+		UUID cpmId = subscriptionPlanDao.findClientPaymentMethodIdByTransactionId(transactionId).orElse(null);
 
 		return rows.stream().map(r -> {
 			SubscriptionPlanCreateRequest req = new SubscriptionPlanCreateRequest();
@@ -216,11 +218,24 @@ public class SubscriptionPlanHelper {
 			req.setContractEndDate(end);
 
 			// optional children
-			req.setCyclePrices(fetchCyclePrices(r.invoiceEntityId));
+			List<CyclePriceDTO> cyclePrices=fetchCyclePrices(r.invoiceEntityId);
+			req.setCyclePrices(cyclePrices.stream()
+					.filter(cp -> cp.getDownPaymentUnits() == null || cp.getDownPaymentUnits() == 0)
+					.collect(Collectors.toList()));
 			req.setDiscountCodes(fetchDiscounts(r.invoiceEntityId));
 			req.setEntitlements(fetchEntitlements(r.invoiceEntityId));
 			// req.setPromos(...);
-			// req.setTerm(...);
+			PlanTermDTO planterm = new PlanTermDTO();
+			planterm.setIsActive(true);
+			int downPaymentUnits = cyclePrices.stream()
+				    .filter(cp -> cp.getDownPaymentUnits() != null)
+				    .mapToInt(cp -> cp.getDownPaymentUnits())
+				    .findFirst()
+				    .orElse(0);
+			planterm.setRemainingCycles(r.totalCycles-downPaymentUnits);
+			planterm.setEndDate(end);
+			//planterm.setSubscriptionPlanId(cpmId);
+			req.setTerm(planterm);
 
 			return req;
 		}).toList();

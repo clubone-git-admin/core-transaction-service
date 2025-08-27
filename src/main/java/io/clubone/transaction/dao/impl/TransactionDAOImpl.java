@@ -14,6 +14,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DataAccessException;
+import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
@@ -117,6 +118,32 @@ public class TransactionDAOImpl implements TransactionDAO {
 	private static final String BUNDLE_PRICE_BAND_SQL = "SELECT unit_price, down_payment_units "
 			+ "FROM bundles_new.bundle_price_cycle_band " + "WHERE price_cycle_band_id = ?";
 
+	private static final String SQL_TYPE_NAME_BY_BUNDLE_ITEM_ID = """
+		    SELECT lit.type_name
+		    FROM bundles_new.bundle_item bi
+		    JOIN items.item it          ON it.item_id = bi.item_id
+		    JOIN items.lu_itemtypes lit ON lit.item_type_id = it.item_type_id
+		    WHERE bi.bundle_item_id = ?
+		      AND COALESCE(bi.is_active, true) = true
+		    LIMIT 1
+		""";
+	
+	 private static final String SQL_IS_PRORATE_APPLICABLE = """
+		        SELECT EXISTS (
+		            SELECT 1
+		            FROM bundles_new.bundle_plan_template          bpt
+		            JOIN bundles_new.lu_proration_strategy         ps  ON ps.proration_strategy_id = bpt.default_proration_strategy_id
+		            JOIN client_subscription_billing.lu_subscription_frequency sf
+		                                                              ON sf.subscription_frequency_id = bpt.subscription_frequency_id
+		            WHERE bpt.plan_template_id = ?
+		              AND COALESCE(bpt.is_active, true) = true
+		              AND COALESCE(ps.is_active,  true) = true
+		              AND COALESCE(sf.is_active,  true) = true
+		              AND UPPER(ps.code) = 'DAILY'
+		              AND UPPER(sf.frequency_name) = 'MONTHLY'
+		        );
+		    """;
+	
 	@Override
 	public UUID saveInvoice(InvoiceDTO dto) {
 		UUID invoiceId = UUID.randomUUID();
@@ -248,7 +275,10 @@ public class TransactionDAOImpl implements TransactionDAO {
 					li.getEntityId(), li.getEntityDescription(), li.getQuantity(), li.getUnitPrice(),
 					li.getDiscountAmount(), li.getTaxAmount(), li.getTotalAmount(), // ensure this equals (qty*unit -
 																					// discount + tax) rounded to 2
-					dto.getCreatedBy() ,li.getPricePlanTemplateId(),li.getContractStartDate()// if you don’t store created_by, replace with null and drop the column
+					dto.getCreatedBy(), li.getPricePlanTemplateId(), li.getContractStartDate()// if you don’t store
+																								// created_by, replace
+																								// with null and drop
+																								// the column
 			);
 
 			if (isBundleHeader) {
@@ -590,8 +620,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    ) VALUES (?,  ?,  ?, ?, NOW(), ?)
 				""";
 
-		cluboneJdbcTemplate.update(sql, transactionId,  dto.getClientPaymentTransactionId(),
-				 dto.getInvoiceId(), dto.getTransactionDate(), dto.getCreatedBy() // <-- added
+		cluboneJdbcTemplate.update(sql, transactionId, dto.getClientPaymentTransactionId(), dto.getInvoiceId(),
+				dto.getTransactionDate(), dto.getCreatedBy() // <-- added
 		);
 
 		return transactionId;
@@ -893,5 +923,22 @@ public class TransactionDAOImpl implements TransactionDAO {
 	public List<BundlePriceCycleBandDTO> findByPriceCycleBandId(UUID priceCycleBandId) {
 		return cluboneJdbcTemplate.query(BUNDLE_PRICE_BAND_SQL, BUNDLE_PRICE_CYCLE_ROW_MAPPER, priceCycleBandId);
 	}
+
+	@Override
+	public Optional<String> findTypeNameByBundleItemId(UUID bundleItemId) {
+		try {
+			String name = cluboneJdbcTemplate.queryForObject(SQL_TYPE_NAME_BY_BUNDLE_ITEM_ID, String.class,
+					bundleItemId);
+			return Optional.ofNullable(name);
+		} catch (EmptyResultDataAccessException e) {
+			return Optional.empty();
+		}
+	}
+	
+	 @Override
+	    public boolean isProrateApplicable(UUID planTemplateId) {
+	        Boolean ok = cluboneJdbcTemplate.queryForObject(SQL_IS_PRORATE_APPLICABLE, Boolean.class, planTemplateId);
+	        return ok != null && ok;
+	    }
 
 }

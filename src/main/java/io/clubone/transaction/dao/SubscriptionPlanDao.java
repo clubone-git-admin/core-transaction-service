@@ -84,4 +84,7 @@ public interface SubscriptionPlanDao {
 	UUID billingStatusId(String code);
 
 	Optional<UUID> findClientPaymentMethodIdByTransactionId(UUID transactionId);
+	
+	UUID insert(UUID subscriptionPlanId, int remainingCycles, LocalDate endDate, UUID createdBy);
+
 }

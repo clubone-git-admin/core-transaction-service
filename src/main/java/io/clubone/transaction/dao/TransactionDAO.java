@@ -54,15 +54,19 @@ public interface TransactionDAO {
 	int updateClientAgreementId(UUID transactionId, UUID clientAgreementId);
 
 	List<TaxRateAllocationDTO> getTaxRatesByGroupAndLevel(UUID taxGroupId, UUID levelId);
-	
+
 	List<InvoiceFlatRow> findInvoicesWithLatestTxnByClientRole(UUID clientRoleId);
 
 	List<InvoiceEntityRow> findEntitiesByInvoiceIds(List<UUID> invoiceIds);
 
 	UUID findTaxGroupIdForItem(UUID entityId, UUID levelId);
-	
+
 	Optional<DiscountDetailDTO> findBestDiscountForItemByIds(UUID itemId, UUID levelId, List<UUID> discountIds);
+
+	List<BundlePriceCycleBandDTO> findByPriceCycleBandId(UUID priceCycleBandId);
+
+	Optional<String> findTypeNameByBundleItemId(UUID bundleItemId);
 	
-	 List<BundlePriceCycleBandDTO> findByPriceCycleBandId(UUID priceCycleBandId);
+	boolean isProrateApplicable(UUID planTemplateId);
 
 }

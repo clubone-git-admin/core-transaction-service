@@ -23,15 +23,19 @@ import org.springframework.util.CollectionUtils;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.clubone.transaction.dao.TransactionDAO;
+import io.clubone.transaction.helper.SubscriptionPlanHelper;
 import io.clubone.transaction.request.CreateInvoiceRequest;
 import io.clubone.transaction.request.CreateInvoiceRequestV3;
 import io.clubone.transaction.request.CreateTransactionRequest;
 import io.clubone.transaction.request.FinalizeTransactionRequest;
 import io.clubone.transaction.request.InvoiceResponseDTO;
+import io.clubone.transaction.request.SubscriptionPlanBatchCreateRequest;
+import io.clubone.transaction.request.SubscriptionPlanCreateRequest;
 import io.clubone.transaction.request.TransactionLineItemRequest;
 import io.clubone.transaction.response.CreateInvoiceResponse;
 import io.clubone.transaction.response.FinalizeTransactionResponse;
 import io.clubone.transaction.service.PaymentService;
+import io.clubone.transaction.service.SubscriptionPlanService;
 import io.clubone.transaction.service.TransactionService;
 import io.clubone.transaction.vo.BundleDTO;
 import io.clubone.transaction.vo.BundleItemPriceDTO;
@@ -58,6 +62,12 @@ public class TransactionServiceImpl implements TransactionService {
 
 	@Autowired
 	private PaymentService paymentService;
+
+	@Autowired
+	private SubscriptionPlanHelper subscriptionPlanHelper;
+
+	@Autowired
+	private SubscriptionPlanService subscriptionPlanService;
 
 	private static final Logger logger = LoggerFactory.getLogger(TransactionServiceImpl.class);
 
@@ -305,7 +315,8 @@ public class TransactionServiceImpl implements TransactionService {
 		UUID paidStatusId = transactionDAO.findInvoiceStatusIdByName("PAID");
 		transactionDAO.updateInvoiceStatusAndPaidFlag(req.getInvoiceId(), paidStatusId, true, req.getCreatedBy());
 
-		return new FinalizeTransactionResponse(req.getInvoiceId(), "PAID", clientPaymentTransactionId, transactionId, "");
+		return new FinalizeTransactionResponse(req.getInvoiceId(), "PAID", clientPaymentTransactionId, transactionId,
+				"");
 	}
 
 	@Override
@@ -503,12 +514,13 @@ public class TransactionServiceImpl implements TransactionService {
 		if (invoiceSummary.isPresent() && invoiceSummary.get() != null) {
 			req.setClientRoleId(invoiceSummary.get().getClientRoleId());
 			req.setTotalAmount(invoiceSummary.get().getTotalAmount());
-			if(req.getAmountToPayNow().compareTo(req.getTotalAmount())!=0) {
-				return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null, "Price not matching with invoice created");
+			if (req.getAmountToPayNow().compareTo(req.getTotalAmount()) != 0) {
+				return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null,
+						"Price not matching with invoice created");
 			}
 			req.setLevelId(invoiceSummary.get().getLevelId());
 		}
-		
+
 		// Validate totals vs line items
 		/*
 		 * BigDecimal lineSum =
@@ -555,8 +567,17 @@ public class TransactionServiceImpl implements TransactionService {
 		UUID paidStatusId = transactionDAO.findInvoiceStatusIdByName("PAID");
 		System.out.println("paidStatusId " + paidStatusId);
 		transactionDAO.updateInvoiceStatusAndPaidFlag(req.getInvoiceId(), paidStatusId, true, req.getCreatedBy());
-
-		return new FinalizeTransactionResponse(req.getInvoiceId(), "PAID", clientPaymentTransactionId, transactionId, "");
+		try {
+			List<SubscriptionPlanCreateRequest> subscriptionRequest = subscriptionPlanHelper
+					.buildRequests(req.getInvoiceId(), transactionId);
+			SubscriptionPlanBatchCreateRequest subscriptionPlanBatchCreateRequest = new SubscriptionPlanBatchCreateRequest();
+			subscriptionPlanBatchCreateRequest.setPlans(subscriptionRequest);
+			subscriptionPlanService.createPlans(subscriptionPlanBatchCreateRequest, UUID.randomUUID());
+		} catch (Exception e) {
+			System.out.println("Error is creating subscription " + e.getMessage());
+		}
+		return new FinalizeTransactionResponse(req.getInvoiceId(), "PAID", clientPaymentTransactionId, transactionId,
+				"");
 	}
 
 	@Override

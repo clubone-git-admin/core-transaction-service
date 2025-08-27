@@ -85,6 +85,13 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 			    LIMIT 1
 			""";
 
+	private static final String SQL_PLAN_TERM_INSERT = """
+			    INSERT INTO client_subscription_billing.subscription_plan_term
+			        (subscription_plan_id, remaining_cycles, end_date, created_by, modified_by)
+			    VALUES (?, ?, ?, ?, ?)
+			    RETURNING subscription_plan_term_id
+			""";
+
 	@Override
 	public UUID insertSubscriptionPlan(SubscriptionPlanCreateRequest req, UUID createdBy) {
 		final String sql = """
@@ -423,4 +430,22 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 			return Optional.empty();
 		}
 	}
+
+	@Override
+	public UUID insert(UUID subscriptionPlanId, int remainingCycles, LocalDate endDate, UUID createdBy) {
+		if (subscriptionPlanId == null)
+			throw new IllegalArgumentException("subscriptionPlanId is required");
+		if (endDate == null)
+			throw new IllegalArgumentException("endDate is required");
+		if (remainingCycles <= 0)
+			throw new IllegalArgumentException("remainingCycles must be > 0");
+
+		return cluboneJdbcTemplate.queryForObject(SQL_PLAN_TERM_INSERT, UUID.class, subscriptionPlanId, remainingCycles,
+				Date.valueOf(endDate), // end_date
+				// is
+				// DATE
+				createdBy, createdBy // set modified_by same as created_by initially
+		);
+	}
+
 }

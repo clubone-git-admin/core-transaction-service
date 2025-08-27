@@ -4,6 +4,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
@@ -18,6 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.CollectionUtils;
 
 import io.clubone.transaction.dao.TransactionDAO;
+import io.clubone.transaction.helper.TransactionUtils;
 import io.clubone.transaction.response.CreateInvoiceResponse;
 import io.clubone.transaction.service.TransactionServicev2;
 import io.clubone.transaction.v2.vo.Bundle;
@@ -38,6 +40,9 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 	@Autowired
 	private TransactionDAO transactionDAO;
+	
+	@Autowired
+	private TransactionUtils transactionUtils;
 
 	@Override
 	@Transactional(rollbackFor = Exception.class)
@@ -116,7 +121,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 								for (Item it : b.getItems()) {
 									System.out.println("here");
 									InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, bundle.getEntityId(),
-											itemTypeId);
+											itemTypeId,e.getStartDate());
 									computeTaxesFromItemOnly(itemLine, it, request.getLevelId());
 									finalizeLeaf(itemLine);
 									subTotal = subTotal.add(lineSub(itemLine));
@@ -159,7 +164,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 							// Build child line under this bundle (business parent id if your builder uses
 							// it)
 							InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, bundleBusinessEntityId,
-									itemTypeId);
+									itemTypeId,e.getStartDate());
 
 							// Link to parent bundle invoice line (for payments/allocations)
 							itemLine.setParentInvoiceEntityId(bundleInvoiceEntityId);
@@ -238,7 +243,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 				case "item": {
 					if (e.getItems() != null && !e.getItems().isEmpty()) {
 						for (Item it : e.getItems()) {
-							InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, null, itemTypeId);
+							InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, null, itemTypeId,e.getStartDate());
 
 							// 1) taxes (DB-based, unchanged)
 							computeTaxesFromItemOnly(itemLine, it, request.getLevelId());
@@ -298,7 +303,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 						it.setUpsellItem(Boolean.TRUE.equals(e.getUpsellItem()));
 						// it.setDiscountIds(e.getDiscountIds().);
 
-						InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, null, itemTypeId);
+						InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, null, itemTypeId,e.getStartDate());
 						computeTaxesFromItemOnly(itemLine, it, request.getLevelId());
 						finalizeLeaf(itemLine);
 						subTotal = subTotal.add(lineSub(itemLine));
@@ -329,7 +334,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 	/* ======== Helpers (unchanged, except for tax computation) ======== */
 
-	private InvoiceEntityDTO buildItemLineFromPayload(Item it, UUID parentId, UUID itemTypeId) {
+	private InvoiceEntityDTO buildItemLineFromPayload(Item it, UUID parentId, UUID itemTypeId, LocalDate startDate) {
 		InvoiceEntityDTO line = new InvoiceEntityDTO();
 		System.out.println("buildItemLineFromPayload");
 		line.setEntityId(UUID.randomUUID());
@@ -339,20 +344,58 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		line.setEntityId(it.getEntityId());
 		line.setEntityDescription("Item");
 		line.setPriceBands(it.getPriceBands());
+		line.setContractStartDate(startDate);
+		// Resolve type name (if you don't already have it in context)
+		// String typeName = itemTypeLookupDAO.getTypeNameOrThrow(it.getBundleItemId());
+
+		boolean isProrateApplicable = transactionDAO.isProrateApplicable(it.getPricePlanTemplateId());
+		System.out.println("isProrateApplicable "+isProrateApplicable );
 		if (!CollectionUtils.isEmpty(line.getPriceBands())) {
-			List<BundlePriceCycleBandDTO> bundlePriceBands = transactionDAO
-					.findByPriceCycleBandId(line.getPriceBands().get(0).getPriceCycleBandId());
-			if (!CollectionUtils.isEmpty(bundlePriceBands) && bundlePriceBands.size() > 0) {
-				line.setQuantity(def(bundlePriceBands.get(0).getDownPaymentUnits(), 1));
-				line.setUnitPrice(scale2(bd(bundlePriceBands.get(0).getUnitPrice().doubleValue())));
-			}
+		    List<BundlePriceCycleBandDTO> bundlePriceBands =
+		            transactionDAO.findByPriceCycleBandId(line.getPriceBands().get(0).getPriceCycleBandId());
+
+		    if (!CollectionUtils.isEmpty(bundlePriceBands)) {
+		        BundlePriceCycleBandDTO band = bundlePriceBands.get(0);
+		        int dpUnits = def(band.getDownPaymentUnits(), 1);
+
+		        // Full unit price (2 dp)
+		        BigDecimal fullUnit = scale2(bd(band.getUnitPrice().doubleValue()));
+
+		        if (isProrateApplicable) {
+		            // Proration only for Access
+		        	System.out.println("here");
+		            LocalDate start = (line.getContractStartDate() != null) ? line.getContractStartDate() : LocalDate.now();
+		            BigDecimal factor = transactionUtils.prorateFactorForCurrentMonth(start);
+		            BigDecimal proratedUnit = scale2(fullUnit.multiply(factor)); // round to 2 dp
+
+		            if (dpUnits <= 1) {
+		                // Only one unit: charge prorated for the current month
+		            	System.out.println("here2");
+		                line.setQuantity(1);
+		                line.setUnitPrice(proratedUnit);
+		            } else {
+		            	System.out.println("here1");
+		                // First unit prorated on the current line
+		            	BigDecimal remainingunitDownPayment=band.getUnitPrice().multiply(BigDecimal.valueOf(dpUnits-1));
+		                line.setQuantity(1);
+		                line.setUnitPrice(proratedUnit.add(remainingunitDownPayment));		               
+		            }
+		        } else {
+		            // Non-Access: your original behavior
+		            line.setQuantity(dpUnits);
+		            line.setUnitPrice(fullUnit);
+		        }
+		    }
 		} else {
-			line.setQuantity(def(it.getQuantity(), 1));
-			line.setUnitPrice(scale2(bd(it.getPrice())));
+		    // No price band; keep your existing fallback
+		    line.setQuantity(def(it.getQuantity(), 1));
+		    line.setUnitPrice(scale2(bd(it.getPrice())));
 		}
+
 		line.setDiscountAmount(BigDecimal.ZERO);
 		line.setTaxAmount(BigDecimal.ZERO);
 		line.setUpsellItem(Boolean.TRUE.equals(it.getUpsellItem()));
+		
 
 		/*
 		 * if (it.getDiscountIds() != null && !it.getDiscountIds().isEmpty()) {
