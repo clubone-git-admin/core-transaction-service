@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.BiConsumer;
@@ -18,18 +19,24 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.CollectionUtils;
 
+import io.clubone.transaction.dao.EntityLookupDao;
 import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.helper.TransactionUtils;
 import io.clubone.transaction.response.CreateInvoiceResponse;
 import io.clubone.transaction.service.TransactionServicev2;
+import io.clubone.transaction.util.FrequencyUnit;
 import io.clubone.transaction.v2.vo.Bundle;
 import io.clubone.transaction.v2.vo.BundlePriceCycleBandDTO;
 import io.clubone.transaction.v2.vo.DiscountDetailDTO;
 import io.clubone.transaction.v2.vo.Entity;
+import io.clubone.transaction.v2.vo.EntityLevelInfoDTO;
+import io.clubone.transaction.v2.vo.InvoiceDetailDTO;
+import io.clubone.transaction.v2.vo.InvoiceDetailRaw;
 import io.clubone.transaction.v2.vo.InvoiceEntityDiscountDTO;
 import io.clubone.transaction.v2.vo.InvoiceRequest;
 import io.clubone.transaction.v2.vo.InvoiceSummaryDTO;
 import io.clubone.transaction.v2.vo.Item;
+import io.clubone.transaction.v2.vo.PaymentTimelineItemDTO;
 import io.clubone.transaction.vo.EntityTypeDTO;
 import io.clubone.transaction.vo.InvoiceDTO;
 import io.clubone.transaction.vo.InvoiceEntityDTO;
@@ -44,6 +51,9 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 	@Autowired
 	private TransactionUtils transactionUtils;
+
+	@Autowired
+	private EntityLookupDao entityLookupDao;
 
 	@Override
 	@Transactional(rollbackFor = Exception.class)
@@ -643,11 +653,122 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	 * nz(line.getUnitPrice()).multiply(q); }
 	 */
 
-	 @Override
-	    public List<InvoiceSummaryDTO> listInvoicesByClientRole(UUID clientRoleId, Integer limit, Integer offset) {
-	        if (clientRoleId == null) {
-	            throw new IllegalArgumentException("clientRoleId is required");
-	        }
-	        return transactionDAO.findByClientRole(clientRoleId, limit, offset);
-	    }
+	@Override
+	public List<InvoiceSummaryDTO> listInvoicesByClientRole(UUID clientRoleId, Integer limit, Integer offset) {
+		if (clientRoleId == null) {
+			throw new IllegalArgumentException("clientRoleId is required");
+		}
+		return transactionDAO.findByClientRole(clientRoleId, limit, offset);
+	}
+
+	@Override
+	@Transactional(readOnly = true)
+	public InvoiceDetailDTO getInvoiceDetail(UUID invoiceId) {
+		final InvoiceDetailRaw raw = transactionDAO.loadInvoiceAggregate(invoiceId)
+				.orElseThrow(() -> new NoSuchElementException("Invoice not found: " + invoiceId));
+
+		final int currentCycle = Optional.ofNullable(raw.currentCycleNumber()).orElse(0);
+		final int totalCycle = Optional.ofNullable(raw.totalCycles()).orElse(0);
+		/*
+		 * final BigDecimal priceForCurrentCycle = Optional .ofNullable(
+		 * transactionDAO.findEffectivePriceForCycle(raw.subscriptionPlanId(),
+		 * Math.max(1, currentCycle))) .orElse(raw.invoiceAmount()); // fallback
+		 */
+		final BigDecimal priceForCurrentCycle = raw.amountGrossInclTax();
+		// Build "Monthly on the 22nd"
+		final FrequencyUnit unit = FrequencyUnit.fromDb(raw.frequencyName());
+		final int interval = Optional.ofNullable(raw.intervalCount()).orElse(1);
+		final LocalDate refDate = Optional.ofNullable(raw.instanceNextBillingDate())
+				.orElse(Optional.ofNullable(raw.instanceLastBilledOn()).orElse(raw.instanceStartDate()));
+		final String billingFrequencyLabel = switch (unit) {
+		case MONTH -> "Monthly on the " + (refDate != null ? refDate.getDayOfMonth() : 1)
+				+ getDaySuffix(refDate != null ? refDate.getDayOfMonth() : 1);
+		case WEEK -> "Every " + interval + (interval == 1 ? " week" : " weeks");
+		case YEAR -> "Yearly";
+		case DAY -> "Daily";
+		};
+
+		// Commitment paid (current / total)
+		Integer numerator = totalCycle - raw.remainingCycles();
+		Integer denominator = totalCycle;
+
+		// Build 6-point timeline (one paid + 5 upcoming, if dates available)
+		List<PaymentTimelineItemDTO> timeline = buildTimeline(unit, interval, raw, priceForCurrentCycle);
+
+		// NOTE: title/subtitle/paymentMethod/autopay/sessionOwner/productLabel are
+		// business-specific.
+		// Provide reasonable placeholders or nulls so UI can hide if blank.
+		UUID parentEntityId = raw.parentEntityId() != null ? raw.parentEntityId() : raw.childEntityTypeId();
+		UUID parentEntityTypeId = raw.parentEntityTypeId() != null ? raw.parentEntityTypeId() : raw.childEntityTypeId();
+		UUID levelId = raw.levelId();
+		Optional<EntityLevelInfoDTO> enityDetail = entityLookupDao.resolveEntityAndLevel(parentEntityTypeId,
+				parentEntityId, levelId);
+		String entityName = "";
+		String locationName = "";
+		if (enityDetail.isPresent()) {
+			entityName = enityDetail.get().entityName();
+			locationName = enityDetail.get().levelName();
+		}
+		return new InvoiceDetailDTO(raw.invoiceId(), raw.invoiceNumber(), raw.invoiceDate(), raw.invoiceStatus(),
+				raw.invoiceAmount(), raw.invoiceBalanceDue(), raw.invoiceWriteOff(), raw.salesRep(),
+
+				"CONTRACT", "ACTIVE", entityName, locationName, priceForCurrentCycle,
+
+				numerator, denominator, billingFrequencyLabel, raw.contractEndDate(), raw.instanceNextBillingDate(),
+				raw.instanceStartDate(), raw.contractStartDate(), // using contract start as sign-up for now (or fetch
+																	// actual sign_up_date)
+				null, // autoPay (TODO fetch from payment settings)
+				null, // primaryPaymentMethodMasked (TODO fetch masked PAN)
+
+				"Membership · Base Membership", // TODO derive from plan/entity
+				true, // recurring
+				"—", null,
+
+				timeline);
+	}
+
+	private static List<PaymentTimelineItemDTO> buildTimeline(FrequencyUnit unit, int interval, InvoiceDetailRaw raw,
+			BigDecimal cycleAmount) {
+		List<PaymentTimelineItemDTO> list = new ArrayList<>();
+		list.add(new PaymentTimelineItemDTO(raw.invoiceDate(), raw.invoiceAmount(),
+				(raw.invoiceStatus().equalsIgnoreCase("PAID")) ? true : false));
+
+		LocalDate paidDate = raw.instanceLastBilledOn();
+		if (paidDate != null) {
+			list.add(new PaymentTimelineItemDTO(paidDate, cycleAmount, true));
+		}
+
+		LocalDate start = Optional.ofNullable(raw.instanceNextBillingDate())
+				.orElseGet(() -> paidDate != null ? addCycles(paidDate, unit, interval, 1) : raw.instanceStartDate());
+
+		LocalDate d = start;
+		for (int i = 0; i < raw.remainingCycles() - (paidDate != null ? 1 : 0); i++) {
+			list.add(new PaymentTimelineItemDTO(d, cycleAmount, false));
+			d = addCycles(d, unit, interval, 1);
+			if (raw.instanceEndDate() != null && d.isAfter(raw.instanceEndDate()))
+				break;
+		}
+		return list;
+	}
+
+	private static LocalDate addCycles(LocalDate date, FrequencyUnit unit, int interval, int count) {
+		int steps = Math.max(1, interval) * Math.max(1, count);
+		return switch (unit) {
+		case DAY -> date.plusDays(steps);
+		case WEEK -> date.plusWeeks(steps);
+		case MONTH -> date.plusMonths(steps);
+		case YEAR -> date.plusYears(steps);
+		};
+	}
+
+	private static String getDaySuffix(int day) {
+		if (day >= 11 && day <= 13)
+			return "th";
+		return switch (day % 10) {
+		case 1 -> "st";
+		case 2 -> "nd";
+		case 3 -> "rd";
+		default -> "th";
+		};
+	}
 }

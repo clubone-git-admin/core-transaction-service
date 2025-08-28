@@ -28,6 +28,9 @@ public class SubscriptionPlanCreateRequest {
 	private LocalDate contractStartDate;
 	@NotNull
 	private LocalDate contractEndDate;
+	
+	private UUID invoiceId;
+	private UUID levelId;
 
 	// Children (all optional lists)
 	private List<CyclePriceDTO> cyclePrices;
@@ -147,5 +150,23 @@ public class SubscriptionPlanCreateRequest {
 	public void setCreatedBy(UUID createdBy) {
 		this.createdBy = createdBy;
 	}
+
+	public UUID getInvoiceId() {
+		return invoiceId;
+	}
+
+	public void setInvoiceId(UUID invoiceId) {
+		this.invoiceId = invoiceId;
+	}
+
+	public UUID getLevelId() {
+		return levelId;
+	}
+
+	public void setLevelId(UUID levelId) {
+		this.levelId = levelId;
+	}
+	
+	
 
 }

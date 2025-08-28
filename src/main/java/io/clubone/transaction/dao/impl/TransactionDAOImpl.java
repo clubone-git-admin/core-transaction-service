@@ -5,7 +5,9 @@ import java.math.RoundingMode;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
@@ -19,12 +21,18 @@ import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
+
 import io.clubone.transaction.dao.TransactionDAO;
+import io.clubone.transaction.util.FrequencyUnit;
 import io.clubone.transaction.v2.vo.BundlePriceCycleBandDTO;
 import io.clubone.transaction.v2.vo.CalculationMode;
 import io.clubone.transaction.v2.vo.DiscountDetailDTO;
+import io.clubone.transaction.v2.vo.InvoiceDetailDTO;
+import io.clubone.transaction.v2.vo.InvoiceDetailRaw;
 import io.clubone.transaction.v2.vo.InvoiceEntityDiscountDTO;
 import io.clubone.transaction.v2.vo.InvoiceEntityPriceBandDTO;
+import io.clubone.transaction.v2.vo.PaymentTimelineItemDTO;
 import io.clubone.transaction.vo.BundleComponent;
 import io.clubone.transaction.vo.BundleItemPriceDTO;
 import io.clubone.transaction.vo.EntityTypeDTO;
@@ -976,7 +984,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 	}
 
 	@Override
-	public List<io.clubone.transaction.v2.vo.InvoiceSummaryDTO> findByClientRole(UUID clientRoleId, Integer limit, Integer offset) {
+	public List<io.clubone.transaction.v2.vo.InvoiceSummaryDTO> findByClientRole(UUID clientRoleId, Integer limit,
+			Integer offset) {
 		return cluboneJdbcTemplate.query(SQL_INVOICE_SUMMARY, ps -> {
 			ps.setObject(1, clientRoleId);
 			ps.setObject(2, limit);
@@ -1008,6 +1017,189 @@ public class TransactionDAOImpl implements TransactionDAO {
 	private static BigDecimal s2(BigDecimal v) {
 		return v == null ? null : v.setScale(2, java.math.RoundingMode.HALF_UP);
 		// Frontend can do currency formatting ($) as in the screenshot.
+	}
+
+	private static final RowMapper<InvoiceDetailRaw> RAW_MAPPER = new RowMapper<>() {
+		@Override
+		public InvoiceDetailRaw mapRow(ResultSet rs, int rowNum) throws SQLException {
+			return new InvoiceDetailRaw(
+					// invoice
+					(UUID) rs.getObject("invoice_id"), rs.getString("invoice_number"),
+					rs.getObject("invoice_date", java.time.LocalDate.class), rs.getBigDecimal("amount"),
+					rs.getBigDecimal("balance_due"), rs.getBigDecimal("write_off"), rs.getString("status"),
+					rs.getString("sales_rep"), (UUID) rs.getObject("level_id"),
+
+					// billing history
+					(UUID) rs.getObject("subscription_instance_id"), rs.getBigDecimal("amount_gross_incl_tax"),
+
+					// instance
+					(UUID) rs.getObject("subscription_plan_id"), rs.getObject("start_date", java.time.LocalDate.class),
+					rs.getObject("next_billing_date", java.time.LocalDate.class),
+					rs.getObject("last_billed_on", java.time.LocalDate.class),
+					rs.getObject("end_date", java.time.LocalDate.class), (Integer) rs.getObject("current_cycle_number"),
+
+					// plan
+					(Integer) rs.getObject("interval_count"), (UUID) rs.getObject("subscription_frequency_id"),
+					rs.getObject("contract_start_date", java.time.LocalDate.class),
+					rs.getObject("contract_end_date", java.time.LocalDate.class), (UUID) rs.getObject("entity_id"),
+					(UUID) rs.getObject("entity_type_id"),
+
+					// frequency/terms
+					rs.getString("frequency_name"), (Integer) rs.getObject("remaining_cycles"),
+
+					// invoice_entity joins
+					(UUID) rs.getObject("child_entity_id"), (UUID) rs.getObject("child_entity_type_id"),
+					(UUID) rs.getObject("parent_entity_id"), (UUID) rs.getObject("parent_entity_type_id"),
+
+					// template
+					(Integer) rs.getObject("template_total_cycles"), (UUID) rs.getObject("template_level_id"),
+
+					// final cycles
+					(Integer) rs.getObject("total_cycles"));
+		}
+	};
+
+	@Override
+	public Optional<InvoiceDetailRaw> loadInvoiceAggregate(UUID invoiceId) {
+		// TODO: adjust schema/table names for the invoice table if different
+		final String sql = """
+																with inv as (
+				  select *
+				  from "transaction".invoice
+				  where invoice_id = ?
+				),
+				sbh_pick as (
+				  select sbh.*
+				  from client_subscription_billing.subscription_billing_history sbh
+				  join inv i on sbh.invoice_id = i.invoice_id
+				  order by
+				    sbh.billing_attempt_on desc nulls last,
+				    sbh.payment_due_date   desc nulls last,
+				    sbh.cycle_number       desc nulls last
+				  limit 1
+				),
+				-- pick ONE invoice_entity row for this invoice (prefer items tied to a plan template)
+				ie_pick as (
+				  select ie.*
+				  from "transaction".invoice_entity ie
+				  join inv i on ie.invoice_id = i.invoice_id
+				  order by
+				    (ie.price_plan_template_id is not null) desc,
+				    ie.total_amount desc nulls last,
+				    ie.created_on  desc nulls last
+				  limit 1
+				)
+				select
+				  -- invoice
+				  i.invoice_id,
+				  i.invoice_number,
+				  i.invoice_date::date                        as invoice_date,
+				  coalesce(i.total_amount, 0)                 as amount,
+				  case when i.is_paid then 0 else coalesce(i.total_amount,0) end as balance_due,
+				  0::numeric                                  as write_off,
+				  coalesce(lis.status_name, 'UNKNOWN')        as status,
+				  null::text                                  as sales_rep,
+				  i.level_id                                  as level_id,
+
+				  -- billing history
+				  sbh.subscription_instance_id,
+				  sbh.amount_gross_incl_tax                   as amount_gross_incl_tax,
+
+				  -- instance
+				  si.subscription_plan_id,
+				  si.start_date,
+				  si.next_billing_date,
+				  si.last_billed_on,
+				  si.end_date,
+				  si.current_cycle_number,
+
+				  -- plan
+				  sp.interval_count,
+				  sp.subscription_frequency_id,
+				  sp.contract_start_date,
+				  sp.contract_end_date,
+				  sp.entity_id,
+				  sp.entity_type_id,
+
+				  -- frequency
+				  lf.frequency_name,
+
+				  -- terms
+				  spt.remaining_cycles,
+
+				  -- NEW: parent entity info from the picked invoice_entity
+				  ie.entity_id                                 as child_entity_id,
+				  ie.entity_type_id                            as child_entity_type_id,
+				  iep.entity_id                                as parent_entity_id,
+				  iep.entity_type_id                           as parent_entity_type_id,
+
+				  -- NEW: template fields
+				  bpt.total_cycles                             as template_total_cycles,
+				  bpt.level_id                                 as template_level_id,
+
+				  -- NEW: final total_cycles preference: template -> computed from instance/term
+				  coalesce(
+				    bpt.total_cycles,
+				    case
+				      when si.current_cycle_number is not null and spt.remaining_cycles is not null
+				        then si.current_cycle_number + spt.remaining_cycles
+				      else null
+				    end
+				  )                                            as total_cycles
+
+				from inv i
+				join sbh_pick sbh on true
+				join client_subscription_billing.subscription_instance si
+				  on si.subscription_instance_id = sbh.subscription_instance_id
+				join client_subscription_billing.subscription_plan sp
+				  on sp.subscription_plan_id = si.subscription_plan_id
+				join client_subscription_billing.lu_subscription_frequency lf
+				  on lf.subscription_frequency_id = sp.subscription_frequency_id
+
+				-- latest plan term (if any)
+				left join lateral (
+				  select spt.*
+				  from client_subscription_billing.subscription_plan_term spt
+				  where spt.subscription_plan_id = sp.subscription_plan_id
+				  order by spt.modified_on desc nulls last
+				  limit 1
+				) spt on true
+
+				-- pick one invoice_entity and its parent
+				left join ie_pick ie on true
+				left join "transaction".invoice_entity iep
+				  on iep.invoice_entity_id = ie.parent_invoice_entity_id
+
+				-- link to bundle plan template for cycles/level
+				left join bundles_new.bundle_plan_template bpt
+				  on bpt.plan_template_id = ie.price_plan_template_id
+
+				left join "transaction".lu_invoice_status lis
+				  on lis.invoice_status_id = i.invoice_status_id;
+
+
+																""";
+
+		try {
+			return Optional.ofNullable(cluboneJdbcTemplate.queryForObject(sql, RAW_MAPPER, invoiceId));
+		} catch (EmptyResultDataAccessException ex) {
+			return Optional.empty();
+		}
+	}
+
+	@Override
+	public BigDecimal findEffectivePriceForCycle(UUID subscriptionPlanId, int cycleNumber) {
+		final String sql = """
+				select spcp.effective_unit_price
+				from client_subscription_billing.subscription_plan_cycle_price spcp
+				where spcp.subscription_plan_id = ?
+				  and spcp.cycle_start <= ?
+				  and (spcp.cycle_end is null or spcp.cycle_end >= ?)
+				order by spcp.cycle_start desc
+				limit 1
+				""";
+		return cluboneJdbcTemplate.query(sql, rs -> rs.next() ? rs.getBigDecimal(1) : null, subscriptionPlanId,
+				cycleNumber, cycleNumber);
 	}
 
 }

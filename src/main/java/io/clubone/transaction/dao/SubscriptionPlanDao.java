@@ -91,5 +91,9 @@ public interface SubscriptionPlanDao {
 
 	record BillingRule(String frequencyName, String billingDay) {
 	}
+	
+	 Optional<InvoiceDetailRaw> loadInvoiceAggregateBySubscriptionPlan(UUID subscriptionPlanId);
+	 
+	 List<SubscriptionPlanSummaryDTO> findClientSubscriptionPlans(UUID clientRoleId);
 
 }

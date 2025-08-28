@@ -9,8 +9,10 @@ import io.clubone.transaction.request.SubscriptionPlanCreateRequest;
 import io.clubone.transaction.v2.vo.CyclePriceDTO;
 import io.clubone.transaction.v2.vo.DiscountCodeDTO;
 import io.clubone.transaction.v2.vo.EntitlementDTO;
+import io.clubone.transaction.v2.vo.InvoiceDetailRaw;
 import io.clubone.transaction.v2.vo.PlanTermDTO;
 import io.clubone.transaction.v2.vo.PromoDTO;
+import io.clubone.transaction.v2.vo.SubscriptionPlanSummaryDTO;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,11 +24,13 @@ import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.BadSqlGrammarException;
 import org.springframework.jdbc.core.BatchPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
 import java.math.BigDecimal;
 import java.sql.Date;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.sql.Types;
@@ -468,6 +472,272 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 			ps.setObject(3, frequencyId);
 		}, (rs, rn) -> new BillingRule(rs.getString("frequency_name"), rs.getString("billing_day")));
 		return list.isEmpty() ? Optional.empty() : Optional.of(list.get(0));
+	}
+
+	@Override
+	public Optional<InvoiceDetailRaw> loadInvoiceAggregateBySubscriptionPlan(UUID subscriptionPlanId) {
+		final String sql = """
+				WITH inv AS (
+				  SELECT i.*
+				  FROM client_subscription_billing.subscription_instance si
+				  JOIN client_subscription_billing.subscription_billing_history sbh
+				    ON sbh.subscription_instance_id = si.subscription_instance_id
+				  JOIN "transaction".invoice i
+				    ON i.invoice_id = sbh.invoice_id
+				  WHERE si.subscription_plan_id = ?
+				)
+				SELECT
+				  -- invoice
+				  i.invoice_id,
+				  i.invoice_number,
+				  i.invoice_date::date                          AS invoice_date,
+				  COALESCE(i.total_amount, 0)                   AS amount,
+				  CASE WHEN i.is_paid THEN 0 ELSE COALESCE(i.total_amount, 0) END AS balance_due,
+				  0::numeric                                    AS write_off,
+				  COALESCE(lis.status_name, 'UNKNOWN')          AS status,
+				  NULL::text                                    AS sales_rep,
+				  i.level_id                                    AS level_id,
+
+				  -- billing history (latest per invoice)
+				  sbh.subscription_instance_id,
+				  sbh.amount_gross_incl_tax                     AS amount_gross_incl_tax,
+
+				  -- instance
+				  si.subscription_plan_id,
+				  si.start_date,
+				  si.next_billing_date,
+				  si.last_billed_on,
+				  si.end_date,
+				  si.current_cycle_number,
+
+				  -- plan
+				  sp.interval_count,
+				  sp.subscription_frequency_id,
+				  sp.contract_start_date,
+				  sp.contract_end_date,
+				  sp.entity_id,
+				  sp.entity_type_id,
+
+				  -- frequency
+				  lf.frequency_name,
+
+				  -- terms
+				  COALESCE(spt.remaining_cycles, 0)             AS remaining_cycles,
+
+				  -- child/parent invoice entities (picked per-invoice)
+				  ie.entity_id                                   AS child_entity_id,
+				  ie.entity_type_id                              AS child_entity_type_id,
+				  iep.entity_id                                  AS parent_entity_id,
+				  iep.entity_type_id                             AS parent_entity_type_id,
+
+				  -- template fields
+				  bpt.total_cycles                               AS template_total_cycles,
+				  bpt.level_id                                   AS template_level_id,
+
+				  -- final total_cycles preference: template -> computed from instance/term
+				  COALESCE(
+				    bpt.total_cycles,
+				    CASE
+				      WHEN si.current_cycle_number IS NOT NULL AND spt.remaining_cycles IS NOT NULL
+				        THEN si.current_cycle_number + spt.remaining_cycles
+				      ELSE NULL
+				    END
+				  )                                              AS total_cycles
+
+				FROM inv i
+
+				-- latest SBH per invoice
+				LEFT JOIN LATERAL (
+				  SELECT sbh.*
+				  FROM client_subscription_billing.subscription_billing_history sbh
+				  WHERE sbh.invoice_id = i.invoice_id
+				  ORDER BY
+				    sbh.billing_attempt_on DESC NULLS LAST,
+				    sbh.payment_due_date   DESC NULLS LAST,
+				    sbh.cycle_number       DESC NULLS LAST
+				  LIMIT 1
+				) sbh ON TRUE
+
+				-- instance/plan/frequency
+				LEFT JOIN client_subscription_billing.subscription_instance si
+				  ON si.subscription_instance_id = sbh.subscription_instance_id
+				LEFT JOIN client_subscription_billing.subscription_plan sp
+				  ON sp.subscription_plan_id = si.subscription_plan_id
+				LEFT JOIN client_subscription_billing.lu_subscription_frequency lf
+				  ON lf.subscription_frequency_id = sp.subscription_frequency_id
+
+				-- latest plan term (if any)
+				LEFT JOIN LATERAL (
+				  SELECT spt.*
+				  FROM client_subscription_billing.subscription_plan_term spt
+				  WHERE spt.subscription_plan_id = sp.subscription_plan_id
+				  ORDER BY spt.modified_on DESC NULLS LAST
+				  LIMIT 1
+				) spt ON TRUE
+
+				-- pick ONE invoice_entity per invoice
+				LEFT JOIN LATERAL (
+				  SELECT ie.*
+				  FROM "transaction".invoice_entity ie
+				  WHERE ie.invoice_id = i.invoice_id
+				  ORDER BY
+				    (ie.price_plan_template_id IS NOT NULL) DESC,
+				    ie.total_amount DESC NULLS LAST,
+				    ie.created_on  DESC NULLS LAST
+				  LIMIT 1
+				) ie ON TRUE
+
+				-- parent entity (if any)
+				LEFT JOIN "transaction".invoice_entity iep
+				  ON iep.invoice_entity_id = ie.parent_invoice_entity_id
+
+				-- bundle plan template
+				LEFT JOIN bundles_new.bundle_plan_template bpt
+				  ON bpt.plan_template_id = ie.price_plan_template_id
+
+				LEFT JOIN "transaction".lu_invoice_status lis
+				  ON lis.invoice_status_id = i.invoice_status_id
+
+				ORDER BY i.invoice_date DESC, i.created_on DESC NULLS LAST
+				 """;
+
+		try {
+			return Optional.ofNullable(cluboneJdbcTemplate.queryForObject(sql, RAW_MAPPER, subscriptionPlanId));
+		} catch (EmptyResultDataAccessException ex) {
+			return Optional.empty();
+		}
+	}
+
+	private static final RowMapper<InvoiceDetailRaw> RAW_MAPPER = new RowMapper<>() {
+		@Override
+		public InvoiceDetailRaw mapRow(ResultSet rs, int rowNum) throws SQLException {
+			return new InvoiceDetailRaw(
+					// invoice
+					(UUID) rs.getObject("invoice_id"), rs.getString("invoice_number"),
+					rs.getObject("invoice_date", java.time.LocalDate.class), rs.getBigDecimal("amount"),
+					rs.getBigDecimal("balance_due"), rs.getBigDecimal("write_off"), rs.getString("status"),
+					rs.getString("sales_rep"), (UUID) rs.getObject("level_id"),
+
+					// billing history
+					(UUID) rs.getObject("subscription_instance_id"), rs.getBigDecimal("amount_gross_incl_tax"),
+
+					// instance
+					(UUID) rs.getObject("subscription_plan_id"), rs.getObject("start_date", java.time.LocalDate.class),
+					rs.getObject("next_billing_date", java.time.LocalDate.class),
+					rs.getObject("last_billed_on", java.time.LocalDate.class),
+					rs.getObject("end_date", java.time.LocalDate.class), (Integer) rs.getObject("current_cycle_number"),
+
+					// plan
+					(Integer) rs.getObject("interval_count"), (UUID) rs.getObject("subscription_frequency_id"),
+					rs.getObject("contract_start_date", java.time.LocalDate.class),
+					rs.getObject("contract_end_date", java.time.LocalDate.class), (UUID) rs.getObject("entity_id"),
+					(UUID) rs.getObject("entity_type_id"),
+
+					// frequency/terms
+					rs.getString("frequency_name"), (Integer) rs.getObject("remaining_cycles"),
+
+					// invoice_entity joins
+					(UUID) rs.getObject("child_entity_id"), (UUID) rs.getObject("child_entity_type_id"),
+					(UUID) rs.getObject("parent_entity_id"), (UUID) rs.getObject("parent_entity_type_id"),
+
+					// template
+					(Integer) rs.getObject("template_total_cycles"), (UUID) rs.getObject("template_level_id"),
+
+					// final cycles
+					(Integer) rs.getObject("total_cycles"));
+		}
+	};
+
+	@Override
+	public List<SubscriptionPlanSummaryDTO> findClientSubscriptionPlans(UUID clientRoleId) throws DataAccessException {
+		final String sql = """
+
+				WITH plans AS (
+				  SELECT sp.subscription_plan_id,
+				         sp.entity_type_id,
+				         sp.entity_id
+				  FROM client_subscription_billing.subscription_plan sp
+				  JOIN client_payments.client_payment_method cpm
+				    ON cpm.client_payment_method_id = sp.client_payment_method_id
+				  WHERE cpm.client_role_id = ?   -- pass clientRoleId here
+				)
+				SELECT
+				  -- per instance (guaranteed present)
+				  si.subscription_plan_id,
+				  si.start_date,
+				  si.end_date,
+				  COALESCE(lss.status_name, 'UNKNOWN') AS status,
+				  p.entity_type_id,
+				  p.entity_id,
+
+				  -- parent from latest invoice's picked invoice_entity (guaranteed present)
+				  iep.entity_id      AS parent_entity_id,
+				  iep.entity_type_id AS parent_entity_type_id,
+
+				  -- level preference: invoice.level_id -> template.level_id
+				  COALESCE(inv.level_id, bpt.level_id) AS level_id
+
+				FROM plans p
+
+				-- MUST have an instance -> ensures subscription_plan_id is not null in result
+				JOIN client_subscription_billing.subscription_instance si
+				  ON si.subscription_plan_id = p.subscription_plan_id
+
+				LEFT JOIN client_subscription_billing.lu_subscription_instance_status lss
+				  ON lss.subscription_instance_status_id = si.subscription_instance_status_id
+
+				-- pick latest invoice for this instance (via SBH)
+				LEFT JOIN LATERAL (
+				  SELECT i.invoice_id, i.level_id
+				  FROM client_subscription_billing.subscription_billing_history sbh
+				  JOIN "transaction".invoice i
+				    ON i.invoice_id = sbh.invoice_id
+				  WHERE sbh.subscription_instance_id = si.subscription_instance_id
+				  ORDER BY
+				    sbh.billing_attempt_on DESC NULLS LAST,
+				    sbh.payment_due_date   DESC NULLS LAST,
+				    sbh.cycle_number       DESC NULLS LAST
+				  LIMIT 1
+				) inv ON TRUE
+
+				-- pick ONE invoice_entity from that invoice (prefer rows tied to a plan template)
+				LEFT JOIN LATERAL (
+				  SELECT ie.*
+				  FROM "transaction".invoice_entity ie
+				  WHERE ie.invoice_id = inv.invoice_id
+				  ORDER BY
+				    (ie.price_plan_template_id IS NOT NULL) DESC,
+				    ie.total_amount DESC NULLS LAST,
+				    ie.created_on  DESC NULLS LAST
+				  LIMIT 1
+				) ie ON TRUE
+
+				-- MUST have a parent entity -> filters out rows without parent_entity_id
+				JOIN "transaction".invoice_entity iep
+				  ON iep.invoice_entity_id = ie.parent_invoice_entity_id
+
+				-- template (for level fallback)
+				LEFT JOIN bundles_new.bundle_plan_template bpt
+				  ON bpt.plan_template_id = ie.price_plan_template_id
+
+				ORDER BY si.start_date DESC NULLS LAST, si.subscription_plan_id;
+				            """;
+
+		return cluboneJdbcTemplate.query(sql, (rs, rowNum) -> mapPlanRow(rs), clientRoleId);
+	}
+
+	private SubscriptionPlanSummaryDTO mapPlanRow(ResultSet rs) throws SQLException {
+		return new SubscriptionPlanSummaryDTO(uuid(rs, "subscription_plan_id"),
+				rs.getObject("start_date", LocalDate.class), rs.getObject("end_date", LocalDate.class),
+				rs.getString("status"), uuid(rs, "entity_type_id"), uuid(rs, "entity_id"), uuid(rs, "parent_entity_id"),
+				uuid(rs, "parent_entity_type_id"), uuid(rs, "level_id"));
+	}
+
+	private static UUID uuid(ResultSet rs, String col) throws SQLException {
+		Object o = rs.getObject(col);
+		return (o == null) ? null : (UUID) o;
+		// If driver returns String for UUID, use: return o == null ? null :
+		// UUID.fromString(o.toString());
 	}
 
 }

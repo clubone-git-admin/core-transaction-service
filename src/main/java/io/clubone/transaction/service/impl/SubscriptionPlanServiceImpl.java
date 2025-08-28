@@ -1,13 +1,23 @@
 package io.clubone.transaction.service.impl;
 
+import io.clubone.transaction.dao.EntityLookupDao;
 import io.clubone.transaction.dao.SubscriptionPlanDao;
 import io.clubone.transaction.dao.SubscriptionPlanDao.BillingRule;
+import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.request.SubscriptionPlanBatchCreateRequest;
 import io.clubone.transaction.request.SubscriptionPlanCreateRequest;
 import io.clubone.transaction.response.PlanCreateResult;
 import io.clubone.transaction.response.SubscriptionPlanBatchCreateResponse;
 import io.clubone.transaction.response.SubscriptionPlanCreateResponse;
 import io.clubone.transaction.service.SubscriptionPlanService;
+import io.clubone.transaction.util.FrequencyUnit;
+import io.clubone.transaction.v2.vo.CyclePriceDTO;
+import io.clubone.transaction.v2.vo.EntityLevelInfoDTO;
+import io.clubone.transaction.v2.vo.InvoiceDetailDTO;
+import io.clubone.transaction.v2.vo.InvoiceDetailRaw;
+import io.clubone.transaction.v2.vo.PaymentTimelineItemDTO;
+import io.clubone.transaction.v2.vo.SubscriptionPlanSummaryDTO;
+import io.clubone.transaction.vo.TaxRateAllocationDTO;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,8 +36,11 @@ import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.NoSuchElementException;
+import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -38,6 +51,12 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 
 	@Autowired
 	private PlatformTransactionManager txm;
+
+	@Autowired
+	private TransactionDAO transactionDAO;
+
+	@Autowired
+	private EntityLookupDao entityLookupDao;
 
 	private static final Logger log = LoggerFactory.getLogger(SubscriptionPlanServiceImpl.class);
 
@@ -64,7 +83,7 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 
 			LocalDate nextBill = computeNextBillingDate(start, freqId, interval, dayRuleId,
 					request.getCyclePrices().get(0).getCycleStart());
-			UUID priceCycleBandId=request.getCyclePrices().get(0).getPriceCycleBandId();
+			UUID priceCycleBandId = request.getCyclePrices().get(0).getPriceCycleBandId();
 
 			// Resolve status IDs for instance + billing
 			UUID instanceStatusId = dao
@@ -78,17 +97,24 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 			// OPTIONAL: seed first billing history row (cycle 1).
 			// If you don’t have final pricing yet, seed minimal required values and let
 			// the billing engine update it later.
-			BigDecimal grossInclTax = firstCycleAmountOrZero(request); // put your pricing calc here
-			BigDecimal taxTotal = BigDecimal.ZERO; // fill when you have tax
-			BigDecimal netExTax = grossInclTax.subtract(taxTotal);
+			BigDecimal netExTax = firstCycleAmountOrZero(request); // put your pricing calc here
+			BigDecimal taxTotal = computeTaxesFromItemOnly(request.getEntityId(), request.getLevelId(), netExTax);// fill
+																													// when
+																													// you
+																													// have
+																													// tax
+			BigDecimal grossInclTax = netExTax.add(taxTotal);
 
 			// Convert to minor units (INR/USD -> 2 decimals)
-			long chargedMinor = grossInclTax.movePointRight(2).setScale(0, RoundingMode.HALF_UP).longValueExact();
+			long chargedMinor = 0;
+			// grossInclTax.movePointRight(2).setScale(0,
+			// RoundingMode.HALF_UP).longValueExact();
 
 			SubscriptionPlanDao.BillingHistoryRow row = new SubscriptionPlanDao.BillingHistoryRow(instanceId,
-					chargedMinor, 1, nextBill, billingStatusScheduledId, priceCycleBandId, // set if you know current band
-					null, null, null, netExTax, taxTotal, null, null, null, null, Boolean.FALSE, null, null, null,
-					null);
+					chargedMinor, request.getCyclePrices().get(0).getCycleStart(), nextBill, billingStatusScheduledId,
+					priceCycleBandId, // set if you know current band
+					null, null, request.getInvoiceId(), netExTax, taxTotal, null, null, null, null, Boolean.FALSE, null,
+					null, null, null);
 			dao.insertSubscriptionBillingHistory(row);
 		}
 
@@ -101,6 +127,32 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 		resp.setPromosInserted(pmx.length);
 		resp.setTermInserted(term > 0);
 		return resp;
+	}
+
+	private BigDecimal computeTaxesFromItemOnly(UUID itemId, UUID levelId, BigDecimal unitPrice) {
+		UUID taxGroupId = null;
+		BigDecimal taxAmount = BigDecimal.ZERO;
+		try {
+			taxGroupId = transactionDAO.findTaxGroupIdForItem(itemId, levelId);
+		} catch (Exception ignore) {
+		}
+
+		if (taxGroupId == null) {
+			return taxAmount;
+		}
+
+		List<TaxRateAllocationDTO> taxAllocs = transactionDAO.getTaxRatesByGroupAndLevel(taxGroupId, levelId);
+
+		if (taxAllocs == null || taxAllocs.isEmpty()) {
+			return taxAmount;
+		}
+		for (TaxRateAllocationDTO tr : taxAllocs) {
+			BigDecimal thisTax = unitPrice.multiply(tr.getTaxRatePercentage()).divide(new BigDecimal("100"), 2,
+					RoundingMode.HALF_UP);
+
+			taxAmount = taxAmount.add(thisTax);
+		}
+		return taxAmount;
 	}
 
 	private static <T> List<T> nz(List<T> list) {
@@ -209,7 +261,7 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 	 */
 	public LocalDate computeNextBillingDate(LocalDate start, UUID frequencyId, Integer interval, UUID dayRuleId,
 			Integer cycleStart) {
-		cycleStart=cycleStart-1;
+		cycleStart = cycleStart - 1;
 
 		if (start == null)
 			start = LocalDate.now();
@@ -337,8 +389,173 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 
 	/** Placeholder: derive first cycle amount. Replace with your pricing engine. */
 	private BigDecimal firstCycleAmountOrZero(SubscriptionPlanCreateRequest req) {
-		// e.g., read first cycle price from req.getCyclePrices(), apply discounts,
-		// taxes
-		return BigDecimal.ZERO;
+		if (req == null || req.getCyclePrices() == null)
+			return BigDecimal.ZERO;
+		return effectiveUnitPriceForCycle(req.getCyclePrices(), req.getCyclePrices().get(0).getCycleStart())
+				.orElse(BigDecimal.ZERO);
+	}
+
+	/**
+	 * Returns the effective unit price for the cycle: - picks the price row whose
+	 * [cycleStart, cycleEnd] contains `cycle` - if multiple match, prefers the one
+	 * with the highest cycleStart - uses windowOverrideUnitPrice when present; else
+	 * unitPrice
+	 */
+	private Optional<BigDecimal> effectiveUnitPriceForCycle(List<CyclePriceDTO> prices, int cycle) {
+		if (prices == null || prices.isEmpty())
+			return Optional.empty();
+
+		return prices.stream()
+				.filter(p -> p != null && p.getCycleStart() != null && p.getCycleStart() <= cycle
+						&& (p.getCycleEnd() == null || p.getCycleEnd() >= cycle))
+				// if multiple bands match, take the most specific (largest cycleStart)
+				.sorted(Comparator.<CyclePriceDTO, Integer>comparing(
+						p -> p.getCycleStart() == null ? Integer.MIN_VALUE : p.getCycleStart()).reversed())
+				.map(p -> {
+					BigDecimal eff = p.getWindowOverrideUnitPrice();
+					if (eff == null)
+						eff = p.getUnitPrice();
+					return Optional.ofNullable(eff);
+				}).filter(Optional::isPresent).map(Optional::get).findFirst();
+	}
+
+	@Override
+	@Transactional(readOnly = true)
+	public InvoiceDetailDTO getSubscriptionDetail(UUID subscriptionPlanId) {
+		final InvoiceDetailRaw raw = dao.loadInvoiceAggregateBySubscriptionPlan(subscriptionPlanId).orElseThrow(
+				() -> new NoSuchElementException("No invoice found for subscriptionPlanId: " + subscriptionPlanId));
+
+		return mapRawToDto(raw);
+	}
+
+	private InvoiceDetailDTO mapRawToDto(InvoiceDetailRaw raw) {
+		final int currentCycle = nvl(raw.currentCycleNumber(), 0);
+		final int totalCycle = nvl(raw.totalCycles(), 0);
+
+		// Prefer SBH gross incl. tax if present; fallback to invoice header amount
+		final BigDecimal priceForCurrentCycle = raw.amountGrossInclTax() != null ? raw.amountGrossInclTax()
+				: raw.invoiceAmount();
+
+		// Build frequency label
+		final FrequencyUnit unit = FrequencyUnit.fromDb(raw.frequencyName());
+		final int interval = nvl(raw.intervalCount(), 1);
+		final LocalDate refDate = coalesce(raw.instanceNextBillingDate(),
+				coalesce(raw.instanceLastBilledOn(), raw.instanceStartDate()));
+		final String billingFrequencyLabel = switch (unit) {
+		case MONTH -> {
+			int dom = (refDate != null ? refDate.getDayOfMonth() : 1);
+			yield "Monthly on the " + dom + getDaySuffix(dom);
+		}
+		case WEEK -> "Every " + interval + (interval == 1 ? " week" : " weeks");
+		case YEAR -> "Yearly";
+		case DAY -> "Daily";
+		};
+
+		// Commitment paid (current / total)
+		Integer numerator = (raw.remainingCycles() == null || totalCycle == 0) ? null
+				: Math.max(0, totalCycle - raw.remainingCycles());
+		Integer denominator = (totalCycle == 0 ? null : totalCycle);
+
+		// Build timeline (reuses your existing helper)
+		final List<PaymentTimelineItemDTO> timeline = buildTimeline(unit, interval, raw, priceForCurrentCycle);
+
+		// Resolve display entity (prefer parent; fallback to child) — FIXED bug:
+		// fallback should use childEntityId()
+		final UUID parentEntityId = raw.parentEntityId() != null ? raw.parentEntityId() : raw.childEntityId();
+		final UUID parentEntityTypeId = raw.parentEntityTypeId() != null ? raw.parentEntityTypeId()
+				: raw.childEntityTypeId();
+		final UUID levelId = raw.levelId();
+
+		String entityName = "";
+		String locationName = "";
+		entityLookupDao.resolveEntityAndLevel(parentEntityTypeId, parentEntityId, levelId).ifPresent(info -> {
+			// small holder to mutate effectively final vars
+		});
+
+		// Workaround because lambdas need effectively final; fetch once and assign
+		Optional<EntityLevelInfoDTO> entityDetail = entityLookupDao.resolveEntityAndLevel(parentEntityTypeId,
+				parentEntityId, levelId);
+		if (entityDetail.isPresent()) {
+			entityName = entityDetail.get().entityName();
+			locationName = entityDetail.get().levelName();
+		}
+
+		return new InvoiceDetailDTO(raw.invoiceId(), raw.invoiceNumber(), raw.invoiceDate(), raw.invoiceStatus(),
+				raw.invoiceAmount(), raw.invoiceBalanceDue(), raw.invoiceWriteOff(), raw.salesRep(),
+
+				// badges / header chips (customize as needed)
+				"CONTRACT", "ACTIVE", entityName, locationName, priceForCurrentCycle,
+
+				// commitment progress
+				numerator, denominator, billingFrequencyLabel, raw.contractEndDate(), raw.instanceNextBillingDate(),
+				raw.instanceStartDate(), raw.contractStartDate(), // using contract start as sign-up for now
+
+				null, // autoPay (TODO: fetch from payment settings)
+				null, // primaryPaymentMethodMasked (TODO)
+
+				"Membership · Base Membership", // TODO derive from plan/entity
+				true, // recurring
+				"—", null,
+
+				timeline);
+	}
+
+	private static <T> T nvl(T v, T fallback) {
+		return v != null ? v : fallback;
+	}
+
+	private static <T> T coalesce(T a, T b) {
+		return a != null ? a : b;
+	}
+
+	private static List<PaymentTimelineItemDTO> buildTimeline(FrequencyUnit unit, int interval, InvoiceDetailRaw raw,
+			BigDecimal cycleAmount) {
+		List<PaymentTimelineItemDTO> list = new ArrayList<>();
+		list.add(new PaymentTimelineItemDTO(raw.invoiceDate(), raw.invoiceAmount(),
+				(raw.invoiceStatus().equalsIgnoreCase("PAID")) ? true : false));
+
+		LocalDate paidDate = raw.instanceLastBilledOn();
+		if (paidDate != null) {
+			list.add(new PaymentTimelineItemDTO(paidDate, cycleAmount, true));
+		}
+
+		LocalDate start = Optional.ofNullable(raw.instanceNextBillingDate())
+				.orElseGet(() -> paidDate != null ? addCycles(paidDate, unit, interval, 1) : raw.instanceStartDate());
+
+		LocalDate d = start;
+		for (int i = 0; i < raw.remainingCycles() - (paidDate != null ? 1 : 0); i++) {
+			list.add(new PaymentTimelineItemDTO(d, cycleAmount, false));
+			d = addCycles(d, unit, interval, 1);
+			if (raw.instanceEndDate() != null && d.isAfter(raw.instanceEndDate()))
+				break;
+		}
+		return list;
+	}
+
+	private static LocalDate addCycles(LocalDate date, FrequencyUnit unit, int interval, int count) {
+		int steps = Math.max(1, interval) * Math.max(1, count);
+		return switch (unit) {
+		case DAY -> date.plusDays(steps);
+		case WEEK -> date.plusWeeks(steps);
+		case MONTH -> date.plusMonths(steps);
+		case YEAR -> date.plusYears(steps);
+		};
+	}
+
+	private static String getDaySuffix(int day) {
+		if (day >= 11 && day <= 13)
+			return "th";
+		return switch (day % 10) {
+		case 1 -> "st";
+		case 2 -> "nd";
+		case 3 -> "rd";
+		default -> "th";
+		};
+	}
+
+	@Override
+	@Transactional(readOnly = true)
+	public List<SubscriptionPlanSummaryDTO> getClientSubscriptionPlans(UUID clientRoleId) {
+		return dao.findClientSubscriptionPlans(clientRoleId);
 	}
 }

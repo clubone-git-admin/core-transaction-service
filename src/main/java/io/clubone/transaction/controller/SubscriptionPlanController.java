@@ -3,6 +3,7 @@ package io.clubone.transaction.controller;
 import jakarta.validation.Valid;
 
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.UUID;
 
 import org.springframework.beans.factory.annotation.Autowired;
@@ -15,6 +16,8 @@ import io.clubone.transaction.request.SubscriptionPlanCreateRequest;
 import io.clubone.transaction.response.SubscriptionPlanBatchCreateResponse;
 import io.clubone.transaction.response.SubscriptionPlanCreateResponse;
 import io.clubone.transaction.service.SubscriptionPlanService;
+import io.clubone.transaction.v2.vo.InvoiceDetailDTO;
+import io.clubone.transaction.v2.vo.SubscriptionPlanSummaryDTO;
 
 @RestController
 @RequestMapping("/subscription/api/plan")
@@ -22,7 +25,7 @@ public class SubscriptionPlanController {
 
 	@Autowired
 	private SubscriptionPlanService service;
-	
+
 	@Autowired
 	private SubscriptionPlanHelper helperService;
 
@@ -42,11 +45,29 @@ public class SubscriptionPlanController {
 		UUID createdBy = request.getCreatedBy() == null ? UUID.randomUUID() : request.getCreatedBy();
 		return ResponseEntity.ok(service.createPlans(request, createdBy));
 	}
-	
-	 @GetMapping("/build-request")
-	    public ResponseEntity<List<SubscriptionPlanCreateRequest>> buildRequest(
-	            @RequestParam UUID invoiceId,
-	            @RequestParam UUID transactionId) {
-	        return ResponseEntity.ok(helperService.buildRequests(invoiceId, transactionId));
-	    }
+
+	@GetMapping("/build-request")
+	public ResponseEntity<List<SubscriptionPlanCreateRequest>> buildRequest(@RequestParam UUID invoiceId,
+			@RequestParam UUID transactionId) {
+		return ResponseEntity.ok(helperService.buildRequests(invoiceId, transactionId));
+	}
+
+	@GetMapping("/{subscriptionPlanId}/detail")
+	public ResponseEntity<?> getInvoiceDetail(@PathVariable UUID subscriptionPlanId) {
+		try {
+			InvoiceDetailDTO dto = service.getSubscriptionDetail(subscriptionPlanId);
+			return ResponseEntity.ok(dto);
+		} catch (NoSuchElementException e) {
+			return ResponseEntity.notFound().build();
+		} catch (Exception e) {
+			return ResponseEntity.status(500).body(e.getMessage());
+		}
+	}
+
+	@GetMapping("/by-client-role/{clientRoleId}")
+	public ResponseEntity<List<SubscriptionPlanSummaryDTO>> getPlansByClientRole(@PathVariable UUID clientRoleId) {
+
+		List<SubscriptionPlanSummaryDTO> list = service.getClientSubscriptionPlans(clientRoleId);
+		return ResponseEntity.ok(list);
+	}
 }

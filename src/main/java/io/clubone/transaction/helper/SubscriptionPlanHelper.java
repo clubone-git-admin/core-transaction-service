@@ -42,6 +42,7 @@ public class SubscriptionPlanHelper {
 		UUID subscriptionBillingDayRuleId;
 		Integer intervalCount;
 		Integer totalCycles;
+		UUID levelId;
 	}
 
 	/**
@@ -61,7 +62,8 @@ public class SubscriptionPlanHelper {
 				        bpt.subscription_frequency_id,
 				        COALESCE(bpt.interval_count, 1) AS interval_count,
 				        bpt.total_cycles,
-				        sf.frequency_name AS subscription_frequency_name
+				        sf.frequency_name AS subscription_frequency_name,
+				        i.level_id
 				    FROM "transaction".invoice_entity ie
 				    JOIN "transaction".invoice i
 				      ON i.invoice_id = ie.invoice_id
@@ -103,6 +105,7 @@ public class SubscriptionPlanHelper {
 			row.totalCycles = (Integer) rs.getObject("total_cycles");
 
 			row.subscriptionFrequency = rs.getString("subscription_frequency_name");
+			row.levelId=(UUID) rs.getObject("level_id");
 			return row;
 		}, invoiceId, transactionId);
 	}
@@ -209,6 +212,7 @@ public class SubscriptionPlanHelper {
 			req.setSubscriptionFrequencyId(r.subscriptionFrequencyId);
 			req.setSubscriptionBillingDayRuleId(r.subscriptionBillingDayRuleId);
 			req.setIntervalCount(r.intervalCount != null ? r.intervalCount : 1);
+			req.setInvoiceId(invoiceId);req.setLevelId(r.levelId);
 
 			// dates (fallback end date if null)
 			LocalDate start = r.contractStartDate != null ? r.contractStartDate : LocalDate.now();

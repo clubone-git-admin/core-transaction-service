@@ -31,6 +31,7 @@ public class PaymentServiceImpl implements PaymentService {
 		headers.setContentType(MediaType.APPLICATION_JSON);
 
 		HttpEntity<PaymentRequestDTO> entity = new HttpEntity<>(request, headers);
+		System.out.println("clientRoleId "+request.getClientRoleId());
 
 		ResponseEntity<PaymentResponseDTO> response = restTemplate.exchange(paymentApiUrl, HttpMethod.POST, entity,
 				PaymentResponseDTO.class);

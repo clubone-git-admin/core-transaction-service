@@ -511,6 +511,7 @@ public class TransactionServiceImpl implements TransactionService {
 		}
 
 		Optional<InvoiceSummaryDTO> invoiceSummary = transactionDAO.getInvoiceSummaryById(req.getInvoiceId());
+		System.out.println("clienRoleId "+invoiceSummary.get().getClientRoleId());
 		if (invoiceSummary.isPresent() && invoiceSummary.get() != null) {
 			req.setClientRoleId(invoiceSummary.get().getClientRoleId());
 			req.setTotalAmount(invoiceSummary.get().getTotalAmount());

@@ -14,6 +14,7 @@ public class InvoiceDTO {
     private UUID clientRoleId;
     private String billingAddress;
     private UUID invoiceStatusId;
+    private String invoiceStatus;
     private BigDecimal totalAmount;
     private BigDecimal subTotal;
     private BigDecimal taxAmount;

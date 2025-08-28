@@ -1,11 +1,14 @@
 package io.clubone.transaction.dao;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 import io.clubone.transaction.v2.vo.BundlePriceCycleBandDTO;
 import io.clubone.transaction.v2.vo.DiscountDetailDTO;
+import io.clubone.transaction.v2.vo.InvoiceDetailDTO;
+import io.clubone.transaction.v2.vo.InvoiceDetailRaw;
 import io.clubone.transaction.vo.BundleComponent;
 import io.clubone.transaction.vo.BundleItemPriceDTO;
 import io.clubone.transaction.vo.EntityTypeDTO;
@@ -66,9 +69,16 @@ public interface TransactionDAO {
 	List<BundlePriceCycleBandDTO> findByPriceCycleBandId(UUID priceCycleBandId);
 
 	Optional<String> findTypeNameByBundleItemId(UUID bundleItemId);
-	
+
 	boolean isProrateApplicable(UUID planTemplateId);
+
+	List<io.clubone.transaction.v2.vo.InvoiceSummaryDTO> findByClientRole(UUID clientRoleId, Integer limit,
+			Integer offset);
+
+	Optional<InvoiceDetailRaw> loadInvoiceAggregate(UUID invoiceId);
+
+	/** Effective price for a specific cycle of a plan. */
+	BigDecimal findEffectivePriceForCycle(UUID subscriptionPlanId, int cycleNumber);
 	
-	List<io.clubone.transaction.v2.vo.InvoiceSummaryDTO> findByClientRole(UUID clientRoleId, Integer limit, Integer offset);
 
 }

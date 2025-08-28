@@ -12,6 +12,7 @@ public class TransactionDTO {
     private UUID clientPaymentTransactionId;
     private UUID levelId;
     private UUID invoiceId;
+    private String transactionCode;
     private Timestamp transactionDate;
     private List<TransactionEntityDTO> lineItems;
     private UUID createdBy;
