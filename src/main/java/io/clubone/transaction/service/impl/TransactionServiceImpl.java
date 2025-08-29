@@ -22,7 +22,10 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.CollectionUtils;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+
+import io.clubone.transaction.api.vo.MembershipSalesRequestDTO;
 import io.clubone.transaction.dao.TransactionDAO;
+import io.clubone.transaction.helper.AgreementHelper;
 import io.clubone.transaction.helper.SubscriptionPlanHelper;
 import io.clubone.transaction.request.CreateInvoiceRequest;
 import io.clubone.transaction.request.CreateInvoiceRequestV3;
@@ -68,6 +71,9 @@ public class TransactionServiceImpl implements TransactionService {
 
 	@Autowired
 	private SubscriptionPlanService subscriptionPlanService;
+	
+	@Autowired
+	private AgreementHelper agreementHelper;
 
 	private static final Logger logger = LoggerFactory.getLogger(TransactionServiceImpl.class);
 
@@ -576,6 +582,14 @@ public class TransactionServiceImpl implements TransactionService {
 			subscriptionPlanService.createPlans(subscriptionPlanBatchCreateRequest, UUID.randomUUID());
 		} catch (Exception e) {
 			System.out.println("Error is creating subscription " + e.getMessage());
+		}
+		try {
+		MembershipSalesRequestDTO purchaseAgrRequest=agreementHelper.createPurchaseAgreementRequest(req.getInvoiceId());
+		if(Objects.nonNull(purchaseAgrRequest)) {
+			agreementHelper.callMembershipSalesApi(purchaseAgrRequest);
+		}
+		}catch (Exception e) {
+			System.err.println("Error in agreement purchase flow "+e.getMessage());
 		}
 		return new FinalizeTransactionResponse(req.getInvoiceId(), "PAID", clientPaymentTransactionId, transactionId,
 				"");
