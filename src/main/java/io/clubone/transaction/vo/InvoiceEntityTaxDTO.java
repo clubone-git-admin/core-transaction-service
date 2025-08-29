@@ -10,5 +10,6 @@ public class InvoiceEntityTaxDTO {
 	private UUID taxRateId;
 	private BigDecimal taxRate;
 	private BigDecimal taxAmount;
+	private String taxAuthority;
 
 }

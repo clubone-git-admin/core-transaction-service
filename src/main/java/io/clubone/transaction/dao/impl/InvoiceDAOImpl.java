@@ -33,6 +33,7 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 
 	@Autowired
 	private EntityLookupDao entityLookupDao;
+
 	@Override
 	public InvoiceDTO findResolvedById(UUID invoiceId) {
 		// 1) Invoice header
@@ -53,7 +54,7 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 				      i.created_by          AS createdBy,
 				      lis.status_name as invoiceStatus
 				    FROM "transaction".invoice i
-				    join "transaction".lu_invoice_status lis on lis.invoice_status_id =i.invoice_status_id 
+				    join "transaction".lu_invoice_status lis on lis.invoice_status_id =i.invoice_status_id
 				    WHERE i.invoice_id = ?
 				""";
 
@@ -94,8 +95,8 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 
 			for (InvoiceEntityDTO li : lines) {
 				Optional<EntityLevelInfoDTO> enityDetail = entityLookupDao.resolveEntityAndLevel(li.getEntityTypeId(),
-						li.getEntityId(),invoice.getLevelId());
-				if(enityDetail.isPresent()) {
+						li.getEntityId(), invoice.getLevelId());
+				if (enityDetail.isPresent()) {
 					li.setEntityName(enityDetail.get().entityName());
 				}
 				li.setDiscounts(discounts.getOrDefault(li.getInvoiceEntityId(), List.of()));
@@ -152,15 +153,17 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 		String in = ids.stream().map(id -> "?").collect(java.util.stream.Collectors.joining(","));
 
 		final String sql = """
-				    SELECT
+				     SELECT
 				      ied.invoice_entity_id,
 				      ied.discount_id,
 				      /* we don't store a percent/rate in invoice_entity_discount; return NULL */
 				      NULL::numeric                    AS discount_rate,
 				      ied.discount_amount,
 				      ied.calculation_type_id,
-				      ied.adjustment_type_id
+				      ied.adjustment_type_id,
+				      lct.name as calculationType
 				    FROM "transaction".invoice_entity_discount ied
+				    join discount.lu_calculation_type lct on lct.calculation_type_id =ied.calculation_type_id
 				    WHERE ied.invoice_entity_id IN (%s)
 				    ORDER BY ied.created_on ASC
 				""".formatted(in);
@@ -176,7 +179,7 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 					: UUID.fromString(rs.getString("calculation_type_id")));
 			dto.setAdjustmentTypeId(rs.getString("adjustment_type_id") == null ? null
 					: UUID.fromString(rs.getString("adjustment_type_id")));
-
+			dto.setCalculationType(rs.getString("calculationType"));
 			map.computeIfAbsent(invEntId, k -> new ArrayList<>()).add(dto);
 		}, ids.toArray());
 
@@ -191,15 +194,22 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 		String in = ids.stream().map(id -> "?").collect(java.util.stream.Collectors.joining(","));
 
 		final String sql = """
-				    SELECT
-				      iet.invoice_entity_id,
-				      iet.tax_rate_id,
-				      iet.tax_rate,
-				      iet.tax_amount
-				    FROM "transaction".invoice_entity_tax iet
-				    WHERE iet.invoice_entity_id IN (%s)
-				    ORDER BY iet.created_on ASC
-				""".formatted(in);
+								    SELECT DISTINCT
+				    iet.invoice_entity_id,
+				    iet.tax_rate_id,
+				    iet.tax_rate,
+				    iet.tax_amount,
+				    ta."name" AS taxAuthority,
+				    iet.created_on
+				FROM "transaction".invoice_entity_tax iet
+				JOIN finance.tax_rate_allocation tra
+				    ON tra.tax_rate_id = iet.tax_rate_id
+				JOIN finance.tax_authority ta
+				    ON ta.tax_authority_id = tra.tax_authority_id
+				WHERE iet.invoice_entity_id IN (%s)
+				ORDER BY iet.created_on ASC;
+
+								""".formatted(in);
 
 		Map<UUID, List<io.clubone.transaction.vo.InvoiceEntityTaxDTO>> map = new HashMap<>();
 		cluboneJdbcTemplate.query(sql, rs -> {
@@ -208,6 +218,7 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 			dto.setTaxRateId(rs.getString("tax_rate_id") == null ? null : UUID.fromString(rs.getString("tax_rate_id")));
 			dto.setTaxRate(rs.getBigDecimal("tax_rate"));
 			dto.setTaxAmount(rs.getBigDecimal("tax_amount"));
+			dto.setTaxAuthority(rs.getString("taxAuthority"));
 
 			map.computeIfAbsent(invEntId, k -> new ArrayList<>()).add(dto);
 		}, ids.toArray());

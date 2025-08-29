@@ -13,5 +13,6 @@ public class InvoiceEntityDiscountDTO {
 	private BigDecimal discountAmount;
 	private UUID calculationTypeId; // passthrough (helps when persisting rows)
 	private UUID adjustmentTypeId;
+	private String calculationType;
 
 }
