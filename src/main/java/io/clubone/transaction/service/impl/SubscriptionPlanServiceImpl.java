@@ -61,7 +61,7 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 	private static final Logger log = LoggerFactory.getLogger(SubscriptionPlanServiceImpl.class);
 
 	@Override
-	// @Transactional
+	@Transactional
 	public SubscriptionPlanCreateResponse createPlanWithChildren(SubscriptionPlanCreateRequest request,
 			UUID createdBy) {
 		// 1) Insert plan
