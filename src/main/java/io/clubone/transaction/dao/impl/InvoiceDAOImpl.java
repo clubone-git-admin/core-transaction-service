@@ -225,5 +225,15 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 
 		return map;
 	}
+	
+	 @Override
+	    public int updateClientAgreementId(UUID invoiceId, UUID clientAgreementId) {
+	        String sql = """
+	            UPDATE "transaction".invoice
+	            SET client_agreement_id = ?
+	            WHERE invoice_id = ?
+	        """;
+	        return cluboneJdbcTemplate.update(sql, clientAgreementId, invoiceId);
+	    }
 
 }

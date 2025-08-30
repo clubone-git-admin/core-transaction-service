@@ -114,7 +114,7 @@ public class AgreementHelper {
 		return req;
 	}
 
-	public ResponseEntity<String> callMembershipSalesApi(MembershipSalesRequestDTO requestDto) {
+	public ResponseEntity<UUID> callMembershipSalesApi(MembershipSalesRequestDTO requestDto) {
 		// Headers
 		HttpHeaders headers = new HttpHeaders();
 		headers.setContentType(MediaType.APPLICATION_JSON);
@@ -125,7 +125,7 @@ public class AgreementHelper {
 
 		// POST call
 		return restTemplate.exchange(purchaseAgreementUrl, // API endpoint
-				HttpMethod.POST, entity, String.class // Change if API returns a custom response DTO
+				HttpMethod.POST, entity, UUID.class // Change if API returns a custom response DTO
 		);
 	}
 

@@ -5,6 +5,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import io.clubone.transaction.dao.InvoiceDAO;
+import io.clubone.transaction.helper.AgreementHelper;
 import io.clubone.transaction.service.InvoiceService;
 import io.clubone.transaction.vo.InvoiceDTO;
 import io.clubone.transaction.vo.TransactionDTO;
@@ -14,10 +15,15 @@ public class InvoiceServiceImpl implements InvoiceService {
 
 	@Autowired
 	private InvoiceDAO invoiceDAO;
+	
+	@Autowired
+	private AgreementHelper agreementHelper;
+	
 
 	@Override
 	@Transactional(readOnly = true)
 	public InvoiceDTO getInvoice(UUID invoiceId) {
+		agreementHelper.createPurchaseAgreementRequest(invoiceId);
 		return invoiceDAO.findResolvedById(invoiceId);
 	}
 

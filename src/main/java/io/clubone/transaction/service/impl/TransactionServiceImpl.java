@@ -24,6 +24,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.clubone.transaction.api.vo.MembershipSalesRequestDTO;
+import io.clubone.transaction.dao.InvoiceDAO;
 import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.helper.AgreementHelper;
 import io.clubone.transaction.helper.SubscriptionPlanHelper;
@@ -74,6 +75,9 @@ public class TransactionServiceImpl implements TransactionService {
 	
 	@Autowired
 	private AgreementHelper agreementHelper;
+	
+	@Autowired
+	private InvoiceDAO invoiceDao;
 
 	private static final Logger logger = LoggerFactory.getLogger(TransactionServiceImpl.class);
 
@@ -586,7 +590,12 @@ public class TransactionServiceImpl implements TransactionService {
 		try {
 		MembershipSalesRequestDTO purchaseAgrRequest=agreementHelper.createPurchaseAgreementRequest(req.getInvoiceId());
 		if(Objects.nonNull(purchaseAgrRequest)) {
-			agreementHelper.callMembershipSalesApi(purchaseAgrRequest);
+			UUID clientAgreementId=agreementHelper.callMembershipSalesApi(purchaseAgrRequest).getBody();
+			System.out.println("ClientAgreementid "+clientAgreementId);
+			if(clientAgreementId!=null) {
+				System.out.println("Updating clientAgreementId in invoice");
+				invoiceDao.updateClientAgreementId(req.getInvoiceId(), clientAgreementId);
+			}
 		}
 		}catch (Exception e) {
 			System.err.println("Error in agreement purchase flow "+e.getMessage());

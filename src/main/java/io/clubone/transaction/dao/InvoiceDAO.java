@@ -10,5 +10,7 @@ public interface InvoiceDAO {
 	InvoiceDTO findResolvedById(UUID invoiceId);
 
 	TransactionDTO findLatestTransactionByInvoiceId(UUID invoiceId);
+	
+	int updateClientAgreementId(UUID invoiceId, UUID clientAgreementId);
 
 }
