@@ -8,4 +8,5 @@ import lombok.Data;
 public class TaxRateAllocationDTO {
 	private UUID taxRateId;
 	private BigDecimal taxRatePercentage; // e.g., 18.00 for 18%
+	private UUID taxRateAllocationId;
 }

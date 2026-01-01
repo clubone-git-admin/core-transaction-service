@@ -22,5 +22,6 @@ public class InvoiceDTO {
     private boolean isPaid;
     private UUID levelId;
     private UUID createdBy;
+    private UUID clientAgreementId;
     private List<InvoiceEntityDTO> lineItems;
 }

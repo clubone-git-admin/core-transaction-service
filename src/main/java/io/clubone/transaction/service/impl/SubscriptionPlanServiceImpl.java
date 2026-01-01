@@ -29,6 +29,9 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.sql.SQLException;
@@ -66,7 +69,13 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 			UUID createdBy) {
 		// 1) Insert plan
 		UUID planId = dao.insertSubscriptionPlan(request, createdBy);
-
+		ObjectMapper mapper=new ObjectMapper();
+		try {
+			System.out.println("Recod "+mapper.writeValueAsString(request.getCyclePrices()));
+		} catch (JsonProcessingException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
 		// 2) Children (each optional, batched)
 		int[] cpx = dao.batchInsertCyclePrices(planId, nz(request.getCyclePrices()), createdBy);
 		int[] dcx = dao.batchInsertDiscountCodes(planId, nz(request.getDiscountCodes()), createdBy);
@@ -74,7 +83,7 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 		int[] pmx = dao.batchInsertPromos(planId, nz(request.getPromos()), createdBy);
 		int term = dao.insertPlanTerm(planId, request.getTerm(), createdBy);
 
-		if (request.getTerm() != null) {
+		if (request.getTerm() != null  && request.getCyclePrices().size()>0) {
 			LocalDate start = request.getContractStartDate();
 			LocalDate end = request.getContractEndDate();
 			UUID freqId = request.getSubscriptionFrequencyId(); // daily/weekly/monthly...

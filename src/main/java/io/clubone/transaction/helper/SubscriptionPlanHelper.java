@@ -52,34 +52,49 @@ public class SubscriptionPlanHelper {
 	public List<InvoiceEntityPlanRow> fetchInvoiceEntitiesWithPlan(UUID invoiceId, UUID transactionId) {
 		final String sql = """
 				    SELECT
-				        ie.invoice_entity_id,
-				        ie.entity_id,
-				        ie.entity_type_id,
-				        ie.contract_start_date,
-				        (ie.contract_start_date + INTERVAL '1 month')::date AS contract_end_date,
-				        i.created_by,
-				        bpt.subscription_billing_day_rule_id,
-				        bpt.subscription_frequency_id,
-				        COALESCE(bpt.interval_count, 1) AS interval_count,
-				        bpt.total_cycles,
-				        sf.frequency_name AS subscription_frequency_name,
-				        i.level_id
-				    FROM "transaction".invoice_entity ie
-				    JOIN "transaction".invoice i
-				      ON i.invoice_id = ie.invoice_id
-				    JOIN "transaction"."transaction" t
-				      ON t.invoice_id = i.invoice_id
-				    JOIN bundles_new.bundle_plan_template bpt
-				      ON bpt.plan_template_id = ie.price_plan_template_id
-				    JOIN client_subscription_billing.lu_subscription_frequency sf
-				      ON sf.subscription_frequency_id = bpt.subscription_frequency_id
-				    WHERE i.invoice_id = ?
-				      AND t.transaction_id = ?
-				      AND COALESCE(ie.is_active, true) = true
-				      AND COALESCE(bpt.is_active, true) = true
-				      AND COALESCE(sf.is_active, true) = true
-				      AND bpt.subscription_frequency_id IS NOT NULL
-				    ORDER BY ie.created_on, ie.invoice_entity_id
+    ie.invoice_entity_id,
+    ie.entity_id,                 -- entity_id == item_id
+    ie.entity_type_id,
+    ie.contract_start_date,
+    (ie.contract_start_date + INTERVAL '1 month')::date AS contract_end_date,
+    i.created_by,
+    ppt.subscription_billing_day_rule_id,
+    ppt.subscription_frequency_id,
+    COALESCE(ppt.interval_count, 1) AS interval_count,
+    ppt.total_cycles,
+    sf.frequency_name AS subscription_frequency_name,
+    i.level_id
+FROM "transactions".invoice_entity ie
+JOIN "transactions".invoice i
+  ON i.invoice_id = ie.invoice_id
+JOIN "transactions"."transaction" t
+  ON t.invoice_id = i.invoice_id
+JOIN package.package_plan_template ppt
+  ON ppt.package_plan_template_id = ie.price_plan_template_id
+JOIN client_subscription_billing.lu_subscription_frequency sf
+  ON sf.subscription_frequency_id = ppt.subscription_frequency_id
+
+-- ✅ filter out FEE items
+JOIN items.item it
+  ON it.item_id = ie.entity_id
+JOIN items.lu_item_group ig
+  ON ig.item_group_id = it.item_group_id
+ AND ig.application_id = it.application_id
+
+WHERE i.invoice_id = ?
+  AND t.transaction_id = ?
+  AND COALESCE(ie.is_active, true) = true
+  AND COALESCE(ppt.is_active, true) = true
+  AND COALESCE(sf.is_active, true) = true
+  AND COALESCE(it.is_active, true) = true
+  AND COALESCE(ig.is_active, true) = true
+  AND ppt.subscription_frequency_id IS NOT NULL
+
+  -- ✅ exclude fees
+  AND ig.code <> 'FEE'
+
+ORDER BY ie.created_on, ie.invoice_entity_id;
+
 				""";
 
 		return cluboneJdbcTemplate.query(sql, (rs, rn) -> {
@@ -120,9 +135,9 @@ public class SubscriptionPlanHelper {
 				        bpcb.end_cycle   AS cycle_end,
 				        bpcb.allow_pos_price_override,
 				        bpcb.down_payment_units
-				    FROM "transaction".invoice_entity_price_band  AS ieb
-				    JOIN bundles_new.bundle_price_cycle_band      AS bpcb
-				      ON bpcb.price_cycle_band_id = ieb.price_cycle_band_id
+				    FROM "transactions".invoice_entity_price_band  AS ieb
+				    JOIN package.package_price_cycle_band      AS bpcb
+				      ON bpcb.package_price_cycle_band_id = ieb.price_cycle_band_id
 				    WHERE ieb.invoice_entity_id = ?
 				      AND COALESCE(ieb.is_active, true) = true
 				    ORDER BY ieb.created_on, bpcb.start_cycle
@@ -148,7 +163,7 @@ public class SubscriptionPlanHelper {
 	public List<DiscountCodeDTO> fetchDiscounts(UUID invoiceEntityId) {
 		final String sql = """
 				    SELECT discount_id, discount_amount, adjustment_type_id, calculation_type_id
-				    FROM "transaction".invoice_entity_discount
+				    FROM "transactions".invoice_entity_discount
 				    WHERE invoice_entity_id = ?
 				      AND COALESCE(is_active, true) = true
 				    ORDER BY created_on
@@ -171,11 +186,11 @@ public class SubscriptionPlanHelper {
 				      e.total_entitlement,
 				      COALESCE(e.is_unlimited, false) AS is_unlimited,
 				      e.max_redemptions_per_day
-				    FROM bundles_new.bundle_plan_template_entitlement e
-				    JOIN bundles_new.bundle_plan_template bpt
-				      ON bpt.plan_template_id = e.plan_template_id
-				    JOIN "transaction".invoice_entity ie
-				      ON ie.price_plan_template_id = e.plan_template_id
+				    FROM package.package_plan_template_entitlement e
+				    JOIN package.package_plan_template bpt
+				      ON bpt.package_plan_template_id = e.package_plan_template_id
+				    JOIN "transactions".invoice_entity ie
+				      ON ie.price_plan_template_id = e.package_plan_template_id
 				    WHERE ie.invoice_entity_id = ?
 				      AND COALESCE(bpt.is_active, true) = true
 				    ORDER BY e.created_on
@@ -225,7 +240,7 @@ public class SubscriptionPlanHelper {
 			req.setCyclePrices(cyclePrices.stream()
 					.filter(cp -> cp.getDownPaymentUnits() == null || cp.getDownPaymentUnits() == 0)
 					.collect(Collectors.toList()));
-			req.setDiscountCodes(fetchDiscounts(r.invoiceEntityId));
+			//req.setDiscountCodes(fetchDiscounts(r.invoiceEntityId));
 			req.setEntitlements(fetchEntitlements(r.invoiceEntityId));
 			// req.setPromos(...);
 			PlanTermDTO planterm = new PlanTermDTO();

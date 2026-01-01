@@ -9,6 +9,7 @@ import io.clubone.transaction.v2.vo.BundlePriceCycleBandDTO;
 import io.clubone.transaction.v2.vo.DiscountDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailRaw;
+import io.clubone.transaction.v2.vo.PromotionEffectValueDTO;
 import io.clubone.transaction.vo.BundleComponent;
 import io.clubone.transaction.vo.BundleItemPriceDTO;
 import io.clubone.transaction.vo.EntityTypeDTO;
@@ -79,6 +80,11 @@ public interface TransactionDAO {
 
 	/** Effective price for a specific cycle of a plan. */
 	BigDecimal findEffectivePriceForCycle(UUID subscriptionPlanId, int cycleNumber);
-	
+
+	void activateAgreementAndClientStatusForInvoice(UUID invoiceId, UUID actorId);
+
+	List<PromotionEffectValueDTO> fetchEffectValuesByPromotionId(UUID promotionId, UUID applicationId);
+
+	boolean isFeeItem(UUID itemId, UUID applicationId);
 
 }

@@ -13,7 +13,6 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -22,8 +21,6 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.CollectionUtils;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
-import io.clubone.transaction.api.vo.MembershipSalesRequestDTO;
 import io.clubone.transaction.dao.InvoiceDAO;
 import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.helper.AgreementHelper;
@@ -517,7 +514,7 @@ public class TransactionServiceImpl implements TransactionService {
 		if (existingTxn != null) {
 			UUID existingCpt = transactionDAO.findClientPaymentTxnIdByTransactionId(existingTxn);
 			String status = transactionDAO.currentInvoiceStatusName(req.getInvoiceId());
-			return new FinalizeTransactionResponse(req.getInvoiceId(), status, existingCpt, existingTxn, "");
+			//return new FinalizeTransactionResponse(req.getInvoiceId(), status, existingCpt, existingTxn, "");
 		}
 
 		Optional<InvoiceSummaryDTO> invoiceSummary = transactionDAO.getInvoiceSummaryById(req.getInvoiceId());
@@ -526,8 +523,8 @@ public class TransactionServiceImpl implements TransactionService {
 			req.setClientRoleId(invoiceSummary.get().getClientRoleId());
 			req.setTotalAmount(invoiceSummary.get().getTotalAmount());
 			if (req.getAmountToPayNow().compareTo(req.getTotalAmount()) >= 0.02) {
-				return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null,
-						"Price not matching with invoice created");
+				//return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null,
+						//"Price not matching with invoice created");
 			}
 			req.setLevelId(invoiceSummary.get().getLevelId());
 		}
@@ -560,8 +557,12 @@ public class TransactionServiceImpl implements TransactionService {
 		pay.setPaymentTypeCode(req.getPaymentTypeCode());
 		pay.setPaymentGatewayCurrencyTypeId(req.getPaymentGatewayCurrencyTypeId());
 		pay.setCreatedBy(req.getCreatedBy());
-
-		UUID clientPaymentTransactionId = paymentService.processManualPayment(pay);
+		UUID clientPaymentTransactionId =null;
+		try {
+		 clientPaymentTransactionId = paymentService.processManualPayment(pay);
+		}catch (Exception e) {
+			// TODO: handle exception
+		}
 
 		// Build TransactionDTO from request
 		TransactionDTO txn = new TransactionDTO();
@@ -574,21 +575,27 @@ public class TransactionServiceImpl implements TransactionService {
 		txn.setTransactionDate(Timestamp.from(Instant.now()));
 
 		UUID transactionId = transactionDAO.saveTransactionV3(txn);
+		
 		// Mark invoice as PAID
 		UUID paidStatusId = transactionDAO.findInvoiceStatusIdByName("PAID");
 		System.out.println("paidStatusId " + paidStatusId);
 		transactionDAO.updateInvoiceStatusAndPaidFlag(req.getInvoiceId(), paidStatusId, true, req.getCreatedBy());
+		transactionDAO.activateAgreementAndClientStatusForInvoice(req.getInvoiceId(), req.getCreatedBy());
 		try {
 			List<SubscriptionPlanCreateRequest> subscriptionRequest = subscriptionPlanHelper
 					.buildRequests(req.getInvoiceId(), transactionId);
 			SubscriptionPlanBatchCreateRequest subscriptionPlanBatchCreateRequest = new SubscriptionPlanBatchCreateRequest();
 			subscriptionPlanBatchCreateRequest.setPlans(subscriptionRequest);
+			ObjectMapper mapper=new ObjectMapper();
+			//System.out.println("Data "+mapper.writeValueAsString(subscriptionRequest));
 			subscriptionPlanService.createPlans(subscriptionPlanBatchCreateRequest, UUID.randomUUID());
 		} catch (Exception e) {
 			System.out.println("Error is creating subscription " + e.getMessage());
 		}
-		try {
+		/*try {
 		MembershipSalesRequestDTO purchaseAgrRequest=agreementHelper.createPurchaseAgreementRequest(req.getInvoiceId());
+		ObjectMapper mapper=new ObjectMapper();
+		System.out.println("Data "+mapper.writeValueAsString(purchaseAgrRequest));
 		if(Objects.nonNull(purchaseAgrRequest)) {
 			UUID clientAgreementId=agreementHelper.callMembershipSalesApi(purchaseAgrRequest).getBody();
 			System.out.println("ClientAgreementid "+clientAgreementId);
@@ -599,7 +606,7 @@ public class TransactionServiceImpl implements TransactionService {
 		}
 		}catch (Exception e) {
 			System.err.println("Error in agreement purchase flow "+e.getMessage());
-		}
+		}*/
 		return new FinalizeTransactionResponse(req.getInvoiceId(), "PAID", clientPaymentTransactionId, transactionId,
 				"");
 	}

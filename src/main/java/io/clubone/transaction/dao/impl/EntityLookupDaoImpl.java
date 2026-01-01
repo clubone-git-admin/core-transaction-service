@@ -31,6 +31,8 @@ public class EntityLookupDaoImpl implements EntityLookupDao {
 
 	@Override
 	public Optional<EntityLevelInfoDTO> resolveEntityAndLevel(UUID entityTypeId, UUID entityId, UUID levelId) {
+		
+		System.out.println(entityTypeId+"  "+entityId+"  "+levelId);
 		final String sql = """
 				with x as (
 				    select cast(? as uuid) as entity_type_id,
@@ -42,22 +44,22 @@ public class EntityLookupDaoImpl implements EntityLookupDao {
 				  let.entity_type,
 				  x.entity_id,
 				  /* pick name from the correct table based on entity_type */
-				  coalesce(it.item_name, b.name, a."name") as entity_name,
+				  coalesce(it.item_name, b.package_name, a."agreement_name") as entity_name,
 				  x.level_id,
 				  l.name as level_name
 				from x
-				join "transaction".lu_entity_type let
+				join "transactions".lu_entity_type let
 				  on let.entity_type_id = x.entity_type_id
 				left join items.item it
 				  on it.item_id = x.entity_id
 				 and upper(let.entity_type) = 'ITEM'
-				left join bundles_new.bundle b
-				  on b.bundle_id = x.entity_id
+				left join package.package b
+				  on b.package_id = x.entity_id
 				 and upper(let.entity_type) = 'BUNDLE'
 				left join agreements.agreement a
 				  on a.agreement_id = x.entity_id
 				 and upper(let.entity_type) = 'AGREEMENT'
-				left join "location".levels l
+				left join "locations".levels l
 				  on l.level_id = x.level_id
 				""";
 		try {

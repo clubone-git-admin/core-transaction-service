@@ -53,8 +53,8 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 				      i.level_id            AS levelId,
 				      i.created_by          AS createdBy,
 				      lis.status_name as invoiceStatus
-				    FROM "transaction".invoice i
-				    join "transaction".lu_invoice_status lis on lis.invoice_status_id =i.invoice_status_id
+				    FROM "transactions".invoice i
+				    join "transactions".lu_invoice_status lis on lis.invoice_status_id =i.invoice_status_id
 				    WHERE i.invoice_id = ?
 				""";
 
@@ -80,7 +80,7 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 				      ie.tax_amount              AS taxAmount,
 				      ie.total_amount            AS totalAmount,
 				      ie.parent_invoice_entity_id AS parentInvoiceEntityId
-				    FROM "transaction".invoice_entity ie
+				    FROM "transactions".invoice_entity ie
 				    WHERE ie.invoice_id = ?
 				    ORDER BY ie.created_on ASC
 				""";
@@ -90,7 +90,7 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 
 		if (!lines.isEmpty()) {
 			// Batch-load discounts and taxes for all entities (avoid N+1)
-			Map<UUID, List<InvoiceEntityDiscountDTO>> discounts = fetchDiscountsFor(lines);
+			//Map<UUID, List<InvoiceEntityDiscountDTO>> discounts = fetchDiscountsFor(lines);
 			Map<UUID, List<InvoiceEntityTaxDTO>> taxes = fetchTaxesFor(lines);
 
 			for (InvoiceEntityDTO li : lines) {
@@ -99,7 +99,7 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 				if (enityDetail.isPresent()) {
 					li.setEntityName(enityDetail.get().entityName());
 				}
-				li.setDiscounts(discounts.getOrDefault(li.getInvoiceEntityId(), List.of()));
+				//li.setDiscounts(discounts.getOrDefault(li.getInvoiceEntityId(), List.of()));
 				li.setTaxes(taxes.getOrDefault(li.getInvoiceEntityId(), List.of()));
 			}
 		}
@@ -120,8 +120,8 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 				      t.transaction_number             AS transactionCode,
 				      t.transaction_date               AS transactionDate,
 				      t.created_by                     AS createdBy
-				    FROM "transaction"."transaction" t
-				    JOIN "transaction".invoice i ON i.invoice_id = t.invoice_id
+				    FROM "transactions"."transaction" t
+				    JOIN "transactions".invoice i ON i.invoice_id = t.invoice_id
 				    WHERE t.invoice_id = ?
 				    ORDER BY t.transaction_date DESC NULLS LAST, t.created_on DESC
 				    LIMIT 1
@@ -162,7 +162,7 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 				      ied.calculation_type_id,
 				      ied.adjustment_type_id,
 				      lct.name as calculationType
-				    FROM "transaction".invoice_entity_discount ied
+				    FROM "transactions".invoice_entity_discount ied
 				    join discount.lu_calculation_type lct on lct.calculation_type_id =ied.calculation_type_id
 				    WHERE ied.invoice_entity_id IN (%s)
 				    ORDER BY ied.created_on ASC
@@ -192,16 +192,16 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 			return Map.of();
 
 		String in = ids.stream().map(id -> "?").collect(java.util.stream.Collectors.joining(","));
-
+		System.out.println("Ids "+in);
 		final String sql = """
 								    SELECT DISTINCT
 				    iet.invoice_entity_id,
 				    iet.tax_rate_id,
-				    iet.tax_rate,
+				    iet.tax_rate_percentage,
 				    iet.tax_amount,
 				    ta."name" AS taxAuthority,
 				    iet.created_on
-				FROM "transaction".invoice_entity_tax iet
+				FROM "transactions".invoice_entity_tax iet
 				JOIN finance.tax_rate_allocation tra
 				    ON tra.tax_rate_id = iet.tax_rate_id
 				JOIN finance.tax_authority ta
@@ -216,10 +216,10 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 			UUID invEntId = UUID.fromString(rs.getString("invoice_entity_id"));
 			var dto = new io.clubone.transaction.vo.InvoiceEntityTaxDTO();
 			dto.setTaxRateId(rs.getString("tax_rate_id") == null ? null : UUID.fromString(rs.getString("tax_rate_id")));
-			dto.setTaxRate(rs.getBigDecimal("tax_rate"));
+			dto.setTaxRate(rs.getBigDecimal("tax_rate_percentage"));
 			dto.setTaxAmount(rs.getBigDecimal("tax_amount"));
 			dto.setTaxAuthority(rs.getString("taxAuthority"));
-
+			System.out.println("invEntId" + invEntId);
 			map.computeIfAbsent(invEntId, k -> new ArrayList<>()).add(dto);
 		}, ids.toArray());
 
@@ -229,7 +229,7 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 	 @Override
 	    public int updateClientAgreementId(UUID invoiceId, UUID clientAgreementId) {
 	        String sql = """
-	            UPDATE "transaction".invoice
+	            UPDATE "transactions".invoice
 	            SET client_agreement_id = ?
 	            WHERE invoice_id = ?
 	        """;

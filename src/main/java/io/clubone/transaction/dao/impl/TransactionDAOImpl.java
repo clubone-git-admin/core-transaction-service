@@ -9,7 +9,9 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import org.slf4j.Logger;
@@ -33,6 +35,7 @@ import io.clubone.transaction.v2.vo.InvoiceDetailRaw;
 import io.clubone.transaction.v2.vo.InvoiceEntityDiscountDTO;
 import io.clubone.transaction.v2.vo.InvoiceEntityPriceBandDTO;
 import io.clubone.transaction.v2.vo.PaymentTimelineItemDTO;
+import io.clubone.transaction.v2.vo.PromotionEffectValueDTO;
 import io.clubone.transaction.vo.BundleComponent;
 import io.clubone.transaction.vo.BundleItemPriceDTO;
 import io.clubone.transaction.vo.EntityTypeDTO;
@@ -59,7 +62,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 	private static final String ENTITY_TYPE_SQL = """
 			SELECT entity_type
-			FROM "transaction".lu_entity_type let
+			FROM "transactions".lu_entity_type let
 			WHERE let.entity_type_id = ?
 			""";
 
@@ -91,7 +94,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 			  JOIN level_candidates lc
 			    ON (ip.level_id = lc.level_id)
 			    OR (ip.level_id IS NULL AND lc.level_id IS NULL)
-			  WHERE ip.item_id = ?
+			  WHERE i.item_id = ?
 			  ORDER BY lc.depth ASC
 			  LIMIT 1
 			) eff_ip ON TRUE
@@ -103,12 +106,12 @@ public class TransactionDAOImpl implements TransactionDAO {
 			    i.client_role_id,
 			    i.total_amount,
 			    i.level_id
-			FROM "transaction".invoice i
+			FROM "transactions".invoice i
 			WHERE i.invoice_id = ?
 			""";
 
 	private static final String UPDATE_TRANSACTION_CLIENT_AGREEMENT_SQL = """
-			UPDATE "transaction"."transaction"
+			UPDATE "transactions"."transaction"
 			SET client_agreement_id = ?
 			WHERE transaction_id = ?
 			""";
@@ -116,7 +119,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 	private static final String TAX_RATE_SQL = """
 			SELECT
 			    tr.tax_rate_id,
-			    tra.tax_rate_percentage
+			    tra.tax_rate_percentage,
+			    tra.tax_rate_allocation_id
 			FROM finance.tax_rate tr
 			JOIN finance.tax_rate_allocation tra
 			  ON tra.tax_rate_id = tr.tax_rate_id
@@ -124,8 +128,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 			  AND tr.level_id = '9dcc30ea-e4cd-49b4-8e47-3e9bd8a5de0e'
 			""";
 
-	private static final String BUNDLE_PRICE_BAND_SQL = "SELECT unit_price, down_payment_units "
-			+ "FROM bundles_new.bundle_price_cycle_band " + "WHERE price_cycle_band_id = ?";
+	private static final String BUNDLE_PRICE_BAND_SQL = "SELECT unit_price, down_payment_units FROM package.package_price_cycle_band WHERE package_price_cycle_band_id = ?";
 
 	private static final String SQL_TYPE_NAME_BY_BUNDLE_ITEM_ID = """
 			    SELECT lit.type_name
@@ -156,7 +159,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 	private static final String SQL_INVOICE_SUMMARY = """
 			WITH pay AS (
 			    SELECT t.invoice_id, COALESCE(SUM(cpt.amount)::numeric(10,2), 0)::numeric(10,2) AS paid_amount
-			    FROM "transaction"."transaction" t
+			    FROM "transactions"."transaction" t
 			    JOIN client_payments.client_payment_transaction cpt
 			      ON cpt.client_payment_transaction_id = t.client_payment_transaction_id
 			    GROUP BY t.invoice_id
@@ -174,8 +177,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 			    )::numeric(10,2) AS balance_due,
 			    s.status_name,
 			    i.created_by
-			FROM "transaction".invoice i
-			JOIN "transaction".lu_invoice_status s
+			FROM "transactions".invoice i
+			JOIN "transactions".lu_invoice_status s
 			  ON s.invoice_status_id = i.invoice_status_id
 			LEFT JOIN pay p
 			  ON p.invoice_id = i.invoice_id
@@ -190,7 +193,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 	public UUID saveInvoice(InvoiceDTO dto) {
 		UUID invoiceId = UUID.randomUUID();
 		String sql = """
-				INSERT INTO transaction.invoice (
+				INSERT INTO transactions.invoice (
 				    invoice_id, invoice_number, invoice_date, client_role_id, billing_address,
 				    invoice_status_id, total_amount, sub_total, tax_amount, discount_amount,
 				    is_paid, created_on
@@ -228,11 +231,25 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 		// 1) Insert invoice header (include created_by only if your table has it)
 		final String insertInvoiceSql = """
-				INSERT INTO transaction.invoice (
-				    invoice_id, invoice_number, invoice_date, client_role_id,level_id, billing_address,
-				    invoice_status_id, total_amount, sub_total, tax_amount, discount_amount, is_paid, created_on/*, created_by*/
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW()/*, ?*/)
-				""";
+								INSERT INTO transactions.invoice (
+				    invoice_id,
+				    invoice_number,
+				    invoice_date,
+				    client_role_id,
+				    level_id,
+				    billing_address,
+				    invoice_status_id,
+				    total_amount,
+				    sub_total,
+				    tax_amount,
+				    discount_amount,
+				    is_paid,
+				    client_agreement_id,
+				    created_on
+				) VALUES (
+				    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW()
+				);
+								""";
 
 		// If your invoice table has created_by, pass dto.getCreatedBy() as the last
 		// param and uncomment above columns.
@@ -240,20 +257,20 @@ public class TransactionDAOImpl implements TransactionDAO {
 				dto.getClientRoleId(), dto.getLevelId(), dto.getBillingAddress(), dto.getInvoiceStatusId(), totalSum, // use
 																														// computed
 				// canonical totals
-				subtotal, taxSum, discountSum, Boolean.TRUE.equals(dto.isPaid())
+				subtotal, taxSum, discountSum, Boolean.TRUE.equals(dto.isPaid()), dto.getClientAgreementId()
 		/* , dto.getCreatedBy() */
 		);
 
 		// 2) Resolve BUNDLE type id once (for parent/child grouping)
 		UUID bundleTypeId = cluboneJdbcTemplate.queryForObject(
-				"SELECT entity_type_id FROM transaction.lu_entity_type WHERE LOWER(entity_type) = LOWER('BUNDLE')",
+				"SELECT entity_type_id FROM transactions.lu_entity_type WHERE LOWER(entity_type) = LOWER('BUNDLE')",
 				UUID.class);
 
 		UUID lastBundleHeaderId = null;
 
 		// 3) Insert invoice entities
 		final String insertEntitySql = """
-				INSERT INTO transaction.invoice_entity (
+				INSERT INTO transactions.invoice_entity (
 				    invoice_entity_id, parent_invoice_entity_id, invoice_id,
 				    entity_type_id, entity_id, entity_description,
 				    quantity, unit_price, discount_amount, tax_amount, total_amount,
@@ -263,15 +280,15 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 		// 4) Insert taxes per entity
 		final String insertTaxSql = """
-				INSERT INTO transaction.invoice_entity_tax (
-				    invoice_entity_tax_id, invoice_entity_id, tax_rate_id, tax_rate, tax_amount,
-				    created_on, created_by
-				) VALUES (?, ?, ?, ?, ?, NOW(), ?)
+				INSERT INTO transactions.invoice_entity_tax (
+				    invoice_entity_tax_id, invoice_entity_id, tax_rate_id, tax_rate_percentage, tax_amount,
+				    created_on, created_by,tax_rate_allocation_id
+				) VALUES (?, ?, ?, ?, ?, NOW(), ?,?)
 				""";
 
 		// [NEW] 5) Insert discounts per entity
 		final String insertDiscountSql = """
-				INSERT INTO transaction.invoice_entity_discount (
+				INSERT INTO transactions.invoice_entity_discount (
 				    invoice_entity_discount_id, invoice_entity_id, discount_id, discount_amount,
 				    adjustment_type_id, calculation_type_id, is_active, created_on, created_by
 				) VALUES (?, ?, ?, ?, ?, ?, true, NOW(), ?)
@@ -279,7 +296,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 		// 5b) Insert price bands per entity (after invoice_entity insert)
 		final String insertPriceBandSql = """
-				INSERT INTO transaction.invoice_entity_price_band (
+				INSERT INTO transactions.invoice_entity_price_band (
 				    invoice_entity_price_band_id,
 				    invoice_entity_id,
 				    price_cycle_band_id,
@@ -331,7 +348,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 				for (InvoiceEntityTaxDTO t : li.getTaxes()) {
 					UUID ietId = UUID.randomUUID();
 					cluboneJdbcTemplate.update(insertTaxSql, ietId, ieId, t.getTaxRateId(), t.getTaxRate(),
-							t.getTaxAmount(), dto.getCreatedBy());
+							t.getTaxAmount(), dto.getCreatedBy(), t.getTaxRateAllocationId());
 				}
 			}
 
@@ -396,7 +413,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 		// 1) Insert transaction header (now also sets created_by)
 		String sql = """
-				    INSERT INTO transaction.transaction (
+				    INSERT INTO transactions.transaction (
 				        transaction_id, client_agreement_id, client_payment_transaction_id,
 				        level_id, invoice_id, transaction_date, created_on, created_by
 				    ) VALUES (?, ?, ?, ?, ?, ?, NOW(), ?)
@@ -408,7 +425,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 		// 2) Resolve BUNDLE type id once (for header detection)
 		UUID bundleTypeId = cluboneJdbcTemplate.queryForObject(
-				"SELECT entity_type_id FROM transaction.lu_entity_type WHERE LOWER(entity_type) = LOWER('BUNDLE')",
+				"SELECT entity_type_id FROM transactions.lu_entity_type WHERE LOWER(entity_type) = LOWER('BUNDLE')",
 				UUID.class);
 
 		// We'll remember the last bundle header's TE id
@@ -426,7 +443,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 			}
 
 			String entitySql = """
-					    INSERT INTO transaction.transaction_entity (
+					    INSERT INTO transactions.transaction_entity (
 					        transaction_entity_id, parent_transaction_entity_id, transaction_id,
 					        entity_type_id, entity_id, entity_description,
 					        quantity, unit_price, discount_amount, tax_amount, total_amount,
@@ -450,9 +467,9 @@ public class TransactionDAOImpl implements TransactionDAO {
 				for (TransactionEntityTaxDTO tax : entity.getTaxes()) {
 					UUID taxId = UUID.randomUUID();
 					String taxSql = """
-							    INSERT INTO transaction.transaction_entity_tax (
+							    INSERT INTO transactions.transaction_entity_tax (
 							        transaction_entity_tax_id, transaction_entity_id, tax_rate_id,
-							        tax_rate, tax_amount, created_on, created_by
+							        tax_rate_percentage, tax_amount, created_on, created_by
 							    ) VALUES (?, ?, ?, ?, ?, NOW(), ?)
 							""";
 					cluboneJdbcTemplate.update(taxSql, taxId, teId, tax.getTaxRateId(), tax.getTaxRate(),
@@ -468,14 +485,14 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 	@Override
 	public String findInvoiceNumber(UUID invoiceId) {
-		return cluboneJdbcTemplate.queryForObject("SELECT invoice_number FROM transaction.invoice WHERE invoice_id = ?",
-				String.class, invoiceId);
+		return cluboneJdbcTemplate.queryForObject(
+				"SELECT invoice_number FROM transactions.invoice WHERE invoice_id = ?", String.class, invoiceId);
 	}
 
 	@Override
 	public UUID findTransactionIdByInvoiceId(UUID invoiceId) {
 		List<UUID> ids = cluboneJdbcTemplate.query("""
-				    SELECT transaction_id FROM transaction.transaction WHERE invoice_id = ?
+				    SELECT transaction_id FROM transactions.transaction WHERE invoice_id = ?
 				""", (rs, rn) -> UUID.fromString(rs.getString(1)), invoiceId);
 		return ids.isEmpty() ? null : ids.get(0);
 	}
@@ -484,7 +501,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 	public UUID findClientPaymentTxnIdByTransactionId(UUID transactionId) {
 		return cluboneJdbcTemplate.queryForObject("""
 				    SELECT client_payment_transaction_id
-				      FROM transaction.transaction
+				      FROM transactions.transaction
 				     WHERE transaction_id = ?
 				""", UUID.class, transactionId);
 	}
@@ -493,7 +510,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 	public UUID findInvoiceStatusIdByName(String statusName) {
 		return cluboneJdbcTemplate.queryForObject("""
 				    SELECT invoice_status_id
-				      FROM transaction.lu_invoice_status
+				      FROM transactions.lu_invoice_status
 				     WHERE status_name = ?
 				""", UUID.class, statusName);
 	}
@@ -501,7 +518,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 	@Override
 	public void updateInvoiceStatusAndPaidFlag(UUID invoiceId, UUID statusId, boolean paid, UUID modifiedBy) {
 		cluboneJdbcTemplate.update("""
-				    UPDATE transaction.invoice
+				    UPDATE transactions.invoice
 				       SET invoice_status_id = ?, is_paid = ?, modified_on = NOW(), modified_by = ?
 				     WHERE invoice_id = ?
 				""", statusId, paid, modifiedBy, invoiceId);
@@ -511,8 +528,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 	public String currentInvoiceStatusName(UUID invoiceId) {
 		return cluboneJdbcTemplate.queryForObject("""
 				    SELECT s.status_name
-				      FROM transaction.invoice i
-				      JOIN transaction.lu_invoice_status s ON s.invoice_status_id = i.invoice_status_id
+				      FROM transactions.invoice i
+				      JOIN transactions.lu_invoice_status s ON s.invoice_status_id = i.invoice_status_id
 				     WHERE i.invoice_id = ?
 				""", String.class, invoiceId);
 	}
@@ -525,9 +542,10 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 	@Override
 	public UUID findEntityTypeIdByName(String name) {
+		System.out.println("name");
 		String sql = """
 				    SELECT entity_type_id
-				    FROM transaction.lu_entity_type
+				    FROM transactions.lu_entity_type
 				    WHERE LOWER(entity_type) = LOWER(?)
 				      AND is_active = true
 				    LIMIT 1
@@ -588,7 +606,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 			JOIN items.item i
 			  ON i.item_id = bi.item_id
 			JOIN items.item_price ip
-			  ON ip.item_id = i.item_id
+			  ON i.item_id = i.item_id
 
 			WHERE b.bundle_id = ?
 			  AND bl.level_id IN (SELECT level_id FROM ancestors);
@@ -656,7 +674,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 		// 1) Insert transaction header (now also sets created_by)
 		String sql = """
-				    INSERT INTO transaction.transaction (
+				    INSERT INTO transactions.transaction (
 				        transaction_id,  client_payment_transaction_id,
 				         invoice_id, transaction_date, created_on, created_by
 				    ) VALUES (?,  ?,  ?, ?, NOW(), ?)
@@ -697,6 +715,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 			TaxRateAllocationDTO dto = new TaxRateAllocationDTO();
 			dto.setTaxRateId((UUID) rs.getObject("tax_rate_id"));
 			dto.setTaxRatePercentage(rs.getBigDecimal("tax_rate_percentage"));
+			dto.setTaxRateAllocationId((UUID) rs.getObject("tax_rate_allocation_id"));
 			return dto;
 		}
 	};
@@ -721,7 +740,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    lt.client_agreement_id,
 				    lt.client_payment_transaction_id,
 				    lt.transaction_date
-				FROM "transaction".invoice i
+				FROM "transactions".invoice i
 				LEFT JOIN (
 				    SELECT DISTINCT ON (t.invoice_id)
 				        t.invoice_id,
@@ -729,7 +748,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 				        t.client_agreement_id,
 				        t.client_payment_transaction_id,
 				        t.transaction_date
-				    FROM "transaction"."transaction" t
+				    FROM "transactions"."transaction" t
 				    ORDER BY t.invoice_id, t.transaction_date DESC NULLS LAST
 				) lt ON lt.invoice_id = i.invoice_id
 				WHERE i.client_role_id = ?
@@ -758,7 +777,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    ie.discount_amount,
 				    ie.tax_amount,
 				    ie.total_amount
-				FROM "transaction".invoice_entity ie
+				FROM "transactions".invoice_entity ie
 				WHERE ie.invoice_id IN (%s)
 				ORDER BY ie.parent_invoice_entity_id NULLS FIRST, ie.invoice_entity_id
 				""".formatted(inSql);
@@ -815,12 +834,13 @@ public class TransactionDAOImpl implements TransactionDAO {
 		final String sql = """
 				    SELECT i.tax_group_id
 				    FROM items.item_price ip
-				    JOIN items.item i ON i.item_id = ip.item_id
-				    WHERE ip.item_id = ?
+				    JOIN items.item_version iv on iv.item_version_id=ip.item_version_id
+				    JOIN items.item i ON i.item_id = iv.item_id
+				    WHERE i.item_id = ?
 				      AND ip.level_id = ?
 				      AND COALESCE(ip.is_active, true) = true
-				      AND (ip.valid_from IS NULL OR ip.valid_from <= now())
-				      AND (ip.valid_to IS NULL OR ip.valid_to >= now())
+				      AND (ip.start_at_local IS NULL OR ip.start_at_local <= now())
+				      AND (ip.end_at_local IS NULL OR ip.end_at_local >= now())
 				    ORDER BY ip.created_on DESC
 				    LIMIT 1
 				""";
@@ -1065,7 +1085,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 		final String sql = """
 																with inv as (
 				  select *
-				  from "transaction".invoice
+				  from "transactions".invoice
 				  where invoice_id = ?
 				),
 				sbh_pick as (
@@ -1081,7 +1101,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 				-- pick ONE invoice_entity row for this invoice (prefer items tied to a plan template)
 				ie_pick as (
 				  select ie.*
-				  from "transaction".invoice_entity ie
+				  from "transactions".invoice_entity ie
 				  join inv i on ie.invoice_id = i.invoice_id
 				  order by
 				    (ie.price_plan_template_id is not null) desc,
@@ -1167,14 +1187,14 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 				-- pick one invoice_entity and its parent
 				left join ie_pick ie on true
-				left join "transaction".invoice_entity iep
+				left join "transactions".invoice_entity iep
 				  on iep.invoice_entity_id = ie.parent_invoice_entity_id
 
 				-- link to bundle plan template for cycles/level
 				left join bundles_new.bundle_plan_template bpt
 				  on bpt.plan_template_id = ie.price_plan_template_id
 
-				left join "transaction".lu_invoice_status lis
+				left join "transactions".lu_invoice_status lis
 				  on lis.invoice_status_id = i.invoice_status_id;
 
 
@@ -1200,6 +1220,155 @@ public class TransactionDAOImpl implements TransactionDAO {
 				""";
 		return cluboneJdbcTemplate.query(sql, rs -> rs.next() ? rs.getBigDecimal(1) : null, subscriptionPlanId,
 				cycleNumber, cycleNumber);
+	}
+
+	@Override
+	public void activateAgreementAndClientStatusForInvoice(UUID invoiceId, UUID actorId) {
+		if (invoiceId == null) {
+			throw new IllegalArgumentException("invoiceId must not be null");
+		}
+		if (actorId == null) {
+			throw new IllegalArgumentException("actorId must not be null");
+		}
+
+		// 1) Update client_agreements.client_agreement status to ACTIVE
+		final String updateClientAgreementSql = """
+				UPDATE client_agreements.client_agreement ca
+				SET
+				    client_agreement_status_id = (
+				        SELECT las.client_agreement_status_id
+				        FROM client_agreements.lu_client_agreement_status las
+				        WHERE las.code = 'ACTIVE'
+				          AND las.is_active = TRUE
+				        LIMIT 1
+				    ),
+				    is_active = TRUE,
+				    modified_on = NOW(),
+				    modified_by = ?
+				FROM transactions.invoice i
+				WHERE i.invoice_id = ?
+				  AND i.client_agreement_id IS NOT NULL
+				  AND i.client_agreement_id = ca.client_agreement_id
+				""";
+
+		// order of args must match the ? placeholders: modified_by, invoice_id
+		cluboneJdbcTemplate.update(updateClientAgreementSql, actorId, invoiceId);
+
+		// 2) Update clients.client_role_status to ACTIVE values, again using joins &
+		// subqueries
+		final String updateClientRoleStatusSql = """
+				UPDATE clients.client_role_status crs
+				SET
+				    agreement_status_id = (
+				        SELECT las.client_agreement_status_id
+				        FROM client_agreements.lu_client_agreement_status las
+				        WHERE las.code = 'ACTIVE'
+				          AND las.is_active = TRUE
+				        LIMIT 1
+				    ),
+				    status_id = (
+				        SELECT lcs.lu_client_status_id
+				        FROM clients.lu_client_status lcs
+				        WHERE lcs.client_status_type = 'Active'
+				          AND COALESCE(lcs.is_active, TRUE) = TRUE
+				        LIMIT 1
+				    ),
+				    account_status_id = (
+				        SELECT lcas.lu_client_account_status_id
+				        FROM clients.lu_client_account_status lcas
+				        WHERE lcas.client_account_status_type = 'Active'
+				          AND COALESCE(lcas.is_active, TRUE) = TRUE
+				        LIMIT 1
+				    ),
+				    is_active = TRUE,
+				    modified_on = NOW(),
+				    modified_by = ?
+				FROM transactions.invoice i
+				JOIN client_agreements.client_agreement ca
+				  ON ca.client_agreement_id = i.client_agreement_id
+				WHERE i.invoice_id = ?
+				  AND i.client_agreement_id IS NOT NULL
+				  AND crs.client_role_id = ca.client_role_id
+				  AND COALESCE(crs.is_active, TRUE) = TRUE
+				""";
+
+		cluboneJdbcTemplate.update(updateClientRoleStatusSql, actorId, invoiceId);
+	}
+
+	private static final class PromotionEffectValueRowMapper implements RowMapper<PromotionEffectValueDTO> {
+		@Override
+		public PromotionEffectValueDTO mapRow(ResultSet rs, int rowNum) throws SQLException {
+			PromotionEffectValueDTO dto = new PromotionEffectValueDTO();
+			dto.setPromotionEffectId((UUID) rs.getObject("promotion_effect_id"));
+			dto.setEffectTypeId((UUID) rs.getObject("effect_type_id"));
+			dto.setEffectTypeDescription(rs.getString("effect_type_description"));
+			dto.setValueAmount(rs.getBigDecimal("value_amount"));
+			dto.setValuePercent(rs.getBigDecimal("value_percent"));
+			return dto;
+		}
+	}
+
+	/**
+	 * NOTE: - Uses promotions.promotion.current_version_id to pull effects from the
+	 * CURRENT promotion version. - Assumes promotions.promotion_entity_scope has
+	 * promotion_version_id (common in this model). If your column name differs,
+	 * update the join accordingly.
+	 */
+	private static final String SQL_FETCH_EFFECT_VALUES_FOR_CURRENT_VERSION = """
+			SELECT
+			    pe.promotion_effect_id,
+			    pe.effect_type_id,
+			    et.name AS effect_type_description,
+			    pe.value_amount,
+			    pe.value_percent
+			FROM promotions.promotion p
+			JOIN promotions.promotion_version pv
+			    ON pv.promotion_version_id = p.current_version_id
+			   AND pv.is_active = true
+			JOIN promotions.promotion_entity_scope pes
+			    ON pes.promotion_version_id = pv.promotion_version_id
+			   AND pes.is_active = true
+			JOIN promotions.promotion_effects pe
+			    ON pe.promotion_entity_scope_id = pes.promotion_entity_scope_id
+			   AND pe.is_active = true
+			JOIN promotions.lu_effect_type et
+			    ON et.effect_type_id = pe.effect_type_id
+			   AND et.is_active = true
+			WHERE p.promotion_id = ?
+			  AND p.application_id = ?
+			  AND p.is_active = true
+			ORDER BY pe.display_order ASC
+			""";
+
+	@Override
+	public List<PromotionEffectValueDTO> fetchEffectValuesByPromotionId(UUID promotionId, UUID applicationId) {
+		return cluboneJdbcTemplate.query(SQL_FETCH_EFFECT_VALUES_FOR_CURRENT_VERSION,
+				new PromotionEffectValueRowMapper(), promotionId, applicationId);
+	}
+
+	@Override
+	public boolean isFeeItem(UUID itemId, UUID applicationId) {
+
+	    final String sql = """
+	        SELECT 1
+	        FROM items.item it
+	        JOIN items.lu_item_group ig
+	          ON ig.item_group_id = it.item_group_id
+	         AND ig.application_id = it.application_id
+	        WHERE it.item_id = ?
+	          AND it.application_id = ?
+	          AND COALESCE(it.is_active, true) = true
+	          AND COALESCE(ig.is_active, true) = true
+	          AND ig.code = 'FEE'
+	        LIMIT 1
+	    """;
+
+	    List<Integer> rows = cluboneJdbcTemplate.query(sql, ps -> {
+	        ps.setObject(1, itemId);
+	        ps.setObject(2, applicationId);
+	    }, (rs, rowNum) -> 1);
+
+	    return rows != null && !rows.isEmpty();
 	}
 
 }

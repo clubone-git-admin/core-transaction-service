@@ -82,7 +82,7 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 	private static final String SQL_FIND_CPM_BY_TXN = """
 			    SELECT cpt.client_payment_method_id
 			    FROM client_payments.client_payment_transaction cpt
-			    JOIN "transaction"."transaction" t
+			    JOIN "transactions"."transaction" t
 			      ON t.client_payment_transaction_id = cpt.client_payment_transaction_id
 			    WHERE t.transaction_id = ?
 			      AND COALESCE(t.is_active, true) = true
@@ -112,15 +112,15 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 	public UUID insertSubscriptionPlan(SubscriptionPlanCreateRequest req, UUID createdBy) {
 		final String sql = """
 				    INSERT INTO client_subscription_billing.subscription_plan
-				      (entity_id, client_payment_method_id, subscription_frequency_id, interval_count,
+				      ( client_payment_method_id, subscription_frequency_id, interval_count,
 				       subscription_billing_day_rule_id, is_active, created_on, created_by,
-				       entity_type_id, contract_start_date, contract_end_date)
-				    VALUES (?,?,?,?,?, TRUE, now(), ?, ?, ?, ?)
+				        contract_start_date, contract_end_date)
+				    VALUES (?,?,?,?, TRUE, now(), ?, ?, ?)
 				    RETURNING subscription_plan_id
 				""";
-		return DaoUtils.queryForUuid(cluboneJdbcTemplate, sql, req.getEntityId(), req.getClientPaymentMethodId(),
+		return DaoUtils.queryForUuid(cluboneJdbcTemplate, sql,  req.getClientPaymentMethodId(),
 				req.getSubscriptionFrequencyId(), req.getIntervalCount(), req.getSubscriptionBillingDayRuleId(),
-				createdBy, req.getEntityTypeId(), req.getContractStartDate(), req.getContractEndDate());
+				createdBy,  req.getContractStartDate(), req.getContractEndDate());
 	}
 
 	@Override
@@ -295,12 +295,12 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 		final String sql = """
 				    INSERT INTO client_subscription_billing.subscription_plan_term
 				      (subscription_plan_id, remaining_cycles, is_active, created_on, created_by,
-				       modified_on, modified_by, end_date)
-				    VALUES (?, ?, ?, now(), ?, now(), ?, ?)
+				         term_end_date,term_start_date)
+				    VALUES (?, ?, ?, now(), ?, ?,now())
 				""";
 		LocalDate end = term.getEndDate();
 		return cluboneJdbcTemplate.update(sql, planId, term.getRemainingCycles(),
-				term.getIsActive() == null ? Boolean.TRUE : term.getIsActive(), createdBy, createdBy, end);
+				term.getIsActive() == null ? Boolean.TRUE : term.getIsActive(), createdBy,  end);
 	}
 
 	@Override
@@ -482,7 +482,7 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 				  FROM client_subscription_billing.subscription_instance si
 				  JOIN client_subscription_billing.subscription_billing_history sbh
 				    ON sbh.subscription_instance_id = si.subscription_instance_id
-				  JOIN "transaction".invoice i
+				  JOIN "transactions".invoice i
 				    ON i.invoice_id = sbh.invoice_id
 				  WHERE si.subscription_plan_id = ?
 				)
@@ -578,7 +578,7 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 				-- pick ONE invoice_entity per invoice
 				LEFT JOIN LATERAL (
 				  SELECT ie.*
-				  FROM "transaction".invoice_entity ie
+				  FROM "transactions".invoice_entity ie
 				  WHERE ie.invoice_id = i.invoice_id
 				  ORDER BY
 				    (ie.price_plan_template_id IS NOT NULL) DESC,
@@ -588,14 +588,14 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 				) ie ON TRUE
 
 				-- parent entity (if any)
-				LEFT JOIN "transaction".invoice_entity iep
+				LEFT JOIN "transactions".invoice_entity iep
 				  ON iep.invoice_entity_id = ie.parent_invoice_entity_id
 
 				-- bundle plan template
 				LEFT JOIN bundles_new.bundle_plan_template bpt
 				  ON bpt.plan_template_id = ie.price_plan_template_id
 
-				LEFT JOIN "transaction".lu_invoice_status lis
+				LEFT JOIN "transactions".lu_invoice_status lis
 				  ON lis.invoice_status_id = i.invoice_status_id
 
 				ORDER BY i.invoice_date DESC, i.created_on DESC NULLS LAST
@@ -690,7 +690,7 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 				LEFT JOIN LATERAL (
 				  SELECT i.invoice_id, i.level_id
 				  FROM client_subscription_billing.subscription_billing_history sbh
-				  JOIN "transaction".invoice i
+				  JOIN "transactions".invoice i
 				    ON i.invoice_id = sbh.invoice_id
 				  WHERE sbh.subscription_instance_id = si.subscription_instance_id
 				  ORDER BY
@@ -703,7 +703,7 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 				-- pick ONE invoice_entity from that invoice (prefer rows tied to a plan template)
 				LEFT JOIN LATERAL (
 				  SELECT ie.*
-				  FROM "transaction".invoice_entity ie
+				  FROM "transactions".invoice_entity ie
 				  WHERE ie.invoice_id = inv.invoice_id
 				  ORDER BY
 				    (ie.price_plan_template_id IS NOT NULL) DESC,
@@ -713,7 +713,7 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 				) ie ON TRUE
 
 				-- MUST have a parent entity -> filters out rows without parent_entity_id
-				JOIN "transaction".invoice_entity iep
+				JOIN "transactions".invoice_entity iep
 				  ON iep.invoice_entity_id = ie.parent_invoice_entity_id
 
 				-- template (for level fallback)

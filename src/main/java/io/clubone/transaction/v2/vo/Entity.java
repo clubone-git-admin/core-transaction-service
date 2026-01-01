@@ -10,6 +10,7 @@ import lombok.Data;
 @Data
 public class Entity {
 
+	private String entityType;
 	private UUID entityTypeId;
 	private UUID entityId;
 	private LocalDate startDate;
