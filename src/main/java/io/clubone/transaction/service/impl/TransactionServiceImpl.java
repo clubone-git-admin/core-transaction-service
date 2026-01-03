@@ -522,10 +522,24 @@ public class TransactionServiceImpl implements TransactionService {
 		if (invoiceSummary.isPresent() && invoiceSummary.get() != null) {
 			req.setClientRoleId(invoiceSummary.get().getClientRoleId());
 			req.setTotalAmount(invoiceSummary.get().getTotalAmount());
-			if (req.getAmountToPayNow().compareTo(req.getTotalAmount()) >= 0.02) {
-				//return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null,
-						//"Price not matching with invoice created");
+			System.out.println("Total Amount "+req.getTotalAmount()+" Remaining Amount "+req.getAmountToPayNow());
+			BigDecimal tolerance = new BigDecimal("0.01");
+
+			BigDecimal diff = req.getAmountToPayNow()
+			        .subtract(req.getTotalAmount())
+			        .abs()
+			        .setScale(2, RoundingMode.HALF_UP);
+
+			if (diff.compareTo(tolerance) > 0) {
+			    /*return new FinalizeTransactionResponse(
+			        req.getInvoiceId(),
+			        "UNPAID",
+			        null,
+			        null,
+			        "Price not matching with invoice created"
+			    );*/
 			}
+
 			req.setLevelId(invoiceSummary.get().getLevelId());
 		}
 

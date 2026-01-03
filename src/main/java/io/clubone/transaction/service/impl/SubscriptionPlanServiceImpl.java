@@ -81,7 +81,7 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 		int[] dcx = dao.batchInsertDiscountCodes(planId, nz(request.getDiscountCodes()), createdBy);
 		int[] enx = dao.batchInsertEntitlements(planId, nz(request.getEntitlements()), createdBy);
 		int[] pmx = dao.batchInsertPromos(planId, nz(request.getPromos()), createdBy);
-		int term = dao.insertPlanTerm(planId, request.getTerm(), createdBy);
+		int term = dao.insertPlanTerm(planId, request.getTerm(), createdBy,request.getAgreementTermId());
 
 		if (request.getTerm() != null  && request.getCyclePrices().size()>0) {
 			LocalDate start = request.getContractStartDate();

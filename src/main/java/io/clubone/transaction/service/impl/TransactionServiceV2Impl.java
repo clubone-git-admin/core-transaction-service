@@ -41,6 +41,7 @@ import io.clubone.transaction.v2.vo.EntityLevelInfoDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailRaw;
 import io.clubone.transaction.v2.vo.InvoiceEntityDiscountDTO;
+import io.clubone.transaction.v2.vo.InvoiceEntityPriceBandDTO;
 import io.clubone.transaction.v2.vo.InvoiceRequest;
 import io.clubone.transaction.v2.vo.InvoiceSummaryDTO;
 import io.clubone.transaction.v2.vo.Item;
@@ -1091,4 +1092,76 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		default -> "th";
 		};
 	}
+	
+	public InvoiceRequest buildFutureInvoiceRequest(UUID invoiceId, int cycleNumber, LocalDate billingDate, UUID actorId) {
+
+	    if (invoiceId == null) throw new IllegalArgumentException("invoiceId is required");
+	    if (cycleNumber <= 0) throw new IllegalArgumentException("cycleNumber must be >= 1");
+	    if (billingDate == null) billingDate = LocalDate.now();
+
+	    // 1) seed from old invoice
+	    final var seed = transactionDAO.fetchInvoiceSeed(invoiceId);
+
+	    // 2) leaf billable items from old invoice (the ones that used cycle bands)
+	    final var oldLines = transactionDAO.fetchBillableLeafLines(invoiceId);
+	    if (oldLines == null || oldLines.isEmpty()) {
+	        throw new IllegalStateException("No billable leaf lines found for invoiceId=" + invoiceId);
+	    }
+
+	    // 3) rebuild Items using the *new* price_cycle_band_id for this cycleNumber
+	    final List<Item> items = new ArrayList<>();
+
+	    for (var ln : oldLines) {
+	        UUID planTemplateId = ln.pricePlanTemplateId();
+	        if (planTemplateId == null) continue;
+
+	        UUID newBandId = transactionDAO.resolveCycleBandId(planTemplateId, cycleNumber);
+	        if (newBandId == null) {
+	            throw new IllegalStateException(
+	                "No cycle band found for planTemplateId=" + planTemplateId + " cycle=" + cycleNumber
+	            );
+	        }
+
+	        Item it = new Item();
+	        it.setEntityId(ln.entityId());                 // bill same item again
+	        it.setPricePlanTemplateId(planTemplateId);     // needed by your invoice pipeline
+	        it.setQuantity(1);                             // recurring invoices are typically 1 cycle at a time
+
+	        // Put the NEW priceCycleBandId into payload so buildItemLineFromPayload() picks correct band.
+	        InvoiceEntityPriceBandDTO bandRef = new InvoiceEntityPriceBandDTO();
+	        bandRef.setPriceCycleBandId(newBandId);
+
+	        it.setPriceBands(List.of(bandRef));
+
+	        items.add(it);
+	    }
+
+	    // 4) wrap into your InvoiceRequest structure.
+	    //    Minimal safe structure: use a single "Entity" of type ITEM and attach items list.
+	    //    If you want root AGREEMENT/PACKAGE structure, you can enhance this later.
+	    Entity root = new Entity();
+	    root.setEntityTypeId(transactionDAO.findEntityTypeIdByName("Item")); // reuse your existing lookup
+	    root.setStartDate(billingDate);
+	    root.setItems(items);
+
+	    InvoiceRequest req = new InvoiceRequest();
+	    req.setClientRoleId(seed.clientRoleId());
+	    req.setBillingAddress(seed.billingAddress());
+	    req.setCreatedBy(actorId != null ? actorId : seed.createdBy());
+	    req.setEntities(List.of(root));
+
+	    // Optional (recommended): if your createInvoice uses invoice level id fixed today,
+	    // you might want to pass/derive it; your current code hardcodes inv.setLevelId(...)
+	    // so either update createInvoice OR keep it consistent.
+	    return req;
+	}
+	
+	public CreateInvoiceResponse createFutureInvoice(UUID invoiceId, int cycleNumber, LocalDate billingDate, UUID actorId) {
+	    InvoiceRequest req = buildFutureInvoiceRequest(invoiceId, cycleNumber, billingDate, actorId);
+	    return createInvoice(req);
+	}
+
+
 }
+
+

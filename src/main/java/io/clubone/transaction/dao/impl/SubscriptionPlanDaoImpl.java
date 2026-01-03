@@ -50,7 +50,7 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 			  (subscription_plan_id, start_date, next_billing_date,
 			   subscription_instance_status_id, created_by, last_billed_on,
 			   end_date, current_cycle_number)
-			VALUES (?,?,?,?,?,?,?, COALESCE(?, 0))
+			VALUES (?,?,?,?,?,?,?, COALESCE(?, 1))
 			RETURNING subscription_instance_id
 			""";
 
@@ -114,13 +114,13 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 				    INSERT INTO client_subscription_billing.subscription_plan
 				      ( client_payment_method_id, subscription_frequency_id, interval_count,
 				       subscription_billing_day_rule_id, is_active, created_on, created_by,
-				        contract_start_date, contract_end_date)
-				    VALUES (?,?,?,?, TRUE, now(), ?, ?, ?)
+				        contract_start_date, contract_end_date,client_agreement_id,agreement_term_id)
+				    VALUES (?,?,?,?, TRUE, now(), ?, ?, ?,?,?)
 				    RETURNING subscription_plan_id
 				""";
 		return DaoUtils.queryForUuid(cluboneJdbcTemplate, sql,  req.getClientPaymentMethodId(),
 				req.getSubscriptionFrequencyId(), req.getIntervalCount(), req.getSubscriptionBillingDayRuleId(),
-				createdBy,  req.getContractStartDate(), req.getContractEndDate());
+				createdBy,  req.getContractStartDate(), req.getContractEndDate(),req.getClientAgreementId(),req.getAgreementTermId());
 	}
 
 	@Override
@@ -289,18 +289,18 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 	}
 
 	@Override
-	public int insertPlanTerm(UUID planId, PlanTermDTO term, UUID createdBy) {
+	public int insertPlanTerm(UUID planId, PlanTermDTO term, UUID createdBy,UUID agreementTermId) {
 		if (term == null)
 			return 0;
 		final String sql = """
 				    INSERT INTO client_subscription_billing.subscription_plan_term
 				      (subscription_plan_id, remaining_cycles, is_active, created_on, created_by,
-				         term_end_date,term_start_date)
-				    VALUES (?, ?, ?, now(), ?, ?,now())
+				         term_end_date,term_start_date,agreement_term_id)
+				    VALUES (?, ?, ?, now(), ?, ?,now(),?)
 				""";
 		LocalDate end = term.getEndDate();
 		return cluboneJdbcTemplate.update(sql, planId, term.getRemainingCycles(),
-				term.getIsActive() == null ? Boolean.TRUE : term.getIsActive(), createdBy,  end);
+				term.getIsActive() == null ? Boolean.TRUE : term.getIsActive(), createdBy,  end,agreementTermId);
 	}
 
 	@Override

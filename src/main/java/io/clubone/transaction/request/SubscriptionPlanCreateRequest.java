@@ -23,6 +23,8 @@ public class SubscriptionPlanCreateRequest {
 	private UUID subscriptionBillingDayRuleId;
 	@NotNull
 	private UUID entityTypeId;
+	private UUID clientAgreementId;
+	private UUID agreementTermId;
 
 	@NotNull
 	private LocalDate contractStartDate;
@@ -165,6 +167,22 @@ public class SubscriptionPlanCreateRequest {
 
 	public void setLevelId(UUID levelId) {
 		this.levelId = levelId;
+	}
+
+	public UUID getClientAgreementId() {
+		return clientAgreementId;
+	}
+
+	public void setClientAgreementId(UUID clientAgreementId) {
+		this.clientAgreementId = clientAgreementId;
+	}
+
+	public UUID getAgreementTermId() {
+		return agreementTermId;
+	}
+
+	public void setAgreementTermId(UUID agreementTermId) {
+		this.agreementTermId = agreementTermId;
 	}
 	
 	

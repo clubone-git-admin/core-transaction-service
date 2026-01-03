@@ -19,7 +19,7 @@ public interface SubscriptionPlanDao {
 
 	int[] batchInsertPromos(UUID planId, List<PromoDTO> rows, UUID createdBy);
 
-	int insertPlanTerm(UUID planId, PlanTermDTO term, UUID createdBy);
+	int insertPlanTerm(UUID planId, PlanTermDTO term, UUID createdBy, UUID agreementTermId);
 
 	UUID insertSubscriptionInstance(UUID subscriptionPlanId, LocalDate startDate, LocalDate endDate,
 			LocalDate nextBillingDate, UUID subscriptionInstanceStatusId, UUID createdBy, Integer currentCycleNumber,

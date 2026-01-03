@@ -43,6 +43,12 @@ public class SubscriptionPlanHelper {
 		Integer intervalCount;
 		Integer totalCycles;
 		UUID levelId;
+		UUID clientAgreementId;
+	    UUID agreementTermId;
+	    Integer termDurationValue;
+	    String termDurationUnitCode;
+	    String termDurationUnitName;
+
 	}
 
 	/**
@@ -50,80 +56,106 @@ public class SubscriptionPlanHelper {
 	 * frequency
 	 */
 	public List<InvoiceEntityPlanRow> fetchInvoiceEntitiesWithPlan(UUID invoiceId, UUID transactionId) {
-		final String sql = """
-				    SELECT
-    ie.invoice_entity_id,
-    ie.entity_id,                 -- entity_id == item_id
-    ie.entity_type_id,
-    ie.contract_start_date,
-    (ie.contract_start_date + INTERVAL '1 month')::date AS contract_end_date,
-    i.created_by,
-    ppt.subscription_billing_day_rule_id,
-    ppt.subscription_frequency_id,
-    COALESCE(ppt.interval_count, 1) AS interval_count,
-    ppt.total_cycles,
-    sf.frequency_name AS subscription_frequency_name,
-    i.level_id
-FROM "transactions".invoice_entity ie
-JOIN "transactions".invoice i
-  ON i.invoice_id = ie.invoice_id
-JOIN "transactions"."transaction" t
-  ON t.invoice_id = i.invoice_id
-JOIN package.package_plan_template ppt
-  ON ppt.package_plan_template_id = ie.price_plan_template_id
-JOIN client_subscription_billing.lu_subscription_frequency sf
-  ON sf.subscription_frequency_id = ppt.subscription_frequency_id
 
--- ✅ filter out FEE items
-JOIN items.item it
-  ON it.item_id = ie.entity_id
-JOIN items.lu_item_group ig
-  ON ig.item_group_id = it.item_group_id
- AND ig.application_id = it.application_id
+	    final String sql = """
+	        SELECT
+	            ie.invoice_entity_id,
+	            ie.entity_id,                 -- entity_id == item_id
+	            ie.entity_type_id,
+	            ie.contract_start_date,
+	            (ie.contract_start_date + INTERVAL '1 month')::date AS contract_end_date,
+	            i.created_by,
 
-WHERE i.invoice_id = ?
-  AND t.transaction_id = ?
-  AND COALESCE(ie.is_active, true) = true
-  AND COALESCE(ppt.is_active, true) = true
-  AND COALESCE(sf.is_active, true) = true
-  AND COALESCE(it.is_active, true) = true
-  AND COALESCE(ig.is_active, true) = true
-  AND ppt.subscription_frequency_id IS NOT NULL
+	            -- ✅ NEW
+	            i.client_agreement_id,
+	            a.agreement_term_id,
 
-  -- ✅ exclude fees
-  AND ig.code <> 'FEE'
+	            ppt.subscription_billing_day_rule_id,
+	            ppt.subscription_frequency_id,
+	            COALESCE(ppt.interval_count, 1) AS interval_count,
+	            ppt.total_cycles,
+	            sf.frequency_name AS subscription_frequency_name,
+	            i.level_id,
+	            at.duration_value        AS term_duration_value,
+ut.code                  AS term_duration_unit_code,
+ut.name                  AS term_duration_unit_name
 
-ORDER BY ie.created_on, ie.invoice_entity_id;
+	        FROM "transactions".invoice_entity ie
+	        JOIN "transactions".invoice i
+	          ON i.invoice_id = ie.invoice_id
+	        JOIN "transactions"."transaction" t
+	          ON t.invoice_id = i.invoice_id
+	        JOIN package.package_plan_template ppt
+	          ON ppt.package_plan_template_id = ie.price_plan_template_id
+	        JOIN client_subscription_billing.lu_subscription_frequency sf
+	          ON sf.subscription_frequency_id = ppt.subscription_frequency_id
 
-				""";
+	        -- ✅ NEW: derive term via invoice.client_agreement_id
+	        LEFT JOIN client_agreements.client_agreement ca
+	          ON ca.client_agreement_id = i.client_agreement_id
+	        LEFT JOIN agreements.agreement a
+	          ON a.agreement_id = ca.agreement_id
+	    	LEFT JOIN agreements.agreement_term at
+  ON at.agreement_term_id = a.agreement_term_id
+LEFT JOIN agreements.lu_duration_unit_type ut
+  ON ut.duration_unit_type_id = at.duration_unit_type_id
 
-		return cluboneJdbcTemplate.query(sql, (rs, rn) -> {
-			InvoiceEntityPlanRow row = new InvoiceEntityPlanRow();
-			row.invoiceEntityId = (UUID) rs.getObject("invoice_entity_id");
-			row.entityId = (UUID) rs.getObject("entity_id");
-			row.entityTypeId = (UUID) rs.getObject("entity_type_id");
+	        -- ✅ filter out FEE items
+	        JOIN items.item it
+	          ON it.item_id = ie.entity_id
+	        JOIN items.lu_item_group ig
+	          ON ig.item_group_id = it.item_group_id
+	         AND ig.application_id = it.application_id
+	         
 
-			Timestamp cs = rs.getTimestamp("contract_start_date");
-			if (cs != null)
-				row.contractStartDate = cs.toLocalDateTime().toLocalDate();
+	        WHERE i.invoice_id = ?
+	          AND t.transaction_id = ?
+	          AND COALESCE(ie.is_active, true) = true
+	          AND COALESCE(ppt.is_active, true) = true
+	          AND COALESCE(sf.is_active, true) = true
+	          AND COALESCE(it.is_active, true) = true
+	          AND COALESCE(ig.is_active, true) = true
+	          AND ppt.subscription_frequency_id IS NOT NULL
 
-			Timestamp ce = rs.getTimestamp("contract_end_date");
-			if (ce != null)
-				row.contractEndDate = ce.toLocalDateTime().toLocalDate();
+	          -- ✅ exclude fees
+	          AND ig.code <> 'FEE'
 
-			row.createdBy = (UUID) rs.getObject("created_by");
-			row.subscriptionBillingDayRuleId = (UUID) rs.getObject("subscription_billing_day_rule_id");
-			row.subscriptionFrequencyId = (UUID) rs.getObject("subscription_frequency_id");
-			row.intervalCount = rs.getObject("interval_count") != null ? rs.getInt("interval_count") : 1;
+	        ORDER BY ie.created_on, ie.invoice_entity_id;
+	    """;
 
-			// preserve NULL for total_cycles (rs.getInt returns 0 if NULL)
-			row.totalCycles = (Integer) rs.getObject("total_cycles");
+	    return cluboneJdbcTemplate.query(sql, (rs, rn) -> {
+	        InvoiceEntityPlanRow row = new InvoiceEntityPlanRow();
+	        row.invoiceEntityId = (UUID) rs.getObject("invoice_entity_id");
+	        row.entityId = (UUID) rs.getObject("entity_id");
+	        row.entityTypeId = (UUID) rs.getObject("entity_type_id");
 
-			row.subscriptionFrequency = rs.getString("subscription_frequency_name");
-			row.levelId=(UUID) rs.getObject("level_id");
-			return row;
-		}, invoiceId, transactionId);
+	        Timestamp cs = rs.getTimestamp("contract_start_date");
+	        if (cs != null) row.contractStartDate = cs.toLocalDateTime().toLocalDate();
+
+	        Timestamp ce = rs.getTimestamp("contract_end_date");
+	        if (ce != null) row.contractEndDate = ce.toLocalDateTime().toLocalDate();
+
+	        row.createdBy = (UUID) rs.getObject("created_by");
+	        row.subscriptionBillingDayRuleId = (UUID) rs.getObject("subscription_billing_day_rule_id");
+	        row.subscriptionFrequencyId = (UUID) rs.getObject("subscription_frequency_id");
+	        row.intervalCount = rs.getObject("interval_count") != null ? rs.getInt("interval_count") : 1;
+
+	        row.totalCycles = (Integer) rs.getObject("total_cycles");
+	        row.subscriptionFrequency = rs.getString("subscription_frequency_name");
+	        row.levelId = (UUID) rs.getObject("level_id");
+
+	        // ✅ NEW
+	        row.clientAgreementId = (UUID) rs.getObject("client_agreement_id");
+	        row.agreementTermId = (UUID) rs.getObject("agreement_term_id");
+	        row.termDurationValue = (Integer) rs.getObject("term_duration_value");
+	        row.termDurationUnitCode = rs.getString("term_duration_unit_code");
+	        row.termDurationUnitName = rs.getString("term_duration_unit_name");
+
+
+	        return row;
+	    }, invoiceId, transactionId);
 	}
+
 
 	public List<CyclePriceDTO> fetchCyclePrices(UUID invoiceEntityId) {
 		final String sql = """
@@ -222,6 +254,9 @@ ORDER BY ie.created_on, ie.invoice_entity_id;
 			req.setEntityId(r.entityId);
 			req.setEntityTypeId(r.entityTypeId);
 			req.setClientPaymentMethodId(cpmId);
+			
+			req.setAgreementTermId(r.agreementTermId);
+			req.setClientAgreementId(r.clientAgreementId);
 
 			// plan fields required by your request
 			req.setSubscriptionFrequencyId(r.subscriptionFrequencyId);
@@ -231,9 +266,15 @@ ORDER BY ie.created_on, ie.invoice_entity_id;
 
 			// dates (fallback end date if null)
 			LocalDate start = r.contractStartDate != null ? r.contractStartDate : LocalDate.now();
-			LocalDate end = computeEndDate(start, r.totalCycles, r.intervalCount, r.subscriptionFrequency);
+			//LocalDate end = computeEndDate(start, r.totalCycles, r.intervalCount, r.subscriptionFrequency);
+			LocalDate end =
+				    computeEndDateFromTerm(
+				        start,
+				        r.termDurationValue,
+				        r.termDurationUnitCode
+				    );
 			req.setContractStartDate(start);
-			req.setContractEndDate(end);
+			req.setContractEndDate(end!=null?end:start);
 
 			// optional children
 			List<CyclePriceDTO> cyclePrices=fetchCyclePrices(r.invoiceEntityId);
@@ -286,4 +327,42 @@ ORDER BY ie.created_on, ie.invoice_entity_id;
 			return start.plusMonths((long) cycles * interval);
 		}
 	}
+	
+	private LocalDate computeEndDateFromTerm(
+	        LocalDate startDate,
+	        Integer durationValue,
+	        String durationUnitCode
+	) {
+	    if (startDate == null || durationValue == null || durationUnitCode == null) {
+	        return null;
+	    }
+
+	    switch (durationUnitCode.toUpperCase()) {
+	        case "DAY":
+	        case "DAYS":
+	        case "D":
+	            return startDate.plusDays(durationValue);
+
+	        case "WEEK":
+	        case "WEEKS":
+	        case "W":
+	            return startDate.plusWeeks(durationValue);
+
+	        case "MONTH":
+	        case "MONTHS":
+	        case "M":
+	            return startDate.plusMonths(durationValue);
+
+	        case "YEAR":
+	        case "YEARS":
+	        case "Y":
+	            return startDate.plusYears(durationValue);
+
+	        default:
+	            throw new IllegalArgumentException(
+	                "Unsupported duration unit: " + durationUnitCode
+	            );
+	    }
+	}
+
 }

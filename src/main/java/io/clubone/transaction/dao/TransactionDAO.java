@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+import io.clubone.transaction.dao.impl.TransactionDAOImpl.InvoiceBillableLineRow;
 import io.clubone.transaction.v2.vo.BundlePriceCycleBandDTO;
 import io.clubone.transaction.v2.vo.DiscountDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailDTO;
@@ -16,6 +17,7 @@ import io.clubone.transaction.vo.EntityTypeDTO;
 import io.clubone.transaction.vo.InvoiceDTO;
 import io.clubone.transaction.vo.InvoiceEntityRow;
 import io.clubone.transaction.vo.InvoiceFlatRow;
+import io.clubone.transaction.vo.InvoiceSeedRow;
 import io.clubone.transaction.vo.InvoiceSummaryDTO;
 import io.clubone.transaction.vo.ItemPriceDTO;
 import io.clubone.transaction.vo.TaxRateAllocationDTO;
@@ -86,5 +88,8 @@ public interface TransactionDAO {
 	List<PromotionEffectValueDTO> fetchEffectValuesByPromotionId(UUID promotionId, UUID applicationId);
 
 	boolean isFeeItem(UUID itemId, UUID applicationId);
+	public InvoiceSeedRow fetchInvoiceSeed(UUID invoiceId);
+	public List<InvoiceBillableLineRow> fetchBillableLeafLines(UUID invoiceId);
+	public UUID resolveCycleBandId(UUID packagePlanTemplateId, int cycleNumber);
 
 }

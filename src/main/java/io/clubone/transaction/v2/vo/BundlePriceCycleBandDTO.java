@@ -28,8 +28,9 @@ public class BundlePriceCycleBandDTO {
     public void setDownPaymentUnits(Integer downPaymentUnits) {
         this.downPaymentUnits = downPaymentUnits;
     }
+   
 
-    @Override
+	@Override
     public String toString() {
         return "BundlePriceCycleBandDTO{" +
                 "unitPrice=" + unitPrice +

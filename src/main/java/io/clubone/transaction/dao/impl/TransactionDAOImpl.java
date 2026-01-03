@@ -44,6 +44,7 @@ import io.clubone.transaction.vo.InvoiceEntityDTO;
 import io.clubone.transaction.vo.InvoiceEntityRow;
 import io.clubone.transaction.vo.InvoiceEntityTaxDTO;
 import io.clubone.transaction.vo.InvoiceFlatRow;
+import io.clubone.transaction.vo.InvoiceSeedRow;
 import io.clubone.transaction.vo.InvoiceSummaryDTO;
 import io.clubone.transaction.vo.ItemPriceDTO;
 import io.clubone.transaction.vo.TaxRateAllocationDTO;
@@ -1370,5 +1371,74 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 	    return rows != null && !rows.isEmpty();
 	}
+	
+	public InvoiceSeedRow fetchInvoiceSeed(UUID invoiceId) {
+	    final String sql = """
+	        select
+	          i.invoice_id,
+	          i.client_role_id,
+	          i.level_id,
+	          i.billing_address,
+	          i.client_agreement_id,
+	          i.created_by
+	        from transactions.invoice i
+	        where i.invoice_id = ?
+	    """;
+	    return cluboneJdbcTemplate.queryForObject(sql, (rs, rn) -> new InvoiceSeedRow(
+	        rs.getObject("invoice_id", UUID.class),
+	        rs.getObject("client_role_id", UUID.class),
+	        rs.getObject("level_id", UUID.class),
+	        rs.getString("billing_address"),
+	        rs.getObject("client_agreement_id", UUID.class),
+	        rs.getObject("created_by", UUID.class)
+	    ), invoiceId);
+	}
+
+	public List<InvoiceBillableLineRow> fetchBillableLeafLines(UUID invoiceId) {
+	    final String sql = """
+	        select
+	          ie.invoice_entity_id,
+	          ie.entity_type_id,
+	          ie.entity_id,
+	          ie.price_plan_template_id,
+	          iepb.price_cycle_band_id as old_price_cycle_band_id
+	        from transactions.invoice_entity ie
+	        join transactions.invoice_entity_price_band iepb
+	          on iepb.invoice_entity_id = ie.invoice_entity_id
+	        where ie.invoice_id = ?
+	          and ie.is_active = true
+	          and iepb.is_active = true
+	          and ie.price_plan_template_id is not null
+	    """;
+	    return cluboneJdbcTemplate.query(sql, (rs, rn) -> new InvoiceBillableLineRow(
+	        rs.getObject("invoice_entity_id", UUID.class),
+	        rs.getObject("entity_type_id", UUID.class),
+	        rs.getObject("entity_id", UUID.class),
+	        rs.getObject("price_plan_template_id", UUID.class),
+	        rs.getObject("old_price_cycle_band_id", UUID.class)
+	    ), invoiceId);
+	}
+	
+	public UUID resolveCycleBandId(UUID packagePlanTemplateId, int cycleNumber) {
+	    final String sql = """
+	        select b.package_price_cycle_band_id
+	        from package.package_price_cycle_band b
+	        where b.package_plan_template_id = ?
+	          and b.start_cycle <= ?
+	          and (b.end_cycle is null or b.end_cycle >= ?)
+	          and b.is_active is true
+	        order by b.start_cycle desc
+	        limit 1
+	    """;
+	    return cluboneJdbcTemplate.queryForObject(sql, UUID.class, packagePlanTemplateId, cycleNumber, cycleNumber);
+	}
+	public record InvoiceBillableLineRow(
+		    UUID invoiceEntityId,
+		    UUID entityTypeId,
+		    UUID entityId,
+		    UUID pricePlanTemplateId,
+		    UUID oldPriceCycleBandId
+		) {}
+
 
 }

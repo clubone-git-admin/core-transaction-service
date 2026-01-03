@@ -7,6 +7,7 @@ public class PlanTermDTO {
 	private Integer remainingCycles; // required by table
 	private Boolean isActive = true;
 	private LocalDate endDate;
+	private Integer totalCycles;
 	//private UUID subscriptionPlanId;// required
 
 	public Integer getRemainingCycles() {
@@ -33,4 +34,13 @@ public class PlanTermDTO {
 		this.endDate = endDate;
 	}
 
+	public Integer getTotalCycles() {
+		return totalCycles;
+	}
+
+	public void setTotalCycles(Integer totalCycles) {
+		this.totalCycles = totalCycles;
+	}
+
+	
 }
