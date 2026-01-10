@@ -7,6 +7,7 @@ import java.util.UUID;
 
 import io.clubone.transaction.v2.vo.InvoiceEntityDiscountDTO;
 import io.clubone.transaction.v2.vo.InvoiceEntityPriceBandDTO;
+import io.clubone.transaction.v2.vo.InvoiceEntityPromotionDTO;
 import lombok.Data;
 
 @Data
@@ -30,5 +31,7 @@ public class InvoiceEntityDTO {
 	private List<InvoiceEntityTaxDTO> taxes;
 	private List<InvoiceEntityDiscountDTO> discounts;
 	private List<InvoiceEntityPriceBandDTO> priceBands;
+	private List<InvoiceEntityPromotionDTO> promotions;
+
 	
 }

@@ -1,5 +1,6 @@
 package io.clubone.transaction.controller;
 
+import java.time.LocalDate;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.UUID;
@@ -9,6 +10,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -16,6 +18,7 @@ import io.clubone.transaction.response.CreateInvoiceResponse;
 import io.clubone.transaction.response.InvoiceDetailResponse;
 import io.clubone.transaction.service.InvoiceService;
 import io.clubone.transaction.service.TransactionServicev2;
+import io.clubone.transaction.v2.vo.FutureInvoiceRequestDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceRequest;
 import io.clubone.transaction.v2.vo.InvoiceSummaryDTO;
@@ -72,5 +75,20 @@ public class TransactionControllerV2 {
 
 		return ResponseEntity.ok(body);
 	}
+	
+	@PostMapping("/invoice/{invoiceId}/future")
+	  public ResponseEntity<CreateInvoiceResponse> createFutureCycleInvoice(
+	      @PathVariable UUID invoiceId,
+	      @RequestBody FutureInvoiceRequestDTO body,
+	      @RequestHeader(value = "X-Actor-Id", required = false) UUID actorId
+	  ) {
+	    int cycleNumber = body.getCycleNumber();
+	    LocalDate billingDate = body.getBillingDate() != null ? body.getBillingDate() : LocalDate.now();
+
+	    CreateInvoiceResponse resp =
+	        transactionService.createFutureInvoice(invoiceId, cycleNumber, billingDate, actorId);
+
+	    return ResponseEntity.ok(resp);
+	  }
 
 }

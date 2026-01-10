@@ -7,6 +7,7 @@ public class PromotionItemEffectDTO {
 
     private UUID promotionId;
     private UUID promotionVersionId;
+    private UUID promotionApplicabilityId;
 
     private UUID itemId;
 
@@ -42,5 +43,12 @@ public class PromotionItemEffectDTO {
 
     public BigDecimal getValuePercent() { return valuePercent; }
     public void setValuePercent(BigDecimal valuePercent) { this.valuePercent = valuePercent; }
+	public UUID getPromotionApplicabilityId() {
+		return promotionApplicabilityId;
+	}
+	public void setPromotionApplicabilityId(UUID promotionApplicabilityId) {
+		this.promotionApplicabilityId = promotionApplicabilityId;
+	}
+    
 }
 

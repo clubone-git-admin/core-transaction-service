@@ -27,7 +27,7 @@ public class PromotionEffectDAOImpl implements PromotionEffectDAO {
             dto.setPromotionId((UUID) rs.getObject("promotion_id"));
             dto.setPromotionVersionId((UUID) rs.getObject("promotion_version_id"));
             dto.setItemId((UUID) rs.getObject("item_id"));
-
+            dto.setPromotionApplicabilityId((UUID) rs.getObject("promotion_applicability_id"));
             dto.setPromotionEffectId((UUID) rs.getObject("promotion_effect_id"));
             dto.setEffectTypeId((UUID) rs.getObject("effect_type_id"));
             dto.setEffectTypeDescription(rs.getString("effect_type_description"));
@@ -107,21 +107,28 @@ public class PromotionEffectDAOImpl implements PromotionEffectDAO {
     public Map<UUID, PromotionItemEffectDTO> fetchEffectsByPromotionForItems(
             UUID promotionId, Set<UUID> itemIds, UUID applicationId
     ) {
-        if (promotionId == null || itemIds == null || itemIds.isEmpty()) return Collections.emptyMap();
+        System.out.println("promo block");
+        if (promotionId == null || applicationId == null) return Collections.emptyMap();
+        if (itemIds == null) itemIds = Collections.emptySet();
 
-        String placeholders = String.join(",", Collections.nCopies(itemIds.size(), "?"));
+        String placeholders = itemIds.isEmpty()
+                ? ""   // not used if ALL
+                : String.join(",", Collections.nCopies(itemIds.size(), "?"));
 
         String sql =
             """
             SELECT
                 p.promotion_id,
                 pv.promotion_version_id,
+                pa.promotion_applicability_id,
                 pes.entity_scope_id AS item_id,
                 pe.promotion_effect_id,
                 pe.effect_type_id,
                 et.name AS effect_type_description,
                 pe.value_amount,
-                pe.value_percent
+                pe.value_percent,
+                ato.code AS apply_to_code,
+                av.code  AS availability_code
             FROM promotions.promotion p
             JOIN promotions.promotion_version pv
                 ON pv.promotion_version_id = p.current_version_id
@@ -130,12 +137,16 @@ public class PromotionEffectDAOImpl implements PromotionEffectDAO {
                 ON pa.promotion_version_id = pv.promotion_version_id
                AND pa.is_active = true
                AND pa.application_id = p.application_id
+            JOIN promotions.lu_availability_type av
+                ON av.availability_type_id = pa.availability_type_id
             JOIN promotions.promotion_entity_scope pes
                 ON pes.promotion_applicability_id = pa.promotion_applicability_id
                AND pes.is_active = true
                AND pes.application_id = p.application_id
             JOIN promotions.lu_entity_scope_type est
                 ON est.entity_scope_type_id = pes.entity_scope_type_id
+            JOIN promotions.lu_apply_to ato
+                ON ato.apply_to_id = pes.apply_to_id
             JOIN promotions.promotion_effects pe
                 ON pe.promotion_entity_scope_id = pes.promotion_entity_scope_id
                AND pe.is_active = true
@@ -145,8 +156,18 @@ public class PromotionEffectDAOImpl implements PromotionEffectDAO {
             WHERE p.promotion_id = ?
               AND p.application_id = ?
               AND p.is_active = true
+              AND pv.is_active = true
+              AND pa.is_active = true
               AND est.code = 'ITEM'
-              AND pes.entity_scope_id IN (""" + placeholders + """
+              AND av.code = 'POS'
+              AND (
+                    ato.code = 'ALL'
+                 """ +
+                 (itemIds.isEmpty()
+                    ? ""
+                    : " OR (ato.code = 'INCLUDE' AND pes.entity_scope_id IN (" + placeholders + "))"
+                 ) +
+            """
               )
             ORDER BY pes.entity_scope_id, pe.display_order ASC
             """;
@@ -154,15 +175,32 @@ public class PromotionEffectDAOImpl implements PromotionEffectDAO {
         List<Object> params = new ArrayList<>();
         params.add(promotionId);
         params.add(applicationId);
-        params.addAll(itemIds);
+        if (!itemIds.isEmpty()) params.addAll(itemIds);
 
         List<PromotionItemEffectDTO> rows =
                 cluboneJdbcTemplate.query(sql, new PromotionItemEffectRowMapper(), params.toArray());
 
+        // NOTE:
+        // For apply_to=ALL, pes.entity_scope_id may be NULL; your row mapper must handle that.
+        // You can either:
+        // 1) return a special key like UUID(0) for ALL rows, OR
+        // 2) expand ALL rows to every requested itemId here.
+
         Map<UUID, PromotionItemEffectDTO> map = new HashMap<>();
+
         for (PromotionItemEffectDTO r : rows) {
-            map.putIfAbsent(r.getItemId(), r); // keep first by display_order
+            UUID keyItemId = r.getItemId();
+
+            // If ALL and item_id is null, apply the same effect to every requested itemId
+            if (keyItemId == null) {
+                for (UUID id : itemIds) {
+                    map.putIfAbsent(id, r);
+                }
+            } else {
+                map.putIfAbsent(keyItemId, r);
+            }
         }
+
         return map;
     }
 

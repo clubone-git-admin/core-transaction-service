@@ -15,6 +15,7 @@ import io.clubone.transaction.vo.BundleComponent;
 import io.clubone.transaction.vo.BundleItemPriceDTO;
 import io.clubone.transaction.vo.EntityTypeDTO;
 import io.clubone.transaction.vo.InvoiceDTO;
+import io.clubone.transaction.vo.InvoiceEntityDTO;
 import io.clubone.transaction.vo.InvoiceEntityRow;
 import io.clubone.transaction.vo.InvoiceFlatRow;
 import io.clubone.transaction.vo.InvoiceSeedRow;
@@ -89,7 +90,23 @@ public interface TransactionDAO {
 
 	boolean isFeeItem(UUID itemId, UUID applicationId);
 	public InvoiceSeedRow fetchInvoiceSeed(UUID invoiceId);
-	public List<InvoiceBillableLineRow> fetchBillableLeafLines(UUID invoiceId);
+	public List<InvoiceBillableLineRow> fetchBillableLeafLines(UUID invoiceId, int cycleNumber);
 	public UUID resolveCycleBandId(UUID packagePlanTemplateId, int cycleNumber);
+
+	BigDecimal findUnitPriceByCycleBandId(UUID newBandId);
+
+	int resolveDefaultQtyFromEntitlement(UUID planTemplateId, UUID applicationId);
+
+	Integer findBillingDayOfMonth(UUID ruleId);
+
+	UUID findBillingDayRuleIdForPlanTemplate(UUID planTemplateId);
+	
+	void saveInvoiceEntityPromotions(List<InvoiceEntityDTO> lines, UUID actorId);
+
+	Optional<UUID> findPromotionIdAppliedOnInvoice(UUID invoiceId);
+
+	String findFrequencyNameForPlanTemplate(UUID planTemplateId);   // WEEKLY/MONTHLY/QUARTERLY/YEARLY
+	Integer findIntervalCountForPlanTemplate(UUID planTemplateId);  // default 1
+	String findBillingDayText(UUID billingDayRuleId);               // from lu_subscription_billing_day_rule.billing_day (TEXT)
 
 }

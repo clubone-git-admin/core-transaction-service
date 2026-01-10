@@ -22,6 +22,7 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -34,6 +35,7 @@ import io.clubone.transaction.v2.vo.InvoiceDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailRaw;
 import io.clubone.transaction.v2.vo.InvoiceEntityDiscountDTO;
 import io.clubone.transaction.v2.vo.InvoiceEntityPriceBandDTO;
+import io.clubone.transaction.v2.vo.InvoiceEntityPromotionDTO;
 import io.clubone.transaction.v2.vo.PaymentTimelineItemDTO;
 import io.clubone.transaction.v2.vo.PromotionEffectValueDTO;
 import io.clubone.transaction.vo.BundleComponent;
@@ -316,8 +318,9 @@ public class TransactionDAOImpl implements TransactionDAO {
 			if (li.getInvoiceEntityId() != null) {
 				ieId = li.getInvoiceEntityId();
 			} else {
-				ieId = UUID.randomUUID();
+				ieId = UUID.randomUUID();				
 			}
+			li.setInvoiceEntityId(ieId);
 
 			// Attach to last bundle header if not explicitly given and this isn’t a bundle
 			// header
@@ -390,10 +393,10 @@ public class TransactionDAOImpl implements TransactionDAO {
 							dto.getCreatedBy() // modified_by (you can use same user)
 					);
 				}
-			}
+			}			
 
 		}
-
+		saveInvoiceEntityPromotions(dto.getLineItems(), dto.getCreatedBy());
 		return invoiceId;
 	}
 
@@ -1394,30 +1397,42 @@ public class TransactionDAOImpl implements TransactionDAO {
 	    ), invoiceId);
 	}
 
-	public List<InvoiceBillableLineRow> fetchBillableLeafLines(UUID invoiceId) {
+	public List<InvoiceBillableLineRow> fetchBillableLeafLines(UUID invoiceId, int cycleNumber) {
+
 	    final String sql = """
-	        select
+	        select distinct
 	          ie.invoice_entity_id,
 	          ie.entity_type_id,
 	          ie.entity_id,
 	          ie.price_plan_template_id,
-	          iepb.price_cycle_band_id as old_price_cycle_band_id
+	          bpcb.package_price_cycle_band_id as price_cycle_band_id
 	        from transactions.invoice_entity ie
 	        join transactions.invoice_entity_price_band iepb
 	          on iepb.invoice_entity_id = ie.invoice_entity_id
+	        join package.package_price_cycle_band bpcb
+	          on bpcb.package_plan_template_id = ie.price_plan_template_id
+	         and bpcb.cycle_range @> ?::int
 	        where ie.invoice_id = ?
 	          and ie.is_active = true
 	          and iepb.is_active = true
+	          --and bpcb.is_active = true
 	          and ie.price_plan_template_id is not null
 	    """;
-	    return cluboneJdbcTemplate.query(sql, (rs, rn) -> new InvoiceBillableLineRow(
-	        rs.getObject("invoice_entity_id", UUID.class),
-	        rs.getObject("entity_type_id", UUID.class),
-	        rs.getObject("entity_id", UUID.class),
-	        rs.getObject("price_plan_template_id", UUID.class),
-	        rs.getObject("old_price_cycle_band_id", UUID.class)
-	    ), invoiceId);
+
+	    return cluboneJdbcTemplate.query(
+	        sql,
+	        (rs, rn) -> new InvoiceBillableLineRow(
+	            rs.getObject("invoice_entity_id", UUID.class),
+	            rs.getObject("entity_type_id", UUID.class),
+	            rs.getObject("entity_id", UUID.class),
+	            rs.getObject("price_plan_template_id", UUID.class),
+	            rs.getObject("price_cycle_band_id", UUID.class)
+	        ),
+	        cycleNumber,
+	        invoiceId
+	    );
 	}
+
 	
 	public UUID resolveCycleBandId(UUID packagePlanTemplateId, int cycleNumber) {
 	    final String sql = """
@@ -1426,7 +1441,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 	        where b.package_plan_template_id = ?
 	          and b.start_cycle <= ?
 	          and (b.end_cycle is null or b.end_cycle >= ?)
-	          and b.is_active is true
+	          --and b.is_active is true
 	        order by b.start_cycle desc
 	        limit 1
 	    """;
@@ -1439,6 +1454,199 @@ public class TransactionDAOImpl implements TransactionDAO {
 		    UUID pricePlanTemplateId,
 		    UUID oldPriceCycleBandId
 		) {}
+	@Override
+	public BigDecimal findUnitPriceByCycleBandId(UUID newBandId) {
+		// TODO Auto-generated method stub
+		return null;
+	}
+
+
+	@Override
+	public int resolveDefaultQtyFromEntitlement(UUID planTemplateId, UUID applicationId) {
+	    if (planTemplateId == null) return 1;
+
+	    final String sql = """
+	        select coalesce(e.quantity_per_cycle, 1) as qty
+	        from package.package_plan_template_entitlement e
+	        where e.package_plan_template_id = ?
+	        order by e.created_on desc
+	        limit 1
+	    """;
+
+	    Integer q = cluboneJdbcTemplate.query(
+	            sql,
+	            rs -> rs.next() ? rs.getInt("qty") : 1,
+	            planTemplateId
+	    );
+
+	    return (q == null || q <= 0) ? 1 : q;
+	}
+	@Override
+	public UUID findBillingDayRuleIdForPlanTemplate(UUID planTemplateId) {
+	    if (planTemplateId == null) return null;
+
+	    final String sql = """
+	        select bpt.subscription_billing_day_rule_id
+	        from package.package_plan_template bpt
+	        where bpt.package_plan_template_id = ?
+	          and bpt.is_active = true
+	        limit 1
+	    """;
+
+	    return cluboneJdbcTemplate.query(sql, rs -> {
+	        if (rs.next()) return (UUID) rs.getObject(1);
+	        return null;
+	    }, planTemplateId);
+	}
+	@Override
+	public Integer findBillingDayOfMonth(UUID billingDayRuleId) {
+	    if (billingDayRuleId == null) return null;
+
+	    final List<String> candidates = List.of(
+	        "select billing_day from client_subscription_billing.lu_subscription_billing_day_rule where subscription_billing_day_rule_id = ?",
+	        "select billing_day_of_month from client_subscription_billing.lu_subscription_billing_day_rule where subscription_billing_day_rule_id = ?"
+	    );
+
+	    for (String sql : candidates) {
+	        try {
+	            Integer v = cluboneJdbcTemplate.query(sql, rs -> {
+	                if (rs.next()) return rs.getInt(1);
+	                return null;
+	            }, billingDayRuleId);
+
+	            if (v != null && v >= 1 && v <= 31) return v;
+	        } catch (Exception ignore) {
+	            // try next candidate
+	        }
+	    }
+	    return null;
+	}
+
+	@Override
+	public void saveInvoiceEntityPromotions(List<InvoiceEntityDTO> lines, UUID actorId) {
+
+	    if (lines == null || lines.isEmpty()) return;
+
+	    record Row(UUID invoiceEntityId, InvoiceEntityPromotionDTO p) {}
+
+	    List<Row> rows = new ArrayList<>();
+
+	    for (InvoiceEntityDTO line : lines) {
+	        if (line == null || line.getInvoiceEntityId() == null) continue;
+
+	        var promos = line.getPromotions();
+	        if (promos == null || promos.isEmpty()) continue;
+
+	        for (InvoiceEntityPromotionDTO p : promos) {
+	            if (p == null) continue;
+	            if (p.getPromotionVersionId() == null) continue;
+	            if (p.getPromotionApplicabilityId() == null) continue;
+	            if (p.getPromotionEffectId() == null) continue;
+	            if (p.getPromotionAmount() == null || p.getPromotionAmount().compareTo(BigDecimal.ZERO) <= 0) continue;
+
+	            rows.add(new Row(line.getInvoiceEntityId(), p));
+	        }
+	    }
+
+	    if (rows.isEmpty()) return;
+
+	    final String sql = """
+	        INSERT INTO transactions.invoice_entity_promotion
+	        (
+	            invoice_entity_promotion_id,
+	            invoice_entity_id,
+	            promotion_version_id,
+	            promotion_amount,
+	            is_active,
+	            created_on,
+	            created_by,
+	            modified_on,
+	            modified_by,
+	            promotion_applicability_id,
+	            promotion_effect_id
+	        )
+	        VALUES (?, ?, ?, ?, true, now(), ?, now(), ?, ?, ?)
+	        """;
+
+	    cluboneJdbcTemplate.batchUpdate(sql, rows, 500, (ps, r) -> {
+	        ps.setObject(1, UUID.randomUUID());
+	        ps.setObject(2, r.invoiceEntityId());
+	        ps.setObject(3, r.p().getPromotionVersionId());
+	        ps.setBigDecimal(4, r.p().getPromotionAmount());
+
+	        ps.setObject(5, actorId);
+	        ps.setObject(6, actorId);
+
+	        ps.setObject(7, r.p().getPromotionApplicabilityId());
+	        ps.setObject(8, r.p().getPromotionEffectId());
+	    });
+	}
+
+	public Optional<UUID> findPromotionIdAppliedOnInvoice(UUID invoiceId) {
+	    String sql = """
+	        SELECT DISTINCT pv.promotion_id
+	        FROM transactions.invoice_entity_promotion iep
+	        JOIN promotions.promotion_version pv
+	          ON pv.promotion_version_id = iep.promotion_version_id
+	        JOIN transactions.invoice_entity ie
+	          ON ie.invoice_entity_id = iep.invoice_entity_id
+	        WHERE ie.invoice_id = ?
+	          AND iep.is_active = true
+	        LIMIT 1
+	    """;
+	    List<UUID> rows = cluboneJdbcTemplate.query(sql, (rs, i) -> rs.getObject(1, UUID.class), invoiceId);
+	    return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+	}
+
+	@Override
+	public String findFrequencyNameForPlanTemplate(UUID planTemplateId) {
+	    if (planTemplateId == null) return null;
+
+	    return cluboneJdbcTemplate.query(
+	        """
+	        SELECT f.frequency_name
+	        FROM package.package_plan_template bpt
+	        JOIN client_subscription_billing.lu_subscription_frequency f
+	          ON f.subscription_frequency_id = bpt.subscription_frequency_id
+	        WHERE bpt.package_plan_template_id = ?
+	          AND bpt.is_active = true
+	        """,
+	        rs -> rs.next() ? rs.getString(1) : null,
+	        planTemplateId
+	    );
+	}
+
+	@Override
+	public Integer findIntervalCountForPlanTemplate(UUID planTemplateId) {
+	    if (planTemplateId == null) return null;
+
+	    return cluboneJdbcTemplate.query(
+	        """
+	        SELECT interval_count
+	        FROM package.package_plan_template
+	        WHERE package_plan_template_id = ?
+	          AND is_active = true
+	        """,
+	        rs -> rs.next() ? (Integer) rs.getInt(1) : null,
+	        planTemplateId
+	    );
+	}
+
+	@Override
+	public String findBillingDayText(UUID billingDayRuleId) {
+	    if (billingDayRuleId == null) return null;
+
+	    return cluboneJdbcTemplate.query(
+	        """
+	        SELECT billing_day
+	        FROM client_subscription_billing.lu_subscription_billing_day_rule
+	        WHERE subscription_billing_day_rule_id = ?
+	          AND is_active = true
+	        """,
+	        rs -> rs.next() ? rs.getString(1) : null,
+	        billingDayRuleId
+	    );
+	}
 
 
 }

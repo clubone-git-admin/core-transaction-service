@@ -6,10 +6,12 @@ import io.clubone.transaction.dao.SubscriptionPlanDao.BillingRule;
 import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.request.SubscriptionPlanBatchCreateRequest;
 import io.clubone.transaction.request.SubscriptionPlanCreateRequest;
+import io.clubone.transaction.response.CreateInvoiceResponse;
 import io.clubone.transaction.response.PlanCreateResult;
 import io.clubone.transaction.response.SubscriptionPlanBatchCreateResponse;
 import io.clubone.transaction.response.SubscriptionPlanCreateResponse;
 import io.clubone.transaction.service.SubscriptionPlanService;
+import io.clubone.transaction.service.TransactionServicev2;
 import io.clubone.transaction.util.FrequencyUnit;
 import io.clubone.transaction.v2.vo.CyclePriceDTO;
 import io.clubone.transaction.v2.vo.EntityLevelInfoDTO;
@@ -60,6 +62,9 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 
 	@Autowired
 	private EntityLookupDao entityLookupDao;
+	
+	@Autowired
+	private TransactionServicev2 tranServiceV2;
 
 	private static final Logger log = LoggerFactory.getLogger(SubscriptionPlanServiceImpl.class);
 
@@ -83,49 +88,71 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 		int[] pmx = dao.batchInsertPromos(planId, nz(request.getPromos()), createdBy);
 		int term = dao.insertPlanTerm(planId, request.getTerm(), createdBy,request.getAgreementTermId());
 
-		if (request.getTerm() != null  && request.getCyclePrices().size()>0) {
-			LocalDate start = request.getContractStartDate();
-			LocalDate end = request.getContractEndDate();
-			UUID freqId = request.getSubscriptionFrequencyId(); // daily/weekly/monthly...
-			Integer interval = request.getIntervalCount(); // e.g., 1, 3, 12
-			UUID dayRuleId = request.getSubscriptionBillingDayRuleId();
+		if (request.getTerm() != null && request.getCyclePrices() != null && !request.getCyclePrices().isEmpty()) {
 
-			LocalDate nextBill = computeNextBillingDate(start, freqId, interval, dayRuleId,
-					request.getCyclePrices().get(0).getCycleStart());
-			UUID priceCycleBandId = request.getCyclePrices().get(0).getPriceCycleBandId();
+		    LocalDate start = request.getContractStartDate();
+		    LocalDate end = request.getContractEndDate();
+		    UUID freqId = request.getSubscriptionFrequencyId();
+		    Integer interval = request.getIntervalCount();
+		    UUID dayRuleId = request.getSubscriptionBillingDayRuleId();
 
-			// Resolve status IDs for instance + billing
-			UUID instanceStatusId = dao
-					.subscriptionInstanceStatusId(start.isAfter(LocalDate.now()) ? "FUTURE" : "ACTIVE");
-			UUID billingStatusScheduledId = dao.billingStatusId("PENDING");
+		    // ✅ these are the same values you store in billing history
+		    Integer cycleNumber = request.getCyclePrices().get(0).getCycleStart();  // e.g. 3
+		    LocalDate billingDate = computeNextBillingDate(start, freqId, interval, dayRuleId, cycleNumber);
 
-			// Create instance (currentCycleNumber = 0, lastBilledOn = null)
-			UUID instanceId = dao.insertSubscriptionInstance(planId, start, end, nextBill, instanceStatusId, createdBy,
-					0, null);
+		    UUID priceCycleBandId = request.getCyclePrices().get(0).getPriceCycleBandId();
 
-			// OPTIONAL: seed first billing history row (cycle 1).
-			// If you don’t have final pricing yet, seed minimal required values and let
-			// the billing engine update it later.
-			BigDecimal netExTax = firstCycleAmountOrZero(request); // put your pricing calc here
-			BigDecimal taxTotal = computeTaxesFromItemOnly(request.getEntityId(), request.getLevelId(), netExTax);// fill
-																													// when
-																													// you
-																													// have
-																													// tax
-			BigDecimal grossInclTax = netExTax.add(taxTotal);
+		    UUID instanceStatusId = dao.subscriptionInstanceStatusId(start.isAfter(LocalDate.now()) ? "FUTURE" : "ACTIVE");
+		    UUID billingStatusScheduledId = dao.billingStatusId("PENDING");
 
-			// Convert to minor units (INR/USD -> 2 decimals)
-			long chargedMinor = 0;
-			// grossInclTax.movePointRight(2).setScale(0,
-			// RoundingMode.HALF_UP).longValueExact();
+		    UUID instanceId = dao.insertSubscriptionInstance(
+		            planId, start, end, billingDate, instanceStatusId, createdBy, 0, null
+		    );
 
-			SubscriptionPlanDao.BillingHistoryRow row = new SubscriptionPlanDao.BillingHistoryRow(instanceId,
-					chargedMinor, request.getCyclePrices().get(0).getCycleStart(), nextBill, billingStatusScheduledId,
-					priceCycleBandId, // set if you know current band
-					null, null, request.getInvoiceId(), netExTax, taxTotal, null, null, null, null, Boolean.FALSE, null,
-					null, null, null);
-			dao.insertSubscriptionBillingHistory(row);
+		    BigDecimal netExTax = firstCycleAmountOrZero(request);
+		    BigDecimal taxTotal = computeTaxesFromItemOnly(request.getEntityId(), request.getLevelId(), netExTax);
+		    BigDecimal grossInclTax = netExTax.add(taxTotal);
+
+		    long chargedMinor = 0; // keep as your current behavior
+
+		    // ✅ Create future invoice FIRST and store returned invoiceId in billing history
+		    UUID futureInvoiceId = null;
+
+		    // old invoice id = the invoice you are using as seed (from request)
+		    UUID seedInvoiceId = request.getInvoiceId();
+
+		    if (seedInvoiceId != null) {
+		        CreateInvoiceResponse futureInvResp =
+		                tranServiceV2.createFutureInvoice(seedInvoiceId, cycleNumber, billingDate, createdBy);
+
+		        futureInvoiceId = futureInvResp.getInvoiceId(); // ✅ use new invoice id
+		        System.out.println("[SUBSCRIPTION] Future invoice created: seedInvoiceId=" + seedInvoiceId
+		                + " cycleNumber=" + cycleNumber
+		                + " billingDate=" + billingDate
+		                + " newInvoiceId=" + futureInvoiceId);
+		    } else {
+		        System.out.println("[SUBSCRIPTION] seedInvoiceId is NULL - skipping createFutureInvoice()");
+		    }
+
+		    SubscriptionPlanDao.BillingHistoryRow row = new SubscriptionPlanDao.BillingHistoryRow(
+		            instanceId,
+		            chargedMinor,
+		            cycleNumber,              // ✅ cycle number stored in history
+		            billingDate,              // ✅ billing date stored in history
+		            billingStatusScheduledId,
+		            priceCycleBandId,
+		            null, null,
+		            futureInvoiceId,          // ✅ store the NEW invoiceId (not the seed one)
+		            netExTax,
+		            taxTotal,
+		            null, null, null, null,
+		            Boolean.FALSE,
+		            null, null, null, null
+		    );
+
+		    dao.insertSubscriptionBillingHistory(row);
 		}
+
 
 		// Build response
 		SubscriptionPlanCreateResponse resp = new SubscriptionPlanCreateResponse();

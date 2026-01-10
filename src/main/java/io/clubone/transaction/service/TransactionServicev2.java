@@ -1,5 +1,6 @@
 package io.clubone.transaction.service;
 
+import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
 
@@ -13,4 +14,5 @@ public interface TransactionServicev2 {
 	CreateInvoiceResponse createInvoice(InvoiceRequest request);
 	List<InvoiceSummaryDTO> listInvoicesByClientRole(UUID clientRoleId, Integer limit, Integer offset);
 	InvoiceDetailDTO getInvoiceDetail(UUID invoiceId);
+	CreateInvoiceResponse createFutureInvoice(UUID invoiceId, int cycleNumber, LocalDate billingDate, UUID actorId);
 }
