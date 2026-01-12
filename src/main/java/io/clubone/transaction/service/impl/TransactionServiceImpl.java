@@ -562,22 +562,67 @@ public class TransactionServiceImpl implements TransactionService {
 		 * }
 		 */
 
-		// Call your existing /payment/v1
-		PaymentRequestDTO pay = new PaymentRequestDTO();
-		pay.setClientRoleId(req.getClientRoleId());
-		pay.setAmount(req.getTotalAmount());
-		pay.setPaymentGatewayCode(req.getPaymentGatewayCode());
-		pay.setPaymentMethodCode(req.getPaymentMethodCode());
-		pay.setPaymentTypeCode(req.getPaymentTypeCode());
-		pay.setPaymentGatewayCurrencyTypeId(req.getPaymentGatewayCurrencyTypeId());
-		pay.setCreatedBy(req.getCreatedBy());
-		UUID clientPaymentTransactionId =null;
-		try {
-		 clientPaymentTransactionId = paymentService.processManualPayment(pay);
-		}catch (Exception e) {
-			// TODO: handle exception
+		//commeting below code for razor pay support
+		
+		/*
+		 * // Call your existing /payment/v1 PaymentRequestDTO pay = new
+		 * PaymentRequestDTO(); pay.setClientRoleId(req.getClientRoleId());
+		 * pay.setAmount(req.getTotalAmount());
+		 * pay.setPaymentGatewayCode(req.getPaymentGatewayCode());
+		 * pay.setPaymentMethodCode(req.getPaymentMethodCode());
+		 * pay.setPaymentTypeCode(req.getPaymentTypeCode());
+		 * pay.setPaymentGatewayCurrencyTypeId(req.getPaymentGatewayCurrencyTypeId());
+		 * pay.setCreatedBy(req.getCreatedBy()); UUID clientPaymentTransactionId =null;
+		 * try { clientPaymentTransactionId = paymentService.processManualPayment(pay);
+		 * }catch (Exception e) { // TODO: handle exception }
+		 */
+
+		UUID clientPaymentTransactionId = null;
+
+		final boolean isManual =
+		    req.getPaymentGatewayCode() == null
+		    || req.getPaymentGatewayCode().trim().isEmpty()
+		    || "MANUAL".equalsIgnoreCase(req.getPaymentGatewayCode())
+		    || "CASH".equalsIgnoreCase(req.getPaymentGatewayCode()); // optional if you use CASH gateway code
+
+		if (isManual) {
+		    // ✅ existing behavior
+		    PaymentRequestDTO pay = new PaymentRequestDTO();
+		    pay.setClientRoleId(req.getClientRoleId());
+
+		    // ✅ better: charge pay-now amount if available
+		    BigDecimal payAmount =
+		        (req.getAmountToPayNow() != null) ? req.getAmountToPayNow() : req.getTotalAmount();
+		    pay.setAmount(payAmount);
+
+		    pay.setPaymentGatewayCode(req.getPaymentGatewayCode());
+		    pay.setPaymentMethodCode(req.getPaymentMethodCode());
+		    pay.setPaymentTypeCode(req.getPaymentTypeCode());
+		    pay.setPaymentGatewayCurrencyTypeId(req.getPaymentGatewayCurrencyTypeId());
+		    pay.setCreatedBy(req.getCreatedBy());
+
+		    clientPaymentTransactionId = paymentService.processManualPayment(pay);
+
+		} else {
+		    // ✅ Gateway flow: payment already verified & CPT already created by payment service
+		    clientPaymentTransactionId = req.getClientPaymentTransactionId();
+
+		    if (clientPaymentTransactionId == null) {
+		        return new FinalizeTransactionResponse(
+		            req.getInvoiceId(),
+		            "UNPAID",
+		            null,
+		            null,
+		            "Missing clientPaymentTransactionId for gateway finalize"
+		        );
+		    }
+
+		    // (Optional but recommended) validate CPT belongs to same clientRoleId
+		    // and amount matches req.getAmountToPayNow()
 		}
 
+		
+		
 		// Build TransactionDTO from request
 		TransactionDTO txn = new TransactionDTO();
 		txn.setClientAgreementId(req.getClientAgreementId());

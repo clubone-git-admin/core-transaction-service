@@ -29,5 +29,8 @@ public class FinalizeTransactionRequest {
 
     private UUID createdBy;
     private List<TransactionLineItemRequest> lineItems;
+    
+ // ✅ NEW: used for gateway flows (Razorpay), created by /razorpay/verify
+    private UUID clientPaymentTransactionId;
 }
 
