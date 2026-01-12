@@ -975,34 +975,47 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	 * - Quantity collapsed to 1
 	 */
 	private void applyAgreementProrationAfterDiscountWithFactor(InvoiceEntityDTO line, BigDecimal factor) {
-		if (line == null) return;
+	    if (line == null) return;
 
-		BigDecimal f = nz(factor);
-		if (f.compareTo(BigDecimal.ZERO) < 0) f = BigDecimal.ZERO;
-		if (f.compareTo(BigDecimal.ONE) > 0) f = BigDecimal.ONE;
+	    BigDecimal f = nz(factor);
+	    if (f.compareTo(BigDecimal.ZERO) < 0) f = BigDecimal.ZERO;
+	    if (f.compareTo(BigDecimal.ONE) > 0) f = BigDecimal.ONE;
 
-		BigDecimal grossBefore = lineSub(line);
-		BigDecimal discBefore = nz(line.getDiscountAmount());
+	    int qtyInt = def(line.getQuantity(), 1);
+	    if (qtyInt < 1) qtyInt = 1;
 
-		BigDecimal netBefore = grossBefore.subtract(discBefore);
-		if (netBefore.compareTo(BigDecimal.ZERO) < 0) netBefore = BigDecimal.ZERO;
+	    BigDecimal qty = BigDecimal.valueOf(qtyInt);
 
-		BigDecimal netAfter = scale2(netBefore.multiply(f));
+	    // Totals BEFORE proration
+	    BigDecimal grossBefore = nz(line.getUnitPrice()).multiply(qty);      // total gross for all entitled qty
+	    BigDecimal discBefore  = nz(line.getDiscountAmount());              // total discount already computed for qty
+	    BigDecimal netBefore   = grossBefore.subtract(discBefore);
+	    if (netBefore.compareTo(BigDecimal.ZERO) < 0) netBefore = BigDecimal.ZERO;
 
-		BigDecimal grossAfter = scale2(netAfter.add(discBefore));
-		if (grossAfter.compareTo(discBefore) < 0) grossAfter = discBefore;
+	    // Prorate NET only
+	    BigDecimal netAfter = scale2(netBefore.multiply(f));
 
-		line.setQuantity(1);
-		line.setUnitPrice(grossAfter);
-		line.setDiscountAmount(scale2(discBefore));
+	    // Keep discount unchanged; rebuild total gross after proration
+	    BigDecimal grossAfter = scale2(netAfter.add(discBefore));
+	    if (grossAfter.compareTo(discBefore) < 0) grossAfter = discBefore;
 
-		System.out.println("[PRORATE][CAL_PERIOD_NET_ONLY] itemId=" + line.getEntityId()
-				+ " factor=" + f
-				+ " grossBefore=" + scale2(grossBefore)
-				+ " discBefore=" + scale2(discBefore)
-				+ " netBefore=" + scale2(netBefore)
-				+ " netAfter=" + scale2(netAfter)
-				+ " grossAfter=" + scale2(grossAfter));
+	    // Convert total grossAfter back into PER-UNIT unit price while keeping qty same
+	    BigDecimal perUnitAfter = grossAfter.divide(qty, 6, RoundingMode.HALF_UP);
+	    perUnitAfter = scale2(perUnitAfter);
+
+	    line.setQuantity(qtyInt);                  // ✅ KEEP entitlement qty (2)
+	    line.setUnitPrice(perUnitAfter);           // ✅ per-unit price so totals remain correct
+	    line.setDiscountAmount(scale2(discBefore));// total discount remains same
+
+	    System.out.println("[PRORATE][KEEP_QTY] itemId=" + line.getEntityId()
+	            + " qty=" + qtyInt
+	            + " factor=" + f
+	            + " grossBefore=" + scale2(grossBefore)
+	            + " discBefore=" + scale2(discBefore)
+	            + " netBefore=" + scale2(netBefore)
+	            + " netAfter=" + scale2(netAfter)
+	            + " grossAfter=" + scale2(grossAfter)
+	            + " perUnitAfter=" + perUnitAfter);
 	}
 
 	/**
