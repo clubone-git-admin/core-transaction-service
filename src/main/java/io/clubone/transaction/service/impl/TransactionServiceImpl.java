@@ -523,7 +523,7 @@ public class TransactionServiceImpl implements TransactionService {
 			req.setClientRoleId(invoiceSummary.get().getClientRoleId());
 			req.setTotalAmount(invoiceSummary.get().getTotalAmount());
 			System.out.println("Total Amount "+req.getTotalAmount()+" Remaining Amount "+req.getAmountToPayNow());
-			BigDecimal tolerance = new BigDecimal("0.01");
+			BigDecimal tolerance = new BigDecimal("0.09");
 
 			BigDecimal diff = req.getAmountToPayNow()
 			        .subtract(req.getTotalAmount())
