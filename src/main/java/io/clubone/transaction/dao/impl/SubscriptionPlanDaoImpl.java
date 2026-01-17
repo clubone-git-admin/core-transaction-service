@@ -108,6 +108,35 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 			    LIMIT 1
 			""";
 
+	private static final String INSERT_HISTORY_RETURNING_SQL = """
+		    INSERT INTO client_subscription_billing.subscription_billing_history
+		    (
+		        subscription_instance_id,
+		        amount_charged_minor,
+		        client_payment_intent_id,
+		        client_payment_transaction_id,
+		        billing_status_id,
+		        failure_reason,
+		        invoice_id,
+		        payment_due_date,
+		        cycle_number,
+		        amount_net_excl_tax,
+		        price_cycle_band_id,
+		        pos_override_applied,
+		        override_note,
+		        overridden_by,
+		        proration_strategy_id,
+		        amount_proration_excl_tax,
+		        amount_list_excl_tax,
+		        amount_discount_total_excl_tax,
+		        amount_tax_total,
+		        tax_breakdown_json
+		    )
+		    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb))
+		    RETURNING subscription_billing_history_id
+		    """;
+
+	
 	@Override
 	public UUID insertSubscriptionPlan(SubscriptionPlanCreateRequest req, UUID createdBy) {
 		final String sql = """
@@ -289,18 +318,18 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 	}
 
 	@Override
-	public int insertPlanTerm(UUID planId, PlanTermDTO term, UUID createdBy,UUID agreementTermId) {
+	public int insertPlanTerm(UUID planId, PlanTermDTO term, UUID createdBy,UUID agreementTermId,Integer totalCycles) {
 		if (term == null)
 			return 0;
 		final String sql = """
 				    INSERT INTO client_subscription_billing.subscription_plan_term
 				      (subscription_plan_id, remaining_cycles, is_active, created_on, created_by,
-				         term_end_date,term_start_date,agreement_term_id)
-				    VALUES (?, ?, ?, now(), ?, ?,now(),?)
+				         term_end_date,term_start_date,agreement_term_id,total_cycles)
+				    VALUES (?, ?, ?, now(), ?, ?,?,?,?)
 				""";
 		LocalDate end = term.getEndDate();
 		return cluboneJdbcTemplate.update(sql, planId, term.getRemainingCycles(),
-				term.getIsActive() == null ? Boolean.TRUE : term.getIsActive(), createdBy,  end,agreementTermId);
+				term.getIsActive() == null ? Boolean.TRUE : term.getIsActive(), createdBy,  end,term.getStartDate(),agreementTermId,totalCycles);
 	}
 
 	@Override
@@ -739,5 +768,87 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 		// If driver returns String for UUID, use: return o == null ? null :
 		// UUID.fromString(o.toString());
 	}
+	
+	@Override
+	public UUID insertSubscriptionBillingHistoryReturningId(BillingHistoryRow r) {
+	    try {
+	        return cluboneJdbcTemplate.query(
+	            conn -> {
+	                PreparedStatement ps = conn.prepareStatement(INSERT_HISTORY_RETURNING_SQL);
+	                int i = 1;
+
+	                ps.setObject(i++, r.subscriptionInstanceId);
+	                ps.setLong(i++, r.amountChargedMinor);
+
+	                if (r.clientPaymentIntentId != null) ps.setObject(i++, r.clientPaymentIntentId);
+	                else ps.setNull(i++, Types.OTHER);
+
+	                if (r.clientPaymentTransactionId != null) ps.setObject(i++, r.clientPaymentTransactionId);
+	                else ps.setNull(i++, Types.OTHER);
+
+	                if (r.billingStatusId != null) ps.setObject(i++, r.billingStatusId);
+	                else ps.setNull(i++, Types.OTHER);
+
+	                if (r.failureReason != null) ps.setString(i++, r.failureReason);
+	                else ps.setNull(i++, Types.VARCHAR);
+
+	                if (r.invoiceId != null) ps.setObject(i++, r.invoiceId);
+	                else ps.setNull(i++, Types.OTHER);
+
+	                if (r.paymentDueDate != null) ps.setDate(i++, Date.valueOf(r.paymentDueDate));
+	                else ps.setNull(i++, Types.DATE);
+
+	                if (r.cycleNumber != null) ps.setInt(i++, r.cycleNumber);
+	                else ps.setNull(i++, Types.INTEGER);
+
+	                if (r.amountNetExclTax != null) ps.setBigDecimal(i++, r.amountNetExclTax);
+	                else ps.setNull(i++, Types.NUMERIC);
+
+	                if (r.priceCycleBandId != null) ps.setObject(i++, r.priceCycleBandId);
+	                else ps.setNull(i++, Types.OTHER);
+
+	                if (r.posOverrideApplied != null) ps.setBoolean(i++, r.posOverrideApplied);
+	                else ps.setNull(i++, Types.BOOLEAN);
+
+	                if (r.overrideNote != null) ps.setString(i++, r.overrideNote);
+	                else ps.setNull(i++, Types.VARCHAR);
+
+	                if (r.overriddenBy != null) ps.setObject(i++, r.overriddenBy);
+	                else ps.setNull(i++, Types.OTHER);
+
+	                if (r.prorationStrategyId != null) ps.setObject(i++, r.prorationStrategyId);
+	                else ps.setNull(i++, Types.OTHER);
+
+	                if (r.amountProrationExclTax != null) ps.setBigDecimal(i++, r.amountProrationExclTax);
+	                else ps.setNull(i++, Types.NUMERIC);
+
+	                if (r.amountListExclTax != null) ps.setBigDecimal(i++, r.amountListExclTax);
+	                else ps.setNull(i++, Types.NUMERIC);
+
+	                if (r.amountDiscountTotalExclTax != null) ps.setBigDecimal(i++, r.amountDiscountTotalExclTax);
+	                else ps.setNull(i++, Types.NUMERIC);
+
+	                if (r.amountTaxTotal != null) ps.setBigDecimal(i++, r.amountTaxTotal);
+	                else ps.setNull(i++, Types.NUMERIC);
+
+	                if (r.taxBreakdownJson != null) ps.setString(i++, r.taxBreakdownJson);
+	                else ps.setNull(i++, Types.VARCHAR);
+
+	                return ps;
+	            },
+	            rs -> {
+	                if (rs.next()) {
+	                    return (UUID) rs.getObject("subscription_billing_history_id");
+	                }
+	                return null;
+	            }
+	        );
+	    } catch (DataAccessException ex) {
+	        logDbError("insertSubscriptionBillingHistoryReturningId", ex);
+	        throw ex;
+	    }
+	}
+
+
 
 }

@@ -90,7 +90,7 @@ public interface TransactionDAO {
 
 	boolean isFeeItem(UUID itemId, UUID applicationId);
 	public InvoiceSeedRow fetchInvoiceSeed(UUID invoiceId);
-	public List<InvoiceBillableLineRow> fetchBillableLeafLines(UUID invoiceId, int cycleNumber);
+	public List<InvoiceBillableLineRow> fetchBillableLeafLines(UUID invoiceId, int cycleNumber, UUID clientAgreementId);
 	public UUID resolveCycleBandId(UUID packagePlanTemplateId, int cycleNumber);
 
 	BigDecimal findUnitPriceByCycleBandId(UUID newBandId);

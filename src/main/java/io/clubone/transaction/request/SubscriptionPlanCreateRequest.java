@@ -9,6 +9,8 @@ import io.clubone.transaction.v2.vo.DiscountCodeDTO;
 import io.clubone.transaction.v2.vo.EntitlementDTO;
 import io.clubone.transaction.v2.vo.PlanTermDTO;
 import io.clubone.transaction.v2.vo.PromoDTO;
+import io.clubone.transaction.v2.vo.SubscriptionBillingPromotionDTO;
+import io.clubone.transaction.v2.vo.SubscriptionPlanPromoDTO;
 
 public class SubscriptionPlanCreateRequest {
 	private UUID createdBy;
@@ -40,6 +42,12 @@ public class SubscriptionPlanCreateRequest {
 	private List<EntitlementDTO> entitlements;
 	private List<PromoDTO> promos;
 	private PlanTermDTO term;
+	private Integer remainingCycles;
+	private Integer currentCycle;
+	private Integer totalCycles;
+	 private List<SubscriptionPlanPromoDTO> subscriptionPlanPromos;
+	    //private SubscriptionBillingHistoryDTO subscriptionBillingHistory;
+	    private List<SubscriptionBillingPromotionDTO> subscriptionBillingPromotions;
 
 	public UUID getEntityId() {
 		return entityId;
@@ -183,6 +191,46 @@ public class SubscriptionPlanCreateRequest {
 
 	public void setAgreementTermId(UUID agreementTermId) {
 		this.agreementTermId = agreementTermId;
+	}
+
+	public Integer getRemainingCycles() {
+		return remainingCycles;
+	}
+
+	public void setRemainingCycles(Integer remainingCycles) {
+		this.remainingCycles = remainingCycles;
+	}
+
+	public Integer getCurrentCycle() {
+		return currentCycle;
+	}
+
+	public void setCurrentCycle(Integer currentCycle) {
+		this.currentCycle = currentCycle;
+	}
+
+	public Integer getTotalCycles() {
+		return totalCycles;
+	}
+
+	public void setTotalCycles(Integer totalCycles) {
+		this.totalCycles = totalCycles;
+	}
+
+	public List<SubscriptionPlanPromoDTO> getSubscriptionPlanPromos() {
+		return subscriptionPlanPromos;
+	}
+
+	public void setSubscriptionPlanPromos(List<SubscriptionPlanPromoDTO> subscriptionPlanPromos) {
+		this.subscriptionPlanPromos = subscriptionPlanPromos;
+	}
+
+	public List<SubscriptionBillingPromotionDTO> getSubscriptionBillingPromotions() {
+		return subscriptionBillingPromotions;
+	}
+
+	public void setSubscriptionBillingPromotions(List<SubscriptionBillingPromotionDTO> subscriptionBillingPromotions) {
+		this.subscriptionBillingPromotions = subscriptionBillingPromotions;
 	}
 	
 	

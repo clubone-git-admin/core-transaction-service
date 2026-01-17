@@ -28,6 +28,7 @@ public class InvoiceEntityDTO {
 	private String promoCode;
 	private boolean isUpsellItem;
 	private String entityName;
+	private UUID clientAgreementId;
 	private List<InvoiceEntityTaxDTO> taxes;
 	private List<InvoiceEntityDiscountDTO> discounts;
 	private List<InvoiceEntityPriceBandDTO> priceBands;

@@ -277,8 +277,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    invoice_entity_id, parent_invoice_entity_id, invoice_id,
 				    entity_type_id, entity_id, entity_description,
 				    quantity, unit_price, discount_amount, tax_amount, total_amount,
-				    created_on, created_by,price_plan_template_id,contract_start_date
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?,?,?)
+				    created_on, created_by,price_plan_template_id,contract_start_date,client_agreement_id
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?,?,?,?)
 				""";
 
 		// 4) Insert taxes per entity
@@ -338,7 +338,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 					li.getEntityId(), li.getEntityDescription(), li.getQuantity(), li.getUnitPrice(),
 					li.getDiscountAmount(), li.getTaxAmount(), li.getTotalAmount(), // ensure this equals (qty*unit -
 																					// discount + tax) rounded to 2
-					dto.getCreatedBy(), li.getPricePlanTemplateId(), li.getContractStartDate()// if you don’t store
+					dto.getCreatedBy(), li.getPricePlanTemplateId(), li.getContractStartDate(),li.getClientAgreementId()// if you don’t store
 																								// created_by, replace
 																								// with null and drop
 																								// the column
@@ -1397,26 +1397,51 @@ public class TransactionDAOImpl implements TransactionDAO {
 	    ), invoiceId);
 	}
 
-	public List<InvoiceBillableLineRow> fetchBillableLeafLines(UUID invoiceId, int cycleNumber) {
+	public List<InvoiceBillableLineRow> fetchBillableLeafLines(UUID invoiceId, int cycleNumber,UUID clientAgreementId) {
 
 	    final String sql = """
-	        select distinct
-	          ie.invoice_entity_id,
-	          ie.entity_type_id,
-	          ie.entity_id,
-	          ie.price_plan_template_id,
-	          bpcb.package_price_cycle_band_id as price_cycle_band_id
-	        from transactions.invoice_entity ie
-	        join transactions.invoice_entity_price_band iepb
-	          on iepb.invoice_entity_id = ie.invoice_entity_id
-	        join package.package_price_cycle_band bpcb
-	          on bpcb.package_plan_template_id = ie.price_plan_template_id
-	         and bpcb.cycle_range @> ?::int
-	        where ie.invoice_id = ?
-	          and ie.is_active = true
-	          and iepb.is_active = true
-	          --and bpcb.is_active = true
-	          and ie.price_plan_template_id is not null
+	       WITH ranked AS (
+    SELECT
+        ie.invoice_entity_id,
+        ie.parent_invoice_entity_id,
+        ie.entity_type_id,
+        ie.entity_id,
+        ie.price_plan_template_id,
+        bpcb.package_price_cycle_band_id AS price_cycle_band_id,
+        ie.contract_start_date,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY
+                ie.parent_invoice_entity_id,
+                ie.entity_type_id,
+                ie.entity_id,
+                ie.price_plan_template_id
+            ORDER BY
+                ie.contract_start_date DESC NULLS LAST,
+                ie.created_on DESC,
+                ie.invoice_entity_id DESC
+        ) AS rn
+    FROM transactions.invoice_entity ie
+    JOIN transactions.invoice_entity_price_band iepb
+        ON iepb.invoice_entity_id = ie.invoice_entity_id
+    JOIN package.package_price_cycle_band bpcb
+        ON bpcb.package_plan_template_id = ie.price_plan_template_id
+       AND bpcb.cycle_range @> ?::int
+    WHERE ie.invoice_id = ?
+      AND ie.client_agreement_id = ?
+      AND ie.is_active = true
+      AND iepb.is_active = true
+      -- AND bpcb.is_active = true
+      AND ie.price_plan_template_id IS NOT NULL
+)
+SELECT
+    invoice_entity_id,
+    entity_type_id,
+    entity_id,
+    price_plan_template_id,
+    price_cycle_band_id
+FROM ranked
+WHERE rn = 1;
 	    """;
 
 	    return cluboneJdbcTemplate.query(
@@ -1429,7 +1454,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 	            rs.getObject("price_cycle_band_id", UUID.class)
 	        ),
 	        cycleNumber,
-	        invoiceId
+	        invoiceId,
+	        clientAgreementId
 	    );
 	}
 

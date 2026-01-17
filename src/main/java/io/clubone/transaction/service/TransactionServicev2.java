@@ -14,5 +14,5 @@ public interface TransactionServicev2 {
 	CreateInvoiceResponse createInvoice(InvoiceRequest request);
 	List<InvoiceSummaryDTO> listInvoicesByClientRole(UUID clientRoleId, Integer limit, Integer offset);
 	InvoiceDetailDTO getInvoiceDetail(UUID invoiceId);
-	CreateInvoiceResponse createFutureInvoice(UUID invoiceId, int cycleNumber, LocalDate billingDate, UUID actorId);
+	CreateInvoiceResponse createFutureInvoice(UUID invoiceId, int cycleNumber, LocalDate billingDate, UUID actorId,UUID clientAgreementId);
 }

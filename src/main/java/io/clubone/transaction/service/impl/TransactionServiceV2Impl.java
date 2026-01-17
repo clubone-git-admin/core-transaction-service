@@ -10,7 +10,7 @@ import java.time.temporal.TemporalAdjusters;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.LinkedHashSet;
+import java.util.HashMap;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Optional;
@@ -90,6 +90,9 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 		ObjectMapper mapper = new ObjectMapper();
 		UUID applicationId = UUID.fromString("5949a200-82fb-4171-9001-0f77ac439011");
+
+		final Map<UUID, UUID> agreementBusinessIdToRootInvoiceEntityId = new HashMap<>();
+
 
 		InvoiceDTO inv = new InvoiceDTO();
 		inv.setInvoiceDate(Timestamp.from(Instant.now()));
@@ -260,10 +263,13 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 						InvoiceEntityDTO agreement = new InvoiceEntityDTO();
 
 						UUID agreementInvoiceEntityId = UUID.randomUUID();
+						//agreementRootInvoiceEntityIds.add(agreementInvoiceEntityId);
+
 						UUID agreementBusinessEntityId = (e.getEntityId() != null) ? e.getEntityId() : UUID.randomUUID();
 
 						isAgreement = true;
-
+						
+						agreementBusinessIdToRootInvoiceEntityId.put(agreementBusinessEntityId, agreementInvoiceEntityId);
 						agreement.setInvoiceEntityId(agreementInvoiceEntityId);
 						agreement.setEntityId(agreementBusinessEntityId);
 						agreement.setEntityTypeId(agreementTypeId);
@@ -819,7 +825,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 						" finalTotal=" + scale2(subTotal.add(taxTotal))
 		);
 
-		try {
+		/*try {
 			if (isAgreement) {
 				System.out.println("For Agreement");
 				UUID clientAgreementId = caHelper.createClientAgreementFromInvoice(request);
@@ -827,7 +833,72 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			}
 		} catch (Exception ex) {
 			System.out.println("Error in agreement purchase" + ex.getMessage());
+		}*/
+		UUID firstClientAgreementId = null;
+
+		try {
+		    if (isAgreement && request.getEntities() != null && !request.getEntities().isEmpty()) {
+
+		        // Build parent map once for stamping (performance + correctness)
+		        final Map<UUID, UUID> parentMap = buildParentMap(lines);
+
+		        for (Entity e : request.getEntities()) {
+
+		            // Only AGREEMENT entities
+		            Optional<EntityTypeDTO> entityTypeOpt = transactionDAO.getEntityTypeById(
+		                    e.getEntityTypeId() != null ? e.getEntityTypeId()
+		                            : UUID.fromString("b1c9b95c-5fe0-4062-af85-12ad47908948"));
+
+		            String t = entityTypeOpt.get().getEntityType().toLowerCase();
+		            if (!"agreement".equalsIgnoreCase(t)) continue;
+
+		            final UUID agreementBusinessEntityId = e.getEntityId();
+		            if (agreementBusinessEntityId == null) {
+		                System.out.println("[AGREEMENT][SKIP] agreement entityId is null");
+		                continue;
+		            }
+
+		            final UUID agreementRootInvoiceEntityId =
+		                    agreementBusinessIdToRootInvoiceEntityId.get(agreementBusinessEntityId);
+
+		            if (agreementRootInvoiceEntityId == null) {
+		                System.out.println("[AGREEMENT][SKIP] no root invoiceEntityId found for agreementId=" + agreementBusinessEntityId);
+		                continue;
+		            }
+
+		            System.out.println("[AGREEMENT][CREATE_CA] agreementId=" + agreementBusinessEntityId
+		                    + " rootInvoiceEntityId=" + agreementRootInvoiceEntityId);
+
+		            // ✅ Create a "single-agreement request" and reuse existing helper
+		            InvoiceRequest perAgreementReq = new InvoiceRequest();
+		            perAgreementReq.setClientRoleId(request.getClientRoleId());
+		            perAgreementReq.setBillingAddress(request.getBillingAddress());
+		            perAgreementReq.setCreatedBy(request.getCreatedBy());
+		            perAgreementReq.setLevelId(request.getLevelId());
+		            perAgreementReq.setEntities(List.of(e)); // ONLY this agreement
+
+		            UUID clientAgreementId = caHelper.createClientAgreementFromInvoice(perAgreementReq);
+
+		            if (firstClientAgreementId == null) firstClientAgreementId = clientAgreementId;
+
+		            // ✅ Stamp ONLY this agreement subtree (agreement + bundles + items)
+		            stampClientAgreementForRoot(lines, parentMap, agreementRootInvoiceEntityId, clientAgreementId);
+
+		            System.out.println("[AGREEMENT][STAMPED_ROOT] agreementId=" + agreementBusinessEntityId
+		                    + " clientAgreementId=" + clientAgreementId);
+		        }
+
+		        // ⚠️ Invoice has only one clientAgreementId field.
+		        // Keep first one for backward compatibility (optional).
+		        if (firstClientAgreementId != null) {
+		            inv.setClientAgreementId(firstClientAgreementId);
+		        }
+		    }
+		} catch (Exception ex) {
+		    System.out.println("Error in agreement purchase: " + ex.getMessage());
 		}
+
+
 
 		UUID invoiceId = transactionDAO.saveInvoiceV3(inv);
 		String invoiceNumber = transactionDAO.findInvoiceNumber(invoiceId);
@@ -1526,7 +1597,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			UUID invoiceId,
 			int cycleNumber,
 			LocalDate billingDate,
-			UUID actorId
+			UUID actorId,UUID clientAgreementId
 	) {
 
 		if (invoiceId == null) throw new IllegalArgumentException("invoiceId is required");
@@ -1537,7 +1608,8 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		final UUID applicationId = UUID.fromString("5949a200-82fb-4171-9001-0f77ac439011");
 		final UUID createdBy = (actorId != null ? actorId : seed.createdBy());
 
-		final var oldLines = transactionDAO.fetchBillableLeafLines(invoiceId, cycleNumber);
+		final var oldLines = transactionDAO.fetchBillableLeafLines(invoiceId, cycleNumber,clientAgreementId);
+		System.out.println("Client agreement id "+clientAgreementId);
 		if (oldLines == null || oldLines.isEmpty()) {
 			throw new IllegalStateException("No billable leaf lines found for invoiceId=" + invoiceId);
 		}
@@ -1598,10 +1670,54 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 		return req;
 	}
+	
+	private static Map<UUID, UUID> buildParentMap(List<InvoiceEntityDTO> lines) {
+	    Map<UUID, UUID> parent = new java.util.HashMap<>();
+	    if (lines == null) return parent;
+	    for (InvoiceEntityDTO l : lines) {
+	        if (l == null || l.getInvoiceEntityId() == null) continue;
+	        parent.put(l.getInvoiceEntityId(), l.getParentInvoiceEntityId());
+	    }
+	    return parent;
+	}
+
+	private static void stampClientAgreementForRoot(
+	        List<InvoiceEntityDTO> lines,
+	        Map<UUID, UUID> parentMap,
+	        UUID rootInvoiceEntityId,
+	        UUID clientAgreementId
+	) {
+	    if (clientAgreementId == null) return;
+	    if (rootInvoiceEntityId == null) return;
+	    if (lines == null || lines.isEmpty()) return;
+
+	    for (InvoiceEntityDTO l : lines) {
+	        if (l == null || l.getInvoiceEntityId() == null) continue;
+
+	        if (isDescendantOfRoot(l.getInvoiceEntityId(), rootInvoiceEntityId, parentMap)) {
+	            l.setClientAgreementId(clientAgreementId);
+	        }
+	    }
+	}
+
+	private static boolean isDescendantOfRoot(UUID nodeId, UUID rootId, Map<UUID, UUID> parentMap) {
+	    if (nodeId == null || rootId == null) return false;
+
+	    UUID cur = nodeId;
+	    int guard = 0;
+
+	    while (cur != null && guard++ < 1000) {
+	        if (cur.equals(rootId)) return true;
+	        cur = parentMap.get(cur);
+	    }
+	    return false;
+	}
+
+
 
 	@Override
-	public CreateInvoiceResponse createFutureInvoice(UUID invoiceId, int cycleNumber, LocalDate billingDate, UUID actorId) {
-		InvoiceRequest req = buildFutureInvoiceRequest(invoiceId, cycleNumber, billingDate, actorId);
+	public CreateInvoiceResponse createFutureInvoice(UUID invoiceId, int cycleNumber, LocalDate billingDate, UUID actorId,UUID clientAgreementId) {
+		InvoiceRequest req = buildFutureInvoiceRequest(invoiceId, cycleNumber, billingDate, actorId, clientAgreementId);
 		return createInvoice(req);
 	}
 }

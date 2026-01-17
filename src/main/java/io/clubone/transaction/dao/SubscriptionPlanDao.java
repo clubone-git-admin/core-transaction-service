@@ -19,7 +19,7 @@ public interface SubscriptionPlanDao {
 
 	int[] batchInsertPromos(UUID planId, List<PromoDTO> rows, UUID createdBy);
 
-	int insertPlanTerm(UUID planId, PlanTermDTO term, UUID createdBy, UUID agreementTermId);
+	int insertPlanTerm(UUID planId, PlanTermDTO term, UUID createdBy, UUID agreementTermId, Integer totalCycles);
 
 	UUID insertSubscriptionInstance(UUID subscriptionPlanId, LocalDate startDate, LocalDate endDate,
 			LocalDate nextBillingDate, UUID subscriptionInstanceStatusId, UUID createdBy, Integer currentCycleNumber,
@@ -95,5 +95,8 @@ public interface SubscriptionPlanDao {
 	 Optional<InvoiceDetailRaw> loadInvoiceAggregateBySubscriptionPlan(UUID subscriptionPlanId);
 	 
 	 List<SubscriptionPlanSummaryDTO> findClientSubscriptionPlans(UUID clientRoleId);
+	 
+	 UUID insertSubscriptionBillingHistoryReturningId(SubscriptionPlanDao.BillingHistoryRow row);
+
 
 }

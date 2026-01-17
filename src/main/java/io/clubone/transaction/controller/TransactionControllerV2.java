@@ -80,13 +80,14 @@ public class TransactionControllerV2 {
 	  public ResponseEntity<CreateInvoiceResponse> createFutureCycleInvoice(
 	      @PathVariable UUID invoiceId,
 	      @RequestBody FutureInvoiceRequestDTO body,
-	      @RequestHeader(value = "X-Actor-Id", required = false) UUID actorId
+	      @RequestHeader(value = "X-Actor-Id", required = false) UUID actorId,
+	      @RequestParam UUID clientAgreementId
 	  ) {
 	    int cycleNumber = body.getCycleNumber();
 	    LocalDate billingDate = body.getBillingDate() != null ? body.getBillingDate() : LocalDate.now();
 
 	    CreateInvoiceResponse resp =
-	        transactionService.createFutureInvoice(invoiceId, cycleNumber, billingDate, actorId);
+	        transactionService.createFutureInvoice(invoiceId, cycleNumber, billingDate, actorId,clientAgreementId);
 
 	    return ResponseEntity.ok(resp);
 	  }

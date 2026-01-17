@@ -3,6 +3,7 @@ package io.clubone.transaction.helper;
 import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -11,6 +12,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import io.clubone.transaction.dao.InvoiceEntityPromotionDAO;
 import io.clubone.transaction.dao.SubscriptionPlanDao;
 import io.clubone.transaction.request.SubscriptionPlanCreateRequest;
 import io.clubone.transaction.v2.vo.CyclePriceDTO;
@@ -27,6 +29,9 @@ public class SubscriptionPlanHelper {
 
 	@Autowired
 	private SubscriptionPlanDao subscriptionPlanDao;
+	
+	@Autowired
+	private InvoiceEntityPromotionDAO invoiceEntityPromotionDAO;
 
 	// Projection specific to this helper (includes plan fields)
 	public static class InvoiceEntityPlanRow {
@@ -48,6 +53,8 @@ public class SubscriptionPlanHelper {
 	    Integer termDurationValue;
 	    String termDurationUnitCode;
 	    String termDurationUnitName;
+	    Integer remainingCycles;
+	    Integer currentCycle;
 
 	}
 
@@ -58,70 +65,128 @@ public class SubscriptionPlanHelper {
 	public List<InvoiceEntityPlanRow> fetchInvoiceEntitiesWithPlan(UUID invoiceId, UUID transactionId) {
 
 	    final String sql = """
-	        SELECT
-	            ie.invoice_entity_id,
-	            ie.entity_id,                 -- entity_id == item_id
-	            ie.entity_type_id,
-	            ie.contract_start_date,
-	            (ie.contract_start_date + INTERVAL '1 month')::date AS contract_end_date,
-	            i.created_by,
+	       WITH base AS (
+    SELECT
+        ie.invoice_entity_id,
+        ie.entity_id,                 -- entity_id == item_id
+        ie.entity_type_id,
+        ie.contract_start_date,
+        (ie.contract_start_date + INTERVAL '1 month')::date AS contract_end_date,
+        i.created_by,
 
-	            -- ✅ NEW
-	            i.client_agreement_id,
-	            a.agreement_term_id,
+        ie.client_agreement_id,
+        a.agreement_term_id,
 
-	            ppt.subscription_billing_day_rule_id,
-	            ppt.subscription_frequency_id,
-	            COALESCE(ppt.interval_count, 1) AS interval_count,
-	            ppt.total_cycles,
-	            sf.frequency_name AS subscription_frequency_name,
-	            i.level_id,
-	            at.duration_value        AS term_duration_value,
-ut.code                  AS term_duration_unit_code,
-ut.name                  AS term_duration_unit_name
+        ppt.subscription_billing_day_rule_id,
+        ppt.subscription_frequency_id,
+        COALESCE(ppt.interval_count, 1) AS interval_count,
+        ppt.total_cycles,
+        sf.frequency_name AS subscription_frequency_name,
+        i.level_id,
+        at.duration_value        AS term_duration_value,
+        ut.code                  AS term_duration_unit_code,
+        ut.name                  AS term_duration_unit_name,
 
-	        FROM "transactions".invoice_entity ie
-	        JOIN "transactions".invoice i
-	          ON i.invoice_id = ie.invoice_id
-	        JOIN "transactions"."transaction" t
-	          ON t.invoice_id = i.invoice_id
-	        JOIN package.package_plan_template ppt
-	          ON ppt.package_plan_template_id = ie.price_plan_template_id
-	        JOIN client_subscription_billing.lu_subscription_frequency sf
-	          ON sf.subscription_frequency_id = ppt.subscription_frequency_id
+        -- ✅ count rows in the partition BEFORE filtering rn=1
+        COUNT(*) OVER (
+            PARTITION BY
+                ie.client_agreement_id,
+                ie.entity_id,
+                a.agreement_term_id,
+                ppt.subscription_billing_day_rule_id,
+                ppt.subscription_frequency_id
+        ) AS current_cycle,
 
-	        -- ✅ NEW: derive term via invoice.client_agreement_id
-	        LEFT JOIN client_agreements.client_agreement ca
-	          ON ca.client_agreement_id = i.client_agreement_id
-	        LEFT JOIN agreements.agreement a
-	          ON a.agreement_id = ca.agreement_id
-	    	LEFT JOIN agreements.agreement_term at
-  ON at.agreement_term_id = a.agreement_term_id
-LEFT JOIN agreements.lu_duration_unit_type ut
-  ON ut.duration_unit_type_id = at.duration_unit_type_id
+        -- ✅ remaining = total_cycles - count(rows)
+        CASE
+            WHEN ppt.total_cycles IS NULL THEN NULL
+            ELSE GREATEST(
+                ppt.total_cycles
+                - COUNT(*) OVER (
+                    PARTITION BY
+                        ie.client_agreement_id,
+                        ie.entity_id,
+                        a.agreement_term_id,
+                        ppt.subscription_billing_day_rule_id,
+                        ppt.subscription_frequency_id
+                ),
+                0
+            )
+        END AS remaining_cycle,
 
-	        -- ✅ filter out FEE items
-	        JOIN items.item it
-	          ON it.item_id = ie.entity_id
-	        JOIN items.lu_item_group ig
-	          ON ig.item_group_id = it.item_group_id
-	         AND ig.application_id = it.application_id
-	         
+        ROW_NUMBER() OVER (
+            PARTITION BY
+                ie.client_agreement_id,
+                ie.entity_id,
+                a.agreement_term_id,
+                ppt.subscription_billing_day_rule_id,
+                ppt.subscription_frequency_id
+            ORDER BY
+                (ie.contract_start_date + INTERVAL '1 month')::date ASC,
+                ie.contract_start_date DESC,
+                ie.created_on DESC,
+                ie.invoice_entity_id DESC
+        ) AS rn
+    FROM "transactions".invoice_entity ie
+    JOIN "transactions".invoice i
+      ON i.invoice_id = ie.invoice_id
+    JOIN "transactions"."transaction" t
+      ON t.invoice_id = i.invoice_id
+    JOIN package.package_plan_template ppt
+      ON ppt.package_plan_template_id = ie.price_plan_template_id
+    JOIN client_subscription_billing.lu_subscription_frequency sf
+      ON sf.subscription_frequency_id = ppt.subscription_frequency_id
 
-	        WHERE i.invoice_id = ?
-	          AND t.transaction_id = ?
-	          AND COALESCE(ie.is_active, true) = true
-	          AND COALESCE(ppt.is_active, true) = true
-	          AND COALESCE(sf.is_active, true) = true
-	          AND COALESCE(it.is_active, true) = true
-	          AND COALESCE(ig.is_active, true) = true
-	          AND ppt.subscription_frequency_id IS NOT NULL
+    LEFT JOIN client_agreements.client_agreement ca
+      ON ca.client_agreement_id = ie.client_agreement_id
+    LEFT JOIN agreements.agreement a
+      ON a.agreement_id = ca.agreement_id
+    LEFT JOIN agreements.agreement_term at
+      ON at.agreement_term_id = a.agreement_term_id
+    LEFT JOIN agreements.lu_duration_unit_type ut
+      ON ut.duration_unit_type_id = at.duration_unit_type_id
 
-	          -- ✅ exclude fees
-	          AND ig.code <> 'FEE'
+    JOIN items.item it
+      ON it.item_id = ie.entity_id
+    JOIN items.lu_item_group ig
+      ON ig.item_group_id = it.item_group_id
+     AND ig.application_id = it.application_id
 
-	        ORDER BY ie.created_on, ie.invoice_entity_id;
-	    """;
+    WHERE i.invoice_id = ?
+      AND t.transaction_id = ?
+      AND COALESCE(ie.is_active, true) = true
+      AND COALESCE(ppt.is_active, true) = true
+      AND COALESCE(sf.is_active, true) = true
+      AND COALESCE(it.is_active, true) = true
+      AND COALESCE(ig.is_active, true) = true
+      AND ppt.subscription_frequency_id IS NOT NULL
+      AND ig.code <> 'FEE'
+)
+SELECT
+    invoice_entity_id,
+    entity_id,
+    entity_type_id,
+    contract_start_date,
+    contract_end_date,
+    created_by,
+    client_agreement_id,
+    agreement_term_id,
+    subscription_billing_day_rule_id,
+    subscription_frequency_id,
+    interval_count,
+    total_cycles,
+    subscription_frequency_name,
+    level_id,
+    term_duration_value,
+    term_duration_unit_code,
+    term_duration_unit_name,
+
+    current_cycle,
+    remaining_cycle
+FROM base
+WHERE rn = 1
+ORDER BY contract_start_date, invoice_entity_id;
+""";
 
 	    return cluboneJdbcTemplate.query(sql, (rs, rn) -> {
 	        InvoiceEntityPlanRow row = new InvoiceEntityPlanRow();
@@ -141,7 +206,16 @@ LEFT JOIN agreements.lu_duration_unit_type ut
 	        row.intervalCount = rs.getObject("interval_count") != null ? rs.getInt("interval_count") : 1;
 
 	        row.totalCycles = (Integer) rs.getObject("total_cycles");
-	        row.subscriptionFrequency = rs.getString("subscription_frequency_name");
+	        row.currentCycle=
+	        	    rs.getObject("current_cycle") == null
+	        	        ? null
+	        	        : ((Number) rs.getObject("current_cycle")).intValue();
+
+	        	row.remainingCycles=
+	        	    rs.getObject("remaining_cycle") == null
+	        	        ? null
+	        	        : ((Number) rs.getObject("remaining_cycle")).intValue();
+	    row.subscriptionFrequency = rs.getString("subscription_frequency_name");
 	        row.levelId = (UUID) rs.getObject("level_id");
 
 	        // ✅ NEW
@@ -243,6 +317,9 @@ LEFT JOIN agreements.lu_duration_unit_type ut
 	public List<SubscriptionPlanCreateRequest> buildRequests(UUID invoiceId, UUID transactionId) {
 		List<InvoiceEntityPlanRow> rows = fetchInvoiceEntitiesWithPlan(invoiceId, transactionId);
 		UUID cpmId = subscriptionPlanDao.findClientPaymentMethodIdByTransactionId(transactionId).orElse(null);
+		 List<UUID> ieIds = rows.stream().map(r -> r.invoiceEntityId).distinct().toList();
+		    Map<UUID, List<InvoiceEntityPromotionDAO.InvoiceEntityPromotionRow>> promoMap =
+		            invoiceEntityPromotionDAO.fetchActivePromotionsByInvoiceEntityIds(ieIds);
 
 		return rows.stream().map(r -> {
 			SubscriptionPlanCreateRequest req = new SubscriptionPlanCreateRequest();
@@ -291,11 +368,30 @@ LEFT JOIN agreements.lu_duration_unit_type ut
 				    .mapToInt(cp -> cp.getDownPaymentUnits())
 				    .findFirst()
 				    .orElse(0);
-			planterm.setRemainingCycles(r.totalCycles-downPaymentUnits);
+			//planterm.setRemainingCycles(r.totalCycles-downPaymentUnits);
+			planterm.setRemainingCycles(r.remainingCycles);
 			planterm.setEndDate(end);
+			planterm.setStartDate(start);
 			//planterm.setSubscriptionPlanId(cpmId);
 			req.setTerm(planterm);
+			req.setCurrentCycle(r.currentCycle);
+			req.setRemainingCycles(r.remainingCycles);
+			req.setTotalCycles(r.totalCycles);
+			List<InvoiceEntityPromotionDAO.InvoiceEntityPromotionRow> promoRows =
+	                promoMap.getOrDefault(r.invoiceEntityId, List.of());
 
+	        // For plan promo: choose your cycle range rule
+	        int cycleStart = (r.currentCycle == null ? 1 : r.currentCycle);   // example
+	        Integer cycleEnd = null; // open-ended OR compute based on your business rule
+
+	        req.setSubscriptionPlanPromos(
+	                invoiceEntityPromotionDAO.toSubscriptionPlanPromos(promoRows, cycleStart, cycleEnd, null)
+	        );
+
+	        req.setSubscriptionBillingPromotions(
+	                invoiceEntityPromotionDAO.toSubscriptionBillingPromotions(promoRows)
+	        );
+			
 			return req;
 		}).toList();
 	}
