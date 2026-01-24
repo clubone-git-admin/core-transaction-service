@@ -7,6 +7,7 @@ import java.util.UUID;
 
 import io.clubone.transaction.dao.impl.TransactionDAOImpl.InvoiceBillableLineRow;
 import io.clubone.transaction.v2.vo.BundlePriceCycleBandDTO;
+import io.clubone.transaction.v2.vo.CycleBandRef;
 import io.clubone.transaction.v2.vo.DiscountDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailRaw;
@@ -91,7 +92,7 @@ public interface TransactionDAO {
 	boolean isFeeItem(UUID itemId, UUID applicationId);
 	public InvoiceSeedRow fetchInvoiceSeed(UUID invoiceId);
 	public List<InvoiceBillableLineRow> fetchBillableLeafLines(UUID invoiceId, int cycleNumber, UUID clientAgreementId);
-	public UUID resolveCycleBandId(UUID packagePlanTemplateId, int cycleNumber);
+	public CycleBandRef resolveCycleBand(UUID packagePlanTemplateId, int cycleNumber);
 
 	BigDecimal findUnitPriceByCycleBandId(UUID newBandId);
 

@@ -23,6 +23,7 @@ public class Entity {
 	private Double price;
 	private UUID pricePlanTemplateId;
 	private Boolean upsellItem;
+	private UUID clientAgreementId;
 	private List<InvoiceEntityTaxDTO> taxes;
 	private List<InvoiceEntityDiscountDTO> discounts;
 

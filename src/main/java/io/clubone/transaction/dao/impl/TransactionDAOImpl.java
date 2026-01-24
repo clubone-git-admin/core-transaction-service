@@ -30,6 +30,7 @@ import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.util.FrequencyUnit;
 import io.clubone.transaction.v2.vo.BundlePriceCycleBandDTO;
 import io.clubone.transaction.v2.vo.CalculationMode;
+import io.clubone.transaction.v2.vo.CycleBandRef;
 import io.clubone.transaction.v2.vo.DiscountDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailRaw;
@@ -1459,20 +1460,37 @@ WHERE rn = 1;
 	    );
 	}
 
+	public record CycleBandInfo(
+	        UUID packagePriceCycleBandId,
+	        BigDecimal unitPrice
+	) {}
 	
-	public UUID resolveCycleBandId(UUID packagePlanTemplateId, int cycleNumber) {
-	    final String sql = """
-	        select b.package_price_cycle_band_id
-	        from package.package_price_cycle_band b
-	        where b.package_plan_template_id = ?
-	          and b.start_cycle <= ?
-	          and (b.end_cycle is null or b.end_cycle >= ?)
-	          --and b.is_active is true
-	        order by b.start_cycle desc
-	        limit 1
-	    """;
-	    return cluboneJdbcTemplate.queryForObject(sql, UUID.class, packagePlanTemplateId, cycleNumber, cycleNumber);
-	}
+	@Override
+    public CycleBandRef resolveCycleBand(UUID packagePlanTemplateId, int cycleNumber) {
+
+        final String sql = """
+            select
+                b.package_price_cycle_band_id,
+                b.unit_price
+            from package.package_price_cycle_band b
+            where b.package_plan_template_id = ?
+              and b.start_cycle <= ?
+              and (b.end_cycle is null or b.end_cycle >= ?)
+            order by b.start_cycle desc
+            limit 1
+        """;
+
+        List<CycleBandRef> rows = cluboneJdbcTemplate.query(
+            sql,
+            new Object[]{packagePlanTemplateId, cycleNumber, cycleNumber},
+            (rs, rn) -> new CycleBandRef(
+                (UUID) rs.getObject("package_price_cycle_band_id"),
+                rs.getBigDecimal("unit_price")
+            )
+        );
+
+        return rows.isEmpty() ? null : rows.get(0);
+    }
 	public record InvoiceBillableLineRow(
 		    UUID invoiceEntityId,
 		    UUID entityTypeId,

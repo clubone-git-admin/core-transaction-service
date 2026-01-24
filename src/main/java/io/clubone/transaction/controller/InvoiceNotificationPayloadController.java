@@ -23,10 +23,13 @@ public class InvoiceNotificationPayloadController {
     public ResponseEntity<NotificationRequestDTO> buildInvoiceEmailPayload(
             @PathVariable UUID invoiceId,
 
-            // Payment details you already have after payment
-            @RequestParam String paymentMethodBrand,
-            @RequestParam String paymentLast4,
-            @RequestParam String authorizationCode,
+            // ✅ NEW: supports CASH/CARD/UPI etc.
+            @RequestParam(defaultValue = "CARD") String paymentMethodType,
+
+            // ✅ Optional (CASH won't have these)
+            @RequestParam(required = false) String paymentMethodBrand,
+            @RequestParam(required = false) String paymentLast4,
+            @RequestParam(required = false) String authorizationCode,
 
             // optional
             @RequestParam(defaultValue = "INVOICE_PURCHASE_COMPLETED") String templateCode,
@@ -50,24 +53,40 @@ public class InvoiceNotificationPayloadController {
         // 4) Club details (invoice.level_id -> levels.reference_entity_id -> location)
         ClubInfo club = fetchClubInfo(header.levelId);
 
-        // 5) Read all invoice entities once (we’ll derive contractName, packageName, and lineItems from it)
+        // 5) Read all invoice entities once (we’ll derive contractName, packageName from it)
         List<InvoiceEntityRow> entities = fetchInvoiceEntities(invoiceId);
 
         // 6) Contract (agreement) name + package name from entity rows
         String contractName = resolveAgreementName(entities);
         String packageName  = resolvePackageName(entities);
 
-        // 7) Build line items with item details
-        //List<SimpleLineItemDTO> lineItems = buildItemOnlyLineItems(entities);
+        // 7) Line items (ITEM only) with ACCESS naming rule
         List<ItemInvoiceRow> itemRows = fetchItemInvoiceRows(invoiceId);
         List<SimpleLineItemDTO> lineItems = buildItemOnlyLineItemsWithAccessNaming(itemRows);
-        
+        boolean isAccess = itemRows.stream().anyMatch(r ->
+        "ACCESS".equalsIgnoreCase(nullToEmpty(r.categoryCode).trim())
+     || "ACCESS".equalsIgnoreCase(nullToEmpty(r.categoryName).trim())
+);
 
+
+        // ✅ Normalize payment fields for CASH vs CARD
+        String pmType = safeUpper(paymentMethodType);
+
+        String pmBrandOut = nullToEmpty(paymentMethodBrand);
+        String pmLast4Out = nullToEmpty(paymentLast4);
+        String authCodeOut = nullToEmpty(authorizationCode);
+
+        if ("CASH".equals(pmType)) {
+            pmBrandOut = "CASH";
+            pmLast4Out = "";
+            authCodeOut = "";
+        }
 
         // 8) Build params
         Map<String, Object> params = new LinkedHashMap<>();
 
-        params.put("toEmail", toEmail);
+        //params.put("toEmail", toEmail);
+        params.put("toEmail", "garima.singh@clubone.io");
         params.put("clientName", clientName);
 
         // Order
@@ -76,14 +95,15 @@ public class InvoiceNotificationPayloadController {
         params.put("currencyCode", currencyCode);
 
         // Payment
-        params.put("paymentMethodBrand", paymentMethodBrand);
-        params.put("paymentLast4", paymentLast4);
-        params.put("authorizationCode", authorizationCode);
+        params.put("paymentMethodType", pmType);
+        params.put("paymentMethodBrand", pmBrandOut);
+        params.put("paymentLast4", pmLast4Out);
+        params.put("authorizationCode", authCodeOut);
 
         // Membership / contract
         params.put("memberId", memberId);
-        params.put("contractName", nullToEmpty(contractName)); // ✅ agreement_name
-        params.put("packageName", nullToEmpty(packageName));   // ✅ package_name
+        params.put("contractName", nullToEmpty(contractName));
+        params.put("packageName", nullToEmpty(packageName));
 
         // Club
         params.put("clubName", club.clubName);
@@ -96,11 +116,11 @@ public class InvoiceNotificationPayloadController {
         params.put("taxAmount", money(header.taxAmount));
         params.put("totalAmount", money(header.totalAmount));
 
-        // Support (using club as support default)
+        // Support
         params.put("supportLocationName", club.clubName);
         params.put("supportAddress", club.clubAddress);
-        params.put("supportEmail", club.inquiryEmail);
-        params.put("supportPhone", club.phoneNumber);
+        params.put("supportEmail", "concierge@clubone.io");
+        params.put("supportPhone", "9988776655");
 
         // Contract url + legal
         params.put("contractUrl", contractUrl == null ? "" : contractUrl);
@@ -110,13 +130,19 @@ public class InvoiceNotificationPayloadController {
         params.put("year", String.valueOf(Year.now().getValue()));
 
         NotificationRequestDTO out = new NotificationRequestDTO();
-        out.setClientId(header.clientRoleId); // ✅ clientId == clientRoleId
+        out.setClientId(header.clientRoleId);
         out.setChannel(Collections.singletonList(channel));
         out.setTemplateCode(templateCode);
         out.setParams(params);
+        out.setAccess(isAccess);
 
         return ResponseEntity.ok(out);
     }
+
+    private String safeUpper(String s) {
+        return s == null ? "" : s.trim().toUpperCase(Locale.ENGLISH);
+    }
+
 
     // ------------------------------------------------------------------------------------
     // Invoice / Client / Club
@@ -571,6 +597,7 @@ public class InvoiceNotificationPayloadController {
         private List<String> channel;
         private String templateCode;
         private Map<String, Object> params;
+        private boolean isAccess;
 
         public UUID getClientId() { return clientId; }
         public void setClientId(UUID clientId) { this.clientId = clientId; }
@@ -583,6 +610,14 @@ public class InvoiceNotificationPayloadController {
 
         public Map<String, Object> getParams() { return params; }
         public void setParams(Map<String, Object> params) { this.params = params; }
+		public boolean isAccess() {
+			return isAccess;
+		}
+		public void setAccess(boolean isAccess) {
+			this.isAccess = isAccess;
+		}
+        
+        
     }
 
     public static class InvoiceLineItemDTO {

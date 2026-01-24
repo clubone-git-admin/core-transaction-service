@@ -24,6 +24,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.clubone.transaction.dao.InvoiceDAO;
 import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.helper.AgreementHelper;
+import io.clubone.transaction.helper.InvoiceNotificationHelper;
 import io.clubone.transaction.helper.SubscriptionPlanHelper;
 import io.clubone.transaction.request.CreateInvoiceRequest;
 import io.clubone.transaction.request.CreateInvoiceRequestV3;
@@ -75,6 +76,9 @@ public class TransactionServiceImpl implements TransactionService {
 	
 	@Autowired
 	private InvoiceDAO invoiceDao;
+	
+	@Autowired
+	private InvoiceNotificationHelper invoiceNotificationHelper;
 
 	private static final Logger logger = LoggerFactory.getLogger(TransactionServiceImpl.class);
 
@@ -635,8 +639,21 @@ public class TransactionServiceImpl implements TransactionService {
 
 		UUID transactionId = transactionDAO.saveTransactionV3(txn);
 		
+		
+		
+		try {
+			if (clientPaymentTransactionId == null) {
+				invoiceNotificationHelper.sendInvoiceEmail(req.getInvoiceId(), "CASH", null, null, null);
+			} else {
+				invoiceNotificationHelper.sendInvoiceEmail(req.getInvoiceId(), "CARD", "VISA", "1111", "AU223312");
+			}
+		} catch (Exception e) {
+			System.err.println("Error in sending notification "+e.getMessage());
+		}
+		
 		// Mark invoice as PAID
 		UUID paidStatusId = transactionDAO.findInvoiceStatusIdByName("PAID");
+		
 		System.out.println("paidStatusId " + paidStatusId);
 		transactionDAO.updateInvoiceStatusAndPaidFlag(req.getInvoiceId(), paidStatusId, true, req.getCreatedBy());
 		transactionDAO.activateAgreementAndClientStatusForInvoice(req.getInvoiceId(), req.getCreatedBy());
@@ -646,6 +663,7 @@ public class TransactionServiceImpl implements TransactionService {
 			SubscriptionPlanBatchCreateRequest subscriptionPlanBatchCreateRequest = new SubscriptionPlanBatchCreateRequest();
 			subscriptionPlanBatchCreateRequest.setPlans(subscriptionRequest);
 			ObjectMapper mapper=new ObjectMapper();
+			System.out.println("soize "+subscriptionRequest.size());
 			//System.out.println("Data "+mapper.writeValueAsString(subscriptionRequest));
 			subscriptionPlanService.createPlans(subscriptionPlanBatchCreateRequest, UUID.randomUUID());
 		} catch (Exception e) {

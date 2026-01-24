@@ -38,6 +38,7 @@ import io.clubone.transaction.service.TransactionServicev2;
 import io.clubone.transaction.util.FrequencyUnit;
 import io.clubone.transaction.v2.vo.Bundle;
 import io.clubone.transaction.v2.vo.BundlePriceCycleBandDTO;
+import io.clubone.transaction.v2.vo.CycleBandRef;
 import io.clubone.transaction.v2.vo.DiscountDetailDTO;
 import io.clubone.transaction.v2.vo.Entity;
 import io.clubone.transaction.v2.vo.EntityLevelInfoDTO;
@@ -644,7 +645,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 					/* ============================== ITEM (standalone) ============================== */
 					case "item": {
 
-						System.out.println("Item Case");
+						System.out.println("Item Case "+e.getClientAgreementId());
 
 						UUID itemPromotionId = e.getPromotionId();
 						Map<UUID, PromotionItemEffectDTO> itemFx = Collections.emptyMap();
@@ -724,6 +725,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 								subTotal = subTotal.add(lineNet(itemLine));
 								taxTotal = taxTotal.add(nz(itemLine.getTaxAmount()));
 								discountTotal = discountTotal.add(nz(itemLine.getDiscountAmount()));
+								itemLine.setClientAgreementId(e.getClientAgreementId());
 
 								lines.add(itemLine);
 							}
@@ -747,6 +749,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 							final int finalQty = qtyFromParentAndEntitlement(parentQty, entQty);
 
 							itemLine.setQuantity(finalQty);
+							itemLine.setClientAgreementId(e.getClientAgreementId());
 
 							System.out.println("[QTY][ITEM_SINGLE] parentQty=" + parentQty
 									+ " entQty=" + entQty
@@ -1623,11 +1626,11 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			UUID planTemplateId = ln.pricePlanTemplateId();
 			if (itemId == null || planTemplateId == null) continue;
 
-			UUID newBandId = transactionDAO.resolveCycleBandId(planTemplateId, cycleNumber);
-			if (newBandId == null) {
-				throw new IllegalStateException(
-						"No cycle band found for planTemplateId=" + planTemplateId + " cycle=" + cycleNumber
-				);
+			CycleBandRef band = transactionDAO.resolveCycleBand(planTemplateId, cycleNumber);
+			if (band == null) {
+			    throw new IllegalStateException(
+			        "No cycle band found for planTemplateId=" + planTemplateId + " cycle=" + cycleNumber
+			    );
 			}
 
 			int entQty = transactionDAO.resolveDefaultQtyFromEntitlement(planTemplateId, applicationId);
@@ -1640,7 +1643,8 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			it.setQuantity(finalQty);
 
 			InvoiceEntityPriceBandDTO bandRef = new InvoiceEntityPriceBandDTO();
-			bandRef.setPriceCycleBandId(newBandId);
+			bandRef.setPriceCycleBandId(band.bandId());
+			bandRef.setUnitPrice(band.unitPrice()); // ✅ from DB
 			it.setPriceBands(List.of(bandRef));
 
 			items.add(it);
@@ -1650,14 +1654,20 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 					+ " entQty=" + entQty
 					+ " finalQty=" + finalQty
 					+ " cycle=" + cycleNumber
-					+ " bandId=" + newBandId);
+					+ " bandId=" + bandRef.getPriceCycleBandId());
 		}
 
 		Entity root = new Entity();
 		root.setEntityTypeId(transactionDAO.findEntityTypeIdByName("Item"));
-		root.setStartDate(billingDate);
-		root.setItems(items);
+		LocalDate startDate = billingDate
+		        .plusMonths(1)
+		        .withDayOfMonth(1);
 
+		root.setStartDate(startDate);
+
+		root.setItems(items);
+		root.setClientAgreementId(clientAgreementId);
+		System.out.println("Root agreement "+root.getClientAgreementId());
 		if (promotionId != null) {
 			root.setPromotionId(promotionId);
 		}
@@ -1717,7 +1727,9 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 	@Override
 	public CreateInvoiceResponse createFutureInvoice(UUID invoiceId, int cycleNumber, LocalDate billingDate, UUID actorId,UUID clientAgreementId) {
+		System.out.println("Building future invoice request");
 		InvoiceRequest req = buildFutureInvoiceRequest(invoiceId, cycleNumber, billingDate, actorId, clientAgreementId);
+		System.out.println("Creating future invoice");
 		return createInvoice(req);
 	}
 }
