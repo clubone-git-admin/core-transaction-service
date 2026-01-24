@@ -85,8 +85,8 @@ public class InvoiceNotificationPayloadController {
         // 8) Build params
         Map<String, Object> params = new LinkedHashMap<>();
 
-        params.put("toEmail", toEmail);
-        //params.put("toEmail", "garima.singh@clubone.io");
+        //params.put("toEmail", toEmail);
+        params.put("toEmail", "jane.doecs1994@gmail.com");
         params.put("clientName", clientName);
 
         // Order
