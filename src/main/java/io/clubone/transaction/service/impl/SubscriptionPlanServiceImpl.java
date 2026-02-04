@@ -1,10 +1,38 @@
 package io.clubone.transaction.service.impl;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.sql.SQLException;
+import java.time.DayOfWeek;
+import java.time.LocalDate;
+import java.time.YearMonth;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Locale;
+import java.util.NoSuchElementException;
+import java.util.Optional;
+import java.util.UUID;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataAccessException;
+import org.springframework.jdbc.BadSqlGrammarException;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import io.clubone.transaction.dao.EntityLookupDao;
 import io.clubone.transaction.dao.SubscriptionPlanDao;
 import io.clubone.transaction.dao.SubscriptionPlanDao.BillingRule;
 import io.clubone.transaction.dao.SubscriptionPromoBillingDAO;
 import io.clubone.transaction.dao.TransactionDAO;
+import io.clubone.transaction.dao.impl.SubscriptionInvoiceScheduleRow;
 import io.clubone.transaction.request.SubscriptionPlanBatchCreateRequest;
 import io.clubone.transaction.request.SubscriptionPlanCreateRequest;
 import io.clubone.transaction.response.CreateInvoiceResponse;
@@ -23,33 +51,6 @@ import io.clubone.transaction.v2.vo.PaymentTimelineItemDTO;
 import io.clubone.transaction.v2.vo.SubscriptionPlanSummaryDTO;
 import io.clubone.transaction.vo.TaxRateAllocationDTO;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.dao.DataAccessException;
-import org.springframework.jdbc.BadSqlGrammarException;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionTemplate;
-
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-
-import java.math.BigDecimal;
-import java.math.RoundingMode;
-import java.sql.SQLException;
-import java.time.DayOfWeek;
-import java.time.LocalDate;
-import java.time.YearMonth;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Locale;
-import java.util.NoSuchElementException;
-import java.util.Optional;
-import java.util.UUID;
-
 @Service
 public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 
@@ -64,26 +65,25 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 
 	@Autowired
 	private EntityLookupDao entityLookupDao;
-	
+
 	@Autowired
 	private TransactionServicev2 tranServiceV2;
-	
+
 	@Autowired
 	private SubscriptionPromoBillingDAO subscriptionPromoBillingDAO;
 
 	private static final Logger log = LoggerFactory.getLogger(SubscriptionPlanServiceImpl.class);
-	
-	
+
 	@Override
 	@Transactional
 	public SubscriptionPlanCreateResponse createPlanWithChildren(SubscriptionPlanCreateRequest request,
 			UUID createdBy) {
 		// 1) Insert plan
 		UUID planId = dao.insertSubscriptionPlan(request, createdBy);
-		ObjectMapper mapper=new ObjectMapper();
+		ObjectMapper mapper = new ObjectMapper();
 		try {
-			System.out.println("Recod "+mapper.writeValueAsString(request.getCyclePrices()));
-			System.out.println("ClientAgreementId "+request.getClientAgreementId());
+			System.out.println("Recod " + mapper.writeValueAsString(request.getCyclePrices()));
+			System.out.println("ClientAgreementId " + request.getClientAgreementId());
 		} catch (JsonProcessingException e) {
 			// TODO Auto-generated catch block
 			e.printStackTrace();
@@ -93,86 +93,90 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 		int[] dcx = dao.batchInsertDiscountCodes(planId, nz(request.getDiscountCodes()), createdBy);
 		int[] enx = dao.batchInsertEntitlements(planId, nz(request.getEntitlements()), createdBy);
 		int[] pmx = dao.batchInsertPromos(planId, nz(request.getPromos()), createdBy);
-		int term = dao.insertPlanTerm(planId, request.getTerm(), createdBy,request.getAgreementTermId(),request.getTotalCycles());
+		int term = dao.insertPlanTerm(planId, request.getTerm(), createdBy, request.getAgreementTermId(),
+				request.getTotalCycles());
 		// ✅ NEW: insert subscription_plan_promo rows (if present)
 		if (request.getSubscriptionPlanPromos() != null && !request.getSubscriptionPlanPromos().isEmpty()) {
-		    subscriptionPromoBillingDAO.insertSubscriptionPlanPromos(planId, createdBy, request.getSubscriptionPlanPromos());
+			subscriptionPromoBillingDAO.insertSubscriptionPlanPromos(planId, createdBy,
+					request.getSubscriptionPlanPromos());
 		}
-
 
 		if (request.getTerm() != null && request.getCyclePrices() != null && !request.getCyclePrices().isEmpty()) {
 
-		    LocalDate start = request.getContractStartDate();
-		    LocalDate end = request.getContractEndDate();
-		    UUID freqId = request.getSubscriptionFrequencyId();
-		    Integer interval = request.getIntervalCount();
-		    UUID dayRuleId = request.getSubscriptionBillingDayRuleId();
+			LocalDate start = request.getContractStartDate();
+			LocalDate end = request.getContractEndDate();
+			UUID freqId = request.getSubscriptionFrequencyId();
+			Integer interval = request.getIntervalCount();
+			UUID dayRuleId = request.getSubscriptionBillingDayRuleId();
 
-		    // ✅ these are the same values you store in billing history
-		    //Integer cycleNumber = request.getCyclePrices().get(0).getCycleStart();  // e.g. 3
-		    Integer cycleNumber=request.getCurrentCycle();
-		    LocalDate billingDate = computeNextBillingDate(start, freqId, interval, dayRuleId, cycleNumber);
-		    cycleNumber=cycleNumber+1;
-		    
-		    UUID priceCycleBandId = request.getCyclePrices().get(0).getPriceCycleBandId();
+			// ✅ these are the same values you store in billing history
+			// Integer cycleNumber = request.getCyclePrices().get(0).getCycleStart(); //
+			// e.g. 3
+			Integer cycleNumber = request.getCurrentCycle();
+			LocalDate billingDate = computeNextBillingDate(start, freqId, interval, dayRuleId, cycleNumber);
+			cycleNumber = cycleNumber + 1;
 
-		    UUID instanceStatusId = dao.subscriptionInstanceStatusId(start.isAfter(LocalDate.now()) ? "FUTURE" : "ACTIVE");
-		    UUID billingStatusScheduledId = dao.billingStatusId("PENDING");
+			UUID priceCycleBandId = request.getCyclePrices().get(0).getPriceCycleBandId();
 
-		    UUID instanceId = dao.insertSubscriptionInstance(
-		            planId, start, end, billingDate, instanceStatusId, createdBy, request.getCurrentCycle(), null
-		    );
+			UUID instanceStatusId = dao
+					.subscriptionInstanceStatusId(start.isAfter(LocalDate.now()) ? "FUTURE" : "ACTIVE");
+		//	UUID billingStatusScheduledId = dao.billingStatusId("PENDING");
 
-		    BigDecimal netExTax = firstCycleAmountOrZero(request);
-		    BigDecimal taxTotal = computeTaxesFromItemOnly(request.getEntityId(), request.getLevelId(), netExTax);
-		    BigDecimal grossInclTax = netExTax.add(taxTotal);
+			UUID instanceId = dao.insertSubscriptionInstance(planId, start, end, billingDate, instanceStatusId,
+					createdBy, request.getCurrentCycle(), null);
 
-		    long chargedMinor = 0; // keep as your current behavior
+			BigDecimal netExTax = firstCycleAmountOrZero(request);
+			BigDecimal taxTotal = computeTaxesFromItemOnly(request.getEntityId(), request.getLevelId(), netExTax);
+			BigDecimal grossInclTax = netExTax.add(taxTotal);
 
-		    // ✅ Create future invoice FIRST and store returned invoiceId in billing history
-		    UUID futureInvoiceId = null;
+			long chargedMinor = 0; // keep as your current behavior
 
-		    // old invoice id = the invoice you are using as seed (from request)
-		    UUID seedInvoiceId = request.getInvoiceId();
+			// ✅ Create future invoice FIRST and store returned invoiceId in billing history
+			UUID futureInvoiceId = null;
 
-		    if (seedInvoiceId != null) {
-		        CreateInvoiceResponse futureInvResp =
-		                tranServiceV2.createFutureInvoice(seedInvoiceId, cycleNumber, billingDate, createdBy,request.getClientAgreementId());
+			// old invoice id = the invoice you are using as seed (from request)
+			UUID seedInvoiceId = request.getInvoiceId();
 
-		        futureInvoiceId = futureInvResp.getInvoiceId(); // ✅ use new invoice id
-		        System.out.println("[SUBSCRIPTION] Future invoice created: seedInvoiceId=" + seedInvoiceId
-		                + " cycleNumber=" + cycleNumber
-		                + " billingDate=" + billingDate
-		                + " newInvoiceId=" + futureInvoiceId);
-		    } else {
-		        System.out.println("[SUBSCRIPTION] seedInvoiceId is NULL - skipping createFutureInvoice()");
-		    }
+			if (seedInvoiceId != null) {
+				CreateInvoiceResponse futureInvResp = tranServiceV2.createFutureInvoice(seedInvoiceId, cycleNumber,
+						billingDate, createdBy, request.getClientAgreementId());
 
-		    SubscriptionPlanDao.BillingHistoryRow row = new SubscriptionPlanDao.BillingHistoryRow(
-		            instanceId,
-		            chargedMinor,
-		            cycleNumber,              // ✅ cycle number stored in history
-		            billingDate,              // ✅ billing date stored in history
-		            billingStatusScheduledId,
-		            priceCycleBandId,
-		            null, null,
-		            futureInvoiceId,          // ✅ store the NEW invoiceId (not the seed one)
-		            netExTax,
-		            taxTotal,
-		            null, null, null, null,
-		            Boolean.FALSE,
-		            null, null, null, null
-		    );
+				futureInvoiceId = futureInvResp.getInvoiceId(); // ✅ use new invoice id
+				System.out.println(
+						"[SUBSCRIPTION] Future invoice created: seedInvoiceId=" + seedInvoiceId + " cycleNumber="
+								+ cycleNumber + " billingDate=" + billingDate + " newInvoiceId=" + futureInvoiceId);
+			} else {
+				System.out.println("[SUBSCRIPTION] seedInvoiceId is NULL - skipping createFutureInvoice()");
+			}
 
-		    UUID historyId = dao.insertSubscriptionBillingHistoryReturningId(row);
+			/*
+			 * SubscriptionPlanDao.BillingHistoryRow row = new
+			 * SubscriptionPlanDao.BillingHistoryRow( instanceId, chargedMinor, cycleNumber,
+			 * // ✅ cycle number stored in history billingDate, // ✅ billing date stored in
+			 * history billingStatusScheduledId, priceCycleBandId, null, null,
+			 * futureInvoiceId, // ✅ store the NEW invoiceId (not the seed one) netExTax,
+			 * taxTotal, null, null, null, null, Boolean.FALSE, null, null, null, null );
+			 * 
+			 * UUID historyId = dao.insertSubscriptionBillingHistoryReturningId(row);
+			 */
 
-		 // ✅ NEW: insert subscription_billing_promotion rows (if present)
-		 if (request.getSubscriptionBillingPromotions() != null && !request.getSubscriptionBillingPromotions().isEmpty()) {
-		     subscriptionPromoBillingDAO.insertSubscriptionBillingPromotions(historyId, request.getSubscriptionBillingPromotions());
-		 }
+			SubscriptionInvoiceScheduleRow row = new SubscriptionInvoiceScheduleRow(futureInvoiceId, // invoiceId
+					instanceId, // subscriptionInstanceId
+					cycleNumber, // cycleNumber
+					billingDate, // paymentDueDate
+					createdBy // createdBy (optional)
+			);
+
+			UUID scheduleId = dao.insertSubscriptionInvoiceScheduleReturningId(row);
+
+			// ✅ NEW: insert subscription_billing_promotion rows (if present)
+			if (request.getSubscriptionBillingPromotions() != null
+					&& !request.getSubscriptionBillingPromotions().isEmpty()) {
+				subscriptionPromoBillingDAO.insertSubscriptionBillingPromotions(scheduleId,
+						request.getSubscriptionBillingPromotions());
+			}
 
 		}
-
 
 		// Build response
 		SubscriptionPlanCreateResponse resp = new SubscriptionPlanCreateResponse();
@@ -185,106 +189,92 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 		return resp;
 	}
 
-
-	/*@Override
-	@Transactional
-	public SubscriptionPlanCreateResponse createPlanWithChildren(SubscriptionPlanCreateRequest request,
-			UUID createdBy) {
-		// 1) Insert plan
-		UUID planId = dao.insertSubscriptionPlan(request, createdBy);
-		ObjectMapper mapper=new ObjectMapper();
-		try {
-			System.out.println("Recod "+mapper.writeValueAsString(request.getCyclePrices()));
-			System.out.println("ClientAgreementId "+request.getClientAgreementId());
-		} catch (JsonProcessingException e) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
-		}
-		// 2) Children (each optional, batched)
-		int[] cpx = dao.batchInsertCyclePrices(planId, nz(request.getCyclePrices()), createdBy);
-		int[] dcx = dao.batchInsertDiscountCodes(planId, nz(request.getDiscountCodes()), createdBy);
-		int[] enx = dao.batchInsertEntitlements(planId, nz(request.getEntitlements()), createdBy);
-		int[] pmx = dao.batchInsertPromos(planId, nz(request.getPromos()), createdBy);
-		int term = dao.insertPlanTerm(planId, request.getTerm(), createdBy,request.getAgreementTermId(),request.getTotalCycles());
-
-		if (request.getTerm() != null && request.getCyclePrices() != null && !request.getCyclePrices().isEmpty()) {
-
-		    LocalDate start = request.getContractStartDate();
-		    LocalDate end = request.getContractEndDate();
-		    UUID freqId = request.getSubscriptionFrequencyId();
-		    Integer interval = request.getIntervalCount();
-		    UUID dayRuleId = request.getSubscriptionBillingDayRuleId();
-
-		    // ✅ these are the same values you store in billing history
-		    //Integer cycleNumber = request.getCyclePrices().get(0).getCycleStart();  // e.g. 3
-		    Integer cycleNumber=request.getCurrentCycle()+1;
-		    LocalDate billingDate = computeNextBillingDate(start, freqId, interval, dayRuleId, cycleNumber);
-
-		    UUID priceCycleBandId = request.getCyclePrices().get(0).getPriceCycleBandId();
-
-		    UUID instanceStatusId = dao.subscriptionInstanceStatusId(start.isAfter(LocalDate.now()) ? "FUTURE" : "ACTIVE");
-		    UUID billingStatusScheduledId = dao.billingStatusId("PENDING");
-
-		    UUID instanceId = dao.insertSubscriptionInstance(
-		            planId, start, end, billingDate, instanceStatusId, createdBy, request.getCurrentCycle(), null
-		    );
-
-		    BigDecimal netExTax = firstCycleAmountOrZero(request);
-		    BigDecimal taxTotal = computeTaxesFromItemOnly(request.getEntityId(), request.getLevelId(), netExTax);
-		    BigDecimal grossInclTax = netExTax.add(taxTotal);
-
-		    long chargedMinor = 0; // keep as your current behavior
-
-		    // ✅ Create future invoice FIRST and store returned invoiceId in billing history
-		    UUID futureInvoiceId = null;
-
-		    // old invoice id = the invoice you are using as seed (from request)
-		    UUID seedInvoiceId = request.getInvoiceId();
-
-		    if (seedInvoiceId != null) {
-		        CreateInvoiceResponse futureInvResp =
-		                tranServiceV2.createFutureInvoice(seedInvoiceId, cycleNumber, billingDate, createdBy,request.getClientAgreementId());
-
-		        futureInvoiceId = futureInvResp.getInvoiceId(); // ✅ use new invoice id
-		        System.out.println("[SUBSCRIPTION] Future invoice created: seedInvoiceId=" + seedInvoiceId
-		                + " cycleNumber=" + cycleNumber
-		                + " billingDate=" + billingDate
-		                + " newInvoiceId=" + futureInvoiceId);
-		    } else {
-		        System.out.println("[SUBSCRIPTION] seedInvoiceId is NULL - skipping createFutureInvoice()");
-		    }
-
-		    SubscriptionPlanDao.BillingHistoryRow row = new SubscriptionPlanDao.BillingHistoryRow(
-		            instanceId,
-		            chargedMinor,
-		            cycleNumber,              // ✅ cycle number stored in history
-		            billingDate,              // ✅ billing date stored in history
-		            billingStatusScheduledId,
-		            priceCycleBandId,
-		            null, null,
-		            futureInvoiceId,          // ✅ store the NEW invoiceId (not the seed one)
-		            netExTax,
-		            taxTotal,
-		            null, null, null, null,
-		            Boolean.FALSE,
-		            null, null, null, null
-		    );
-
-		    dao.insertSubscriptionBillingHistory(row);
-		    subscriptionPromoBillingDAO.insertSubscriptionBillingPromotions(seedInvoiceId, null)
-		}
-
-
-		// Build response
-		SubscriptionPlanCreateResponse resp = new SubscriptionPlanCreateResponse();
-		resp.setSubscriptionPlanId(planId);
-		resp.setCyclePricesInserted(cpx.length);
-		resp.setDiscountCodesInserted(dcx.length);
-		resp.setEntitlementsInserted(enx.length);
-		resp.setPromosInserted(pmx.length);
-		resp.setTermInserted(term > 0);
-		return resp;
-	}*/
+	/*
+	 * @Override
+	 * 
+	 * @Transactional public SubscriptionPlanCreateResponse
+	 * createPlanWithChildren(SubscriptionPlanCreateRequest request, UUID createdBy)
+	 * { // 1) Insert plan UUID planId = dao.insertSubscriptionPlan(request,
+	 * createdBy); ObjectMapper mapper=new ObjectMapper(); try {
+	 * System.out.println("Recod "+mapper.writeValueAsString(request.getCyclePrices(
+	 * ))); System.out.println("ClientAgreementId "+request.getClientAgreementId());
+	 * } catch (JsonProcessingException e) { // TODO Auto-generated catch block
+	 * e.printStackTrace(); } // 2) Children (each optional, batched) int[] cpx =
+	 * dao.batchInsertCyclePrices(planId, nz(request.getCyclePrices()), createdBy);
+	 * int[] dcx = dao.batchInsertDiscountCodes(planId,
+	 * nz(request.getDiscountCodes()), createdBy); int[] enx =
+	 * dao.batchInsertEntitlements(planId, nz(request.getEntitlements()),
+	 * createdBy); int[] pmx = dao.batchInsertPromos(planId,
+	 * nz(request.getPromos()), createdBy); int term = dao.insertPlanTerm(planId,
+	 * request.getTerm(),
+	 * createdBy,request.getAgreementTermId(),request.getTotalCycles());
+	 * 
+	 * if (request.getTerm() != null && request.getCyclePrices() != null &&
+	 * !request.getCyclePrices().isEmpty()) {
+	 * 
+	 * LocalDate start = request.getContractStartDate(); LocalDate end =
+	 * request.getContractEndDate(); UUID freqId =
+	 * request.getSubscriptionFrequencyId(); Integer interval =
+	 * request.getIntervalCount(); UUID dayRuleId =
+	 * request.getSubscriptionBillingDayRuleId();
+	 * 
+	 * // ✅ these are the same values you store in billing history //Integer
+	 * cycleNumber = request.getCyclePrices().get(0).getCycleStart(); // e.g. 3
+	 * Integer cycleNumber=request.getCurrentCycle()+1; LocalDate billingDate =
+	 * computeNextBillingDate(start, freqId, interval, dayRuleId, cycleNumber);
+	 * 
+	 * UUID priceCycleBandId =
+	 * request.getCyclePrices().get(0).getPriceCycleBandId();
+	 * 
+	 * UUID instanceStatusId =
+	 * dao.subscriptionInstanceStatusId(start.isAfter(LocalDate.now()) ? "FUTURE" :
+	 * "ACTIVE"); UUID billingStatusScheduledId = dao.billingStatusId("PENDING");
+	 * 
+	 * UUID instanceId = dao.insertSubscriptionInstance( planId, start, end,
+	 * billingDate, instanceStatusId, createdBy, request.getCurrentCycle(), null );
+	 * 
+	 * BigDecimal netExTax = firstCycleAmountOrZero(request); BigDecimal taxTotal =
+	 * computeTaxesFromItemOnly(request.getEntityId(), request.getLevelId(),
+	 * netExTax); BigDecimal grossInclTax = netExTax.add(taxTotal);
+	 * 
+	 * long chargedMinor = 0; // keep as your current behavior
+	 * 
+	 * // ✅ Create future invoice FIRST and store returned invoiceId in billing
+	 * history UUID futureInvoiceId = null;
+	 * 
+	 * // old invoice id = the invoice you are using as seed (from request) UUID
+	 * seedInvoiceId = request.getInvoiceId();
+	 * 
+	 * if (seedInvoiceId != null) { CreateInvoiceResponse futureInvResp =
+	 * tranServiceV2.createFutureInvoice(seedInvoiceId, cycleNumber, billingDate,
+	 * createdBy,request.getClientAgreementId());
+	 * 
+	 * futureInvoiceId = futureInvResp.getInvoiceId(); // ✅ use new invoice id
+	 * System.out.println("[SUBSCRIPTION] Future invoice created: seedInvoiceId=" +
+	 * seedInvoiceId + " cycleNumber=" + cycleNumber + " billingDate=" + billingDate
+	 * + " newInvoiceId=" + futureInvoiceId); } else { System.out.
+	 * println("[SUBSCRIPTION] seedInvoiceId is NULL - skipping createFutureInvoice()"
+	 * ); }
+	 * 
+	 * SubscriptionPlanDao.BillingHistoryRow row = new
+	 * SubscriptionPlanDao.BillingHistoryRow( instanceId, chargedMinor, cycleNumber,
+	 * // ✅ cycle number stored in history billingDate, // ✅ billing date stored in
+	 * history billingStatusScheduledId, priceCycleBandId, null, null,
+	 * futureInvoiceId, // ✅ store the NEW invoiceId (not the seed one) netExTax,
+	 * taxTotal, null, null, null, null, Boolean.FALSE, null, null, null, null );
+	 * 
+	 * dao.insertSubscriptionBillingHistory(row);
+	 * subscriptionPromoBillingDAO.insertSubscriptionBillingPromotions(
+	 * seedInvoiceId, null) }
+	 * 
+	 * 
+	 * // Build response SubscriptionPlanCreateResponse resp = new
+	 * SubscriptionPlanCreateResponse(); resp.setSubscriptionPlanId(planId);
+	 * resp.setCyclePricesInserted(cpx.length);
+	 * resp.setDiscountCodesInserted(dcx.length);
+	 * resp.setEntitlementsInserted(enx.length); resp.setPromosInserted(pmx.length);
+	 * resp.setTermInserted(term > 0); return resp; }
+	 */
 
 	private BigDecimal computeTaxesFromItemOnly(UUID itemId, UUID levelId, BigDecimal unitPrice) {
 		UUID taxGroupId = null;
@@ -544,82 +534,82 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 		}
 	}
 
-	/** Computes net amount excl tax for the first billing cycle:
-	 *  - base = effective unit price for that cycle
-	 *  - qty  = entitlement quantity per cycle (fallback 1)
-	 *  - discount = sum of subscription billing promotions (fallback 0)
-	 *  - result clamped to >= 0
+	/**
+	 * Computes net amount excl tax for the first billing cycle: - base = effective
+	 * unit price for that cycle - qty = entitlement quantity per cycle (fallback 1)
+	 * - discount = sum of subscription billing promotions (fallback 0) - result
+	 * clamped to >= 0
 	 */
 	private BigDecimal firstCycleAmountOrZero(SubscriptionPlanCreateRequest req) {
-	    if (req == null || req.getCyclePrices() == null || req.getCyclePrices().isEmpty()) {
-	        return BigDecimal.ZERO;
-	    }
+		if (req == null || req.getCyclePrices() == null || req.getCyclePrices().isEmpty()) {
+			return BigDecimal.ZERO;
+		}
 
-	    // which cycle are we pricing for?
-	    Integer cycle = req.getCyclePrices().get(0).getCycleStart();
-	    if (cycle == null) cycle = 1;
+		// which cycle are we pricing for?
+		Integer cycle = req.getCyclePrices().get(0).getCycleStart();
+		if (cycle == null)
+			cycle = 1;
 
-	    // 1) base unit price for this cycle
-	    BigDecimal unitPrice = effectiveUnitPriceForCycle(req.getCyclePrices(), cycle)
-	            .orElse(BigDecimal.ZERO);
+		// 1) base unit price for this cycle
+		BigDecimal unitPrice = effectiveUnitPriceForCycle(req.getCyclePrices(), cycle).orElse(BigDecimal.ZERO);
 
-	    // 2) quantity (use entitlement quantityPerCycle if available; else 1)
-	    int qty = resolveEntitlementQty(req);
+		// 2) quantity (use entitlement quantityPerCycle if available; else 1)
+		int qty = resolveEntitlementQty(req);
 
-	    BigDecimal base = unitPrice.multiply(BigDecimal.valueOf(qty));
+		BigDecimal base = unitPrice.multiply(BigDecimal.valueOf(qty));
 
-	    // 3) promotion/discount applied (sum)
-	    BigDecimal promoDiscount = resolvePromoDiscount(req);
+		// 3) promotion/discount applied (sum)
+		BigDecimal promoDiscount = resolvePromoDiscount(req);
 
-	    BigDecimal net = base.subtract(promoDiscount);
+		BigDecimal net = base.subtract(promoDiscount);
 
-	    // 4) clamp to 0 (no negative billing)
-	    if (net.signum() < 0) return BigDecimal.ZERO;
+		// 4) clamp to 0 (no negative billing)
+		if (net.signum() < 0)
+			return BigDecimal.ZERO;
 
-	    return net;
+		return net;
 	}
 
 	private int resolveEntitlementQty(SubscriptionPlanCreateRequest req) {
-	    if (req.getEntitlements() == null || req.getEntitlements().isEmpty()) return 1;
+		if (req.getEntitlements() == null || req.getEntitlements().isEmpty())
+			return 1;
 
-	    boolean unlimited = req.getEntitlements().stream()
-	            .anyMatch(e -> e != null && Boolean.TRUE.equals(e.getIsUnlimited()));
-	    if (unlimited) return 1;
+		boolean unlimited = req.getEntitlements().stream()
+				.anyMatch(e -> e != null && Boolean.TRUE.equals(e.getIsUnlimited()));
+		if (unlimited)
+			return 1;
 
-	    return req.getEntitlements().stream()
-	            .filter(e -> e != null)
-	            .map(EntitlementDTO::getQuantityPerCycle)
-	            .filter(q -> q != null && q > 0)
-	            .max(Integer::compareTo)
-	            .orElse(1);
+		return req.getEntitlements().stream().filter(e -> e != null).map(EntitlementDTO::getQuantityPerCycle)
+				.filter(q -> q != null && q > 0).max(Integer::compareTo).orElse(1);
 	}
 
 	private BigDecimal resolvePromoDiscount(SubscriptionPlanCreateRequest req) {
-	    BigDecimal total = BigDecimal.ZERO;
+		BigDecimal total = BigDecimal.ZERO;
 
-	    // Preferred: subscription billing promotions (already computed per cycle)
-	    if (req.getSubscriptionBillingPromotions() != null && !req.getSubscriptionBillingPromotions().isEmpty()) {
-	        for (var p : req.getSubscriptionBillingPromotions()) {
-	            if (p == null) continue;
-	            if (p.getAmountApplied() != null) {
-	                total = total.add(p.getAmountApplied());
-	            }
-	        }
-	        return total;
-	    }
+		// Preferred: subscription billing promotions (already computed per cycle)
+		if (req.getSubscriptionBillingPromotions() != null && !req.getSubscriptionBillingPromotions().isEmpty()) {
+			for (var p : req.getSubscriptionBillingPromotions()) {
+				if (p == null)
+					continue;
+				if (p.getAmountApplied() != null) {
+					total = total.add(p.getAmountApplied());
+				}
+			}
+			return total;
+		}
 
-	    // Fallback: your existing "promos" list if you want to support it here too
-	    if (req.getPromos() != null && !req.getPromos().isEmpty()) {
-	        for (var p : req.getPromos()) {
-	            if (p == null) continue;
-	            // adjust this getter based on your PromoDTO fields
-	            // total = total.add(nz(p.getAmountApplied()));
-	        }
-	    }
+		// Fallback: your existing "promos" list if you want to support it here too
+		if (req.getPromos() != null && !req.getPromos().isEmpty()) {
+			for (var p : req.getPromos()) {
+				if (p == null)
+					continue;
+				// adjust this getter based on your PromoDTO fields
+				// total = total.add(nz(p.getAmountApplied()));
+			}
+		}
 
-	    return total;
+		return total;
 	}
-
 
 	/**
 	 * Returns the effective unit price for the cycle: - picks the price row whose

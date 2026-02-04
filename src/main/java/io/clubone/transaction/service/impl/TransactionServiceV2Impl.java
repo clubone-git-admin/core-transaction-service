@@ -1610,7 +1610,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		final var seed = transactionDAO.fetchInvoiceSeed(invoiceId);
 		final UUID applicationId = UUID.fromString("5949a200-82fb-4171-9001-0f77ac439011");
 		final UUID createdBy = (actorId != null ? actorId : seed.createdBy());
-
+		System.out.println("cycleNumber " + cycleNumber);
 		final var oldLines = transactionDAO.fetchBillableLeafLines(invoiceId, cycleNumber,clientAgreementId);
 		System.out.println("Client agreement id "+clientAgreementId);
 		if (oldLines == null || oldLines.isEmpty()) {
