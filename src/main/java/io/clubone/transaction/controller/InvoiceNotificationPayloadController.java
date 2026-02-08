@@ -75,6 +75,9 @@ public class InvoiceNotificationPayloadController {
         String pmBrandOut = nullToEmpty(paymentMethodBrand);
         String pmLast4Out = nullToEmpty(paymentLast4);
         String authCodeOut = nullToEmpty(authorizationCode);
+        pmBrandOut="RazorPay";
+        pmLast4Out="4366";
+        authCodeOut="AU63812";
 
         if ("CASH".equals(pmType)) {
             pmBrandOut = "CASH";
@@ -106,8 +109,10 @@ public class InvoiceNotificationPayloadController {
         params.put("packageName", nullToEmpty(packageName));
 
         // Club
-        params.put("clubName", club.clubName);
-        params.put("clubAddress", club.clubAddress);
+        //params.put("clubName", club.clubName);
+       // params.put("clubAddress", club.clubAddress);
+        params.put("clubName", "Cult Secundrabad");
+        params.put("clubAddress", "43 Street Banjara Hills Hyderbad");
 
         // Items
         params.put("lineItems", lineItems);
