@@ -1,8 +1,28 @@
 package io.clubone.transaction.dao.impl;
 
+import java.sql.Date;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.sql.Types;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.EmptyResultDataAccessException;
+import org.springframework.jdbc.BadSqlGrammarException;
+import org.springframework.jdbc.core.BatchPreparedStatementSetter;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.stereotype.Repository;
+
 import io.clubone.transaction.dao.SubscriptionPlanDao;
 import io.clubone.transaction.dao.utils.DaoUtils;
 import io.clubone.transaction.request.SubscriptionPlanCreateRequest;
@@ -13,28 +33,6 @@ import io.clubone.transaction.v2.vo.InvoiceDetailRaw;
 import io.clubone.transaction.v2.vo.PlanTermDTO;
 import io.clubone.transaction.v2.vo.PromoDTO;
 import io.clubone.transaction.v2.vo.SubscriptionPlanSummaryDTO;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.dao.DataAccessException;
-import org.springframework.dao.EmptyResultDataAccessException;
-import org.springframework.dao.EmptyResultDataAccessException;
-import org.springframework.jdbc.BadSqlGrammarException;
-import org.springframework.jdbc.core.BatchPreparedStatementSetter;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.RowMapper;
-import org.springframework.stereotype.Repository;
-
-import java.math.BigDecimal;
-import java.sql.Date;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Timestamp;
-import java.sql.Types;
-import java.time.LocalDate;
 
 @Repository
 public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
@@ -135,6 +133,23 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 		    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb))
 		    RETURNING subscription_billing_history_id
 		    """;
+
+	
+	private static final String INSERT_INVOICE_SCHEDULE_SQL = """
+		    INSERT INTO client_subscription_billing.subscription_invoice_schedule
+		    (
+		        invoice_id,
+		        subscription_instance_id,
+		        cycle_number,
+		        payment_due_date,
+		        schedule_status,
+		        is_active,
+		        created_on,
+		        created_by
+		    )
+		    VALUES (?, ?, ?, ?, 'PENDING', true, now(), ?)
+		    RETURNING subscription_invoice_schedule_id
+		""";
 
 	
 	@Override
@@ -848,6 +863,44 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 	        throw ex;
 	    }
 	}
+
+	
+	@Override
+	public UUID insertSubscriptionInvoiceScheduleReturningId(SubscriptionInvoiceScheduleRow r) {
+	    try {
+	        return cluboneJdbcTemplate.query(
+	            conn -> {
+	                PreparedStatement ps = conn.prepareStatement(INSERT_INVOICE_SCHEDULE_SQL);
+	                int i = 1;
+
+	                // Set the values for the new table
+	                ps.setObject(i++, r.getInvoiceId());  // invoice_id (using getter)
+	                ps.setObject(i++, r.getSubscriptionInstanceId());  // subscription_instance_id (using getter)
+	                ps.setInt(i++, r.getCycleNumber());  // cycle_number (using getter)
+	                ps.setDate(i++, Date.valueOf(r.getPaymentDueDate()));  // payment_due_date (using getter)
+
+	                // Assuming `createdBy` is passed as a parameter
+	                if (r.getCreatedBy() != null) {
+	                    ps.setObject(i++, r.getCreatedBy());  // created_by (using getter)
+	                } else {
+	                    ps.setNull(i++, Types.OTHER);  // if no created_by, pass NULL
+	                }
+
+	                return ps;
+	            },
+	            rs -> {
+	                if (rs.next()) {
+	                    return (UUID) rs.getObject("subscription_invoice_schedule_id");
+	                }
+	                return null;
+	            }
+	        );
+	    } catch (DataAccessException ex) {
+	        logDbError("insertSubscriptionInvoiceScheduleReturningId", ex);
+	        throw ex;
+	    }
+	}
+
 
 
 

@@ -42,9 +42,9 @@ public class SubscriptionPromoBillingDAOImpl implements SubscriptionPromoBilling
         """;
 
     private static final String SQL_INSERT_BILLING_PROMO = """
-        INSERT INTO client_subscription_billing.subscription_billing_promotion
+        INSERT INTO client_subscription_billing.subscription_invoice_promotion
         (
-            subscription_billing_history_id,
+            subscription_invoice_schedule_id,
             promotion_version_id,
             promotion_effect_id,
             amount_applied

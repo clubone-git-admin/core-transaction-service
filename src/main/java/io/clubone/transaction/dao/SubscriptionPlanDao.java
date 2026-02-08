@@ -5,8 +5,16 @@ import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+
+import io.clubone.transaction.dao.impl.SubscriptionInvoiceScheduleRow;
 import io.clubone.transaction.request.SubscriptionPlanCreateRequest;
-import io.clubone.transaction.v2.vo.*;
+import io.clubone.transaction.v2.vo.CyclePriceDTO;
+import io.clubone.transaction.v2.vo.DiscountCodeDTO;
+import io.clubone.transaction.v2.vo.EntitlementDTO;
+import io.clubone.transaction.v2.vo.InvoiceDetailRaw;
+import io.clubone.transaction.v2.vo.PlanTermDTO;
+import io.clubone.transaction.v2.vo.PromoDTO;
+import io.clubone.transaction.v2.vo.SubscriptionPlanSummaryDTO;
 
 public interface SubscriptionPlanDao {
 	UUID insertSubscriptionPlan(SubscriptionPlanCreateRequest req, UUID createdBy);
@@ -97,6 +105,8 @@ public interface SubscriptionPlanDao {
 	 List<SubscriptionPlanSummaryDTO> findClientSubscriptionPlans(UUID clientRoleId);
 	 
 	 UUID insertSubscriptionBillingHistoryReturningId(SubscriptionPlanDao.BillingHistoryRow row);
+	 
+	 UUID insertSubscriptionInvoiceScheduleReturningId(SubscriptionInvoiceScheduleRow r);
 
 
 }
