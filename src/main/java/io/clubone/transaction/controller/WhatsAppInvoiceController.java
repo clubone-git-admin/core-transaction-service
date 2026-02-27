@@ -1,7 +1,7 @@
 package io.clubone.transaction.controller;
 
 import java.time.Instant;
-import java.util.Map;
+import java.util.*;
 import java.util.UUID;
 
 import org.springframework.beans.factory.annotation.Value;
@@ -18,28 +18,20 @@ import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Mono;
 
 /**
- * ✅ SINGLE FILE: Controller + WhatsApp client + validations + (optional) DB logging hook.
+ * ✅ SINGLE FILE:
+ *   1) Invoice PDF WhatsApp
+ *   2) Generic Notification WhatsApp (templates from application.properties + member list)
  *
- * Endpoint used by Flutter Web:
- *   POST /api/whatsapp/invoice/send
- *   Content-Type: multipart/form-data
- *   Parts:
- *     - pdf: MultipartFile (application/pdf)
- *   Params:
- *     - to: customer whatsapp in +91... or digits
- *     - invoiceId: UUID/string
- *     - caption: optional
+ * Existing:
+ *   POST /api/whatsapp/invoice/send (multipart)
  *
- * Required headers:
- *   - X-location-Id
- *   - X-actor-id
- *
- * Tenant context:
- *   - applicationId resolved via TenantContext.get()
- *
- * WhatsApp Cloud API:
- *   1) Upload media:  POST {graphBase}/{phoneNumberId}/media
- *   2) Send message: POST {graphBase}/{phoneNumberId}/messages (type=document, document.id=<media_id>)
+ * New:
+ *   POST /api/whatsapp/notify/send (json)
+ *     - templateName
+ *     - members: [{firstName,lastName,phoneNumber,variables?}]
+ *     - variables?: global vars
+ *     - dryRun?: true -> doesn't send
+ *     - throttleMs?: delay between sends
  */
 @RestController
 @RequestMapping("/api/whatsapp")
@@ -54,18 +46,30 @@ public class WhatsAppInvoiceController {
   @Value("${whatsapp.phoneNumberId:1006971872489087}")
   private String phoneNumberId;
 
-  @Value("${whatsapp.accessToken:EAAMN5mUdePkBQVgluiGQ2AtWLKwWGuI4Kh6RveSXOxbdseYi17n56dGZBAw2w4s9lpKHFHtzmCR4TqdLLNYeEMEMGxjHqUZAdmBKyHzuU0C21rAyEVp9F72W4gpl3vCj8x6RRaV0WcExlP9gfF5oKHMHrthvRdkoQw2ZAAEPg9rogwsZAjziQiSgIoNy9IYuM2VZColVgHZCUW7FPSZAE8zp0CjtWTBC4L16lS6I4AoUMZBDi4E6volanEmexJtoj9pkerQCZCL2rItEjZCwyDQgZDZD}")
+  @Value("${whatsapp.accessToken:EAAMN5mUdePkBQZBSqDt68UnAMFqas0MFfPrBY0PtyV29vjVqRaBHTUJ9ujxTz1EtuurgvSZAhaj1zZCcZArTSs9IZC9nBZAppiFks2v8TSVoWyiVDvYfWeMr15iR5DZCa8VRywNKlxwbfCBsJKxRnad9bAOZBZAllnhXEosvsw3vvPz0mK2XflDZBofm0U8aKn7ZARa8XvZBUVI3ACoi4bfco4EvPqlTzK2U8JMCp5IS2HgkzAX3nt0vzgLb175wseT1Pj5LbNLA7VayZBSlqYQhwJ6o1}")
   private String accessToken;
 
-  // Optional: DB logging (wire if you have a table)
+  /**
+   * Templates Map from application.properties
+   *
+   * whatsapp.template={ \
+   *   EXPIRING_MEMBER:'Hi {firstName} {lastName}, your membership is expiring soon at {clubName}.', \
+   *   LEAST_CHECKIN_MEMBER:'Hi {firstName}, we miss you! You visited only {visits} times recently.', \
+   *   GENERAL:'Hi {firstName}, {message}' \
+   * }
+   */
+  @Value("#{${whatsapp.template:{}}}")
+  private Map<String, String> whatsappTemplates;
+
+  // Optional: DB logging
   private final JdbcTemplate cluboneJdbcTemplate;
 
-  // WebClient (production-friendly: timeouts / retries can be added here)
+  // WebClient
   private final WebClient webClient;
 
   public WhatsAppInvoiceController(
       WebClient.Builder webClientBuilder,
-      JdbcTemplate cluboneJdbcTemplate // ✅ if you don't want DB logging, you can pass null from config or remove
+      JdbcTemplate cluboneJdbcTemplate
   ) {
     this.webClient = webClientBuilder
         .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
@@ -74,7 +78,7 @@ public class WhatsAppInvoiceController {
   }
 
   // =========================
-  // API
+  // EXISTING API: Invoice PDF
   // =========================
   @PostMapping(
       value = "/invoice/send",
@@ -87,7 +91,6 @@ public class WhatsAppInvoiceController {
       @RequestParam(value = "caption", required = false) String caption,
       @RequestPart("pdf") MultipartFile pdf
   ) {
-    // ---- validations
     if (to == null || to.trim().isEmpty()) throw badRequest("'to' is required");
     if (invoiceId == null || invoiceId.trim().isEmpty()) throw badRequest("'invoiceId' is required");
     if (pdf == null || pdf.isEmpty()) throw badRequest("'pdf' is required");
@@ -99,26 +102,21 @@ public class WhatsAppInvoiceController {
     final String finalCaption = (caption == null || caption.trim().isEmpty())
         ? ("Invoice " + invoiceId)
         : caption.trim();
-    
-    System.out.println("Invoice "+invoiceId);
 
-    // Correlation id (useful for logs)
     final String traceId = UUID.randomUUID().toString();
     final Instant now = Instant.now();
 
     try {
-      // 1) upload pdf to WhatsApp -> mediaId
       final String mediaId = uploadMedia(pdf, traceId);
-      
-      sendText(toDigits, "Invoice created " + invoiceId);
 
-      // 2) send document message
+      // optional text
+      sendTextOrThrow(toDigits, "Invoice created " + invoiceId);
+
       final Map<String, Object> waResp = sendDocument(toDigits, mediaId, invoiceId, finalCaption, traceId);
 
-      // 3) optional: persist trace row
       safePersistTrace(toDigits, invoiceId, mediaId, traceId, waResp, now);
 
-      final var resp = new SendInvoiceWhatsAppResponse(
+      return ResponseEntity.ok(new SendInvoiceWhatsAppResponse(
           "SENT",
           invoiceId,
           toDigits,
@@ -126,25 +124,113 @@ public class WhatsAppInvoiceController {
           traceId,
           now.toString(),
           waResp
-      );
-
-      System.out.println("WA RESP => " + waResp);
-
-      return ResponseEntity.ok(resp);
+      ));
 
     } catch (WebClientResponseException wex) {
-      // Graph API error response body is valuable
       safePersistFailure(toDigits, invoiceId, traceId, wex, now);
-
       throw new ResponseStatusException(
           HttpStatus.BAD_GATEWAY,
           "WhatsApp API error: " + wex.getStatusCode() + " body=" + safeBody(wex),
           wex
       );
     } catch (Exception ex) {
-      safePersistFailure( toDigits, invoiceId, traceId, ex, now);
+      safePersistFailure(toDigits, invoiceId, traceId, ex, now);
       throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to send invoice PDF on WhatsApp", ex);
     }
+  }
+
+  // =========================
+  // ✅ NEW API: Notification Send (templateName + members[])
+  // =========================
+  @PostMapping(
+      value = "/notify/send",
+      consumes = MediaType.APPLICATION_JSON_VALUE,
+      produces = MediaType.APPLICATION_JSON_VALUE
+  )
+  public ResponseEntity<BulkNotifyResponse> sendNotificationToMembers(@RequestBody NotifySendRequest req) {
+
+    if (req == null) throw badRequest("Request body is required");
+    if (isBlank(req.templateName)) throw badRequest("'templateName' is required");
+    if (req.members == null || req.members.isEmpty()) throw badRequest("'members' is required");
+
+    final String templateKey = req.templateName.trim();
+    final String templateBody = (whatsappTemplates == null) ? null : whatsappTemplates.get(templateKey);
+
+    if (isBlank(templateBody)) {
+      throw badRequest("Template not found in application.properties for templateName=" + templateKey);
+    }
+
+    final boolean dryRun = Boolean.TRUE.equals(req.dryRun);
+    final long throttleMs = (req.throttleMs == null || req.throttleMs < 0) ? 0L : req.throttleMs;
+
+    final String bulkTraceId = UUID.randomUUID().toString();
+    final Instant now = Instant.now();
+
+    int sent = 0;
+    int failed = 0;
+
+    final Map<String, String> globalVars = (req.variables == null) ? Map.of() : req.variables;
+    final List<MemberSendResult> results = new ArrayList<>();
+
+    for (MemberRef m : req.members) {
+      final String rawPhone = (m == null) ? null : m.phoneNumber;
+      final String toDigits = normalizeToDigits(rawPhone);
+
+      if (toDigits.length() < 10) {
+        failed++;
+        results.add(MemberSendResult.failed(rawPhone == null ? "" : rawPhone, "Invalid phoneNumber", null, null, null, null));
+        continue;
+      }
+
+      try {
+        Map<String, String> vars = new HashMap<>(globalVars);
+        vars.put("firstName", nullToEmpty(m.firstName));
+        vars.put("lastName", nullToEmpty(m.lastName));
+        if (m.variables != null && !m.variables.isEmpty()) vars.putAll(m.variables);
+
+        String finalText = applyMerge(templateBody, vars);
+
+        if (dryRun) {
+          sent++;
+          results.add(MemberSendResult.dryRun(toDigits, finalText));
+        } else {
+          Map<String, Object> waResp = sendTextOrThrow(toDigits, finalText);
+          String messageId = extractMessageId(waResp);
+          sent++;
+          results.add(MemberSendResult.sent(toDigits, messageId, finalText, waResp));
+        }
+
+      } catch (WebClientResponseException wex) {
+        failed++;
+        results.add(MemberSendResult.failed(
+            toDigits,
+            "WhatsApp API error",
+            wex.getStatusCode() == null ? null : wex.getStatusCode().value(),
+            safeBody(wex),
+            null,
+            null
+        ));
+      } catch (Exception ex) {
+        failed++;
+        results.add(MemberSendResult.failed(toDigits, ex.getMessage(), null, null, null, null));
+      }
+
+      if (!dryRun && throttleMs > 0) {
+        try { Thread.sleep(throttleMs); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+      }
+    }
+
+    return ResponseEntity.ok(new BulkNotifyResponse(
+        "DONE",
+        templateKey,
+        bulkTraceId,
+        now.toString(),
+        dryRun,
+        throttleMs,
+        sent,
+        failed,
+        results
+    ));
   }
 
   // =========================
@@ -154,7 +240,6 @@ public class WhatsAppInvoiceController {
   private String uploadMedia(MultipartFile pdf, String traceId) throws Exception {
     final String url = graphBaseUrl + "/" + phoneNumberId + "/media";
 
-    // multipart/form-data: messaging_product + type + file
     final ByteArrayResource fileResource = new ByteArrayResource(pdf.getBytes()) {
       @Override public String getFilename() {
         return (pdf.getOriginalFilename() != null && !pdf.getOriginalFilename().isBlank())
@@ -188,54 +273,45 @@ public class WhatsAppInvoiceController {
         .block();
 
     Object id = (resp == null) ? null : resp.get("id");
-    if (id == null) {
-      throw new IllegalStateException("Media upload succeeded but no id returned: " + resp);
-    }
+    if (id == null) throw new IllegalStateException("Media upload succeeded but no id returned: " + resp);
     return id.toString();
   }
 
-  private Map<String, Object> sendText(String toDigits, String text) {
-	  final String url = graphBaseUrl + "/" + phoneNumberId + "/messages";
+  /**
+   * ✅ Sends text and throws WebClientResponseException with body on errors
+   */
+  @SuppressWarnings("unchecked")
+  private Map<String, Object> sendTextOrThrow(String toDigits, String text) {
+    final String url = graphBaseUrl + "/" + phoneNumberId + "/messages";
 
-	  final Map<String, Object> payload = Map.of(
-	      "messaging_product", "whatsapp",
-	      "to", toDigits,
-	      "type", "text",
-	      "text", Map.of("body", text)
-	  );
-
-	  Map resp = webClient.post()
-	      .uri(url)
-	      .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
-	      .contentType(MediaType.APPLICATION_JSON)
-	      .bodyValue(payload)
-	      .retrieve()
-	      .bodyToMono(Map.class)
-	      .block();
-
-	  return (Map<String, Object>) (resp != null ? resp : Map.of());
-	}
-  
-  @GetMapping("/debug/config")
-  public Map<String, Object> debugConfig() {
-    return Map.of(
-        "graphBaseUrl", graphBaseUrl,
-        "phoneNumberId", phoneNumberId,
-        "tokenPrefix", accessToken == null ? "null" : accessToken.substring(0, Math.min(12, accessToken.length())) + "..."
+    final Map<String, Object> payload = Map.of(
+        "messaging_product", "whatsapp",
+        "to", toDigits,
+        "type", "text",
+        "text", Map.of("body", text)
     );
-  }
 
-  @GetMapping("/debug/phone")
-  public Map<String, Object> debugPhone() {
-    final String url = graphBaseUrl + "/" + phoneNumberId;
-    return webClient.get()
+    Map resp = webClient.post()
         .uri(url)
         .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
+        .contentType(MediaType.APPLICATION_JSON)
+        .bodyValue(payload)
         .retrieve()
+        .onStatus(HttpStatusCode::isError, r -> r.bodyToMono(String.class).flatMap(b ->
+            Mono.error(new WebClientResponseException(
+                "Send text failed. body=" + b,
+                r.statusCode().value(),
+                r.statusCode().toString(),
+                null,
+                b.getBytes(),
+                null
+            ))
+        ))
         .bodyToMono(Map.class)
         .block();
-  }
 
+    return (Map<String, Object>) (resp != null ? resp : Map.of());
+  }
 
   private Map<String, Object> sendDocument(
       String toDigits,
@@ -265,7 +341,7 @@ public class WhatsAppInvoiceController {
         .retrieve()
         .onStatus(HttpStatusCode::isError, r -> r.bodyToMono(String.class).flatMap(b ->
             Mono.error(new WebClientResponseException(
-                "Send message failed. body=" + b,
+                "Send document failed. body=" + b,
                 r.statusCode().value(),
                 r.statusCode().toString(),
                 null,
@@ -276,7 +352,34 @@ public class WhatsAppInvoiceController {
         .bodyToMono(Map.class)
         .block();
 
-    return (Map<String, Object>) (resp != null ? resp : Map.of());
+    @SuppressWarnings("unchecked")
+    Map<String, Object> out = (Map<String, Object>) (resp != null ? resp : Map.of());
+    return out;
+  }
+
+  // =========================
+  // Debug
+  // =========================
+  @GetMapping("/debug/config")
+  public Map<String, Object> debugConfig() {
+    return Map.of(
+        "graphBaseUrl", graphBaseUrl,
+        "phoneNumberId", phoneNumberId,
+        "tokenPrefix", accessToken == null ? "null" : accessToken.substring(0, Math.min(12, accessToken.length())) + "...",
+        "templatesLoaded", whatsappTemplates == null ? 0 : whatsappTemplates.size(),
+        "templateKeys", whatsappTemplates == null ? List.of() : new ArrayList<>(whatsappTemplates.keySet())
+    );
+  }
+
+  @GetMapping("/debug/phone")
+  public Map<String, Object> debugPhone() {
+    final String url = graphBaseUrl + "/" + phoneNumberId;
+    return webClient.get()
+        .uri(url)
+        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
+        .retrieve()
+        .bodyToMono(Map.class)
+        .block();
   }
 
   // =========================
@@ -284,14 +387,20 @@ public class WhatsAppInvoiceController {
   // =========================
 
   private static boolean isPdf(MultipartFile f) {
-    // Accept common pdf types
     String ct = (f.getContentType() == null) ? "" : f.getContentType().toLowerCase();
     return ct.contains("application/pdf") || ct.contains("pdf");
   }
 
-  /** WhatsApp expects digits (country code + number). */
   private static String normalizeToDigits(String to) {
     return to == null ? "" : to.replaceAll("[^0-9]", "");
+  }
+
+  private static boolean isBlank(String s) {
+    return s == null || s.trim().isEmpty();
+  }
+
+  private static String nullToEmpty(String s) {
+    return s == null ? "" : s.trim();
   }
 
   private static ResponseStatusException badRequest(String msg) {
@@ -302,6 +411,41 @@ public class WhatsAppInvoiceController {
     try { return ex.getResponseBodyAsString(); } catch (Exception ignore) { return "-"; }
   }
 
+  /**
+   * Replace placeholders like {firstName}, {lastName}, {clubName}, etc.
+   * - Unprovided placeholders are removed.
+   */
+  private static String applyMerge(String template, Map<String, String> vars) {
+    String out = template == null ? "" : template;
+
+    if (vars != null) {
+      for (Map.Entry<String, String> e : vars.entrySet()) {
+        String k = e.getKey();
+        String v = e.getValue() == null ? "" : e.getValue();
+        if (k != null) out = out.replace("{" + k + "}", v);
+      }
+    }
+
+    // remove leftover tokens like {anything}
+    out = out.replaceAll("\\{[a-zA-Z0-9_]+\\}", "");
+    return out.trim();
+  }
+
+  /**
+   * Extract message id if present:
+   * WhatsApp response often includes:
+   * { "messages": [ { "id": "wamid.HBg..." } ] }
+   */
+  @SuppressWarnings("unchecked")
+  private static String extractMessageId(Map<String, Object> waResp) {
+    if (waResp == null) return null;
+    Object messages = waResp.get("messages");
+    if (!(messages instanceof List<?> list) || list.isEmpty()) return null;
+    Object first = list.get(0);
+    if (!(first instanceof Map<?, ?> m)) return null;
+    Object id = ((Map<?, ?>) m).get("id");
+    return id == null ? null : String.valueOf(id);
+  }
 
   // =========================
   // Optional: Persist trace (hook into your DDL)
@@ -315,24 +459,9 @@ public class WhatsAppInvoiceController {
       Instant createdOn
   ) {
     if (cluboneJdbcTemplate == null) return;
-
-    // ✅ Replace with YOUR table/ddl columns.
-    // Best practice: store request, response, status, error, created_on, application_id, location_id, actor_id, invoice_id, to_number, media_id, trace_id
     try {
-      // Example (EDIT ME to match your DDL):
-      //
-      // cluboneJdbcTemplate.update("""
-      //   insert into notification.whatsapp_invoice_trace
-      //   (trace_id, application_id, location_id, actor_id, invoice_id, to_number, media_id, status, response_json, created_on)
-      //   values (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
-      // """,
-      // traceId, applicationId, locationId, actorId, UUID.fromString(invoiceId), toDigits, mediaId, "SENT",
-      // new ObjectMapper().writeValueAsString(waResp),
-      // Timestamp.from(createdOn)
-      // );
-    } catch (Exception ignore) {
-      // Never fail primary flow due to logging table
-    }
+      // plug your insert here if needed
+    } catch (Exception ignore) {}
   }
 
   private void safePersistFailure(
@@ -344,15 +473,16 @@ public class WhatsAppInvoiceController {
   ) {
     if (cluboneJdbcTemplate == null) return;
     try {
-      // Similar insert/update for FAILED status.
+      // plug your failure log here if needed
     } catch (Exception ignore) {}
   }
 
   // =========================
-  // Response DTO (single file)
+  // DTOs
   // =========================
+
   public record SendInvoiceWhatsAppResponse(
-      String status,          // SENT / FAILED
+      String status,
       String invoiceId,
       String to,
       String mediaId,
@@ -360,7 +490,81 @@ public class WhatsAppInvoiceController {
       String sentAtUtc,
       Map<String, Object> whatsappResponse
   ) {}
+
+  public static class NotifySendRequest {
+    public String templateName;
+    public List<MemberRef> members;
+
+    // global variables for all members (clubName, supportPhone, etc.)
+    public Map<String, String> variables;
+
+    // ✅ if true: return merged messages without sending
+    public Boolean dryRun;
+
+    // ✅ delay between sends (ms)
+    public Long throttleMs;
+  }
+
+  public static class MemberRef {
+    public String firstName;
+    public String lastName;
+    public String phoneNumber;
+
+    // per-member variables (expiryDate, visits, etc.)
+    public Map<String, String> variables;
+  }
+
+  public record BulkNotifyResponse(
+      String status,               // DONE
+      String templateName,
+      String bulkTraceId,
+      String executedAtUtc,
+      boolean dryRun,
+      long throttleMs,
+      int sentCount,
+      int failedCount,
+      List<MemberSendResult> results
+  ) {}
+
+  public static class MemberSendResult {
+    public String to;
+    public String status;           // SENT / FAILED / DRY_RUN
+    public String messageId;        // if success
+    public String mergedText;       // helpful for debugging
+    public Integer httpStatus;      // on failure
+    public String errorMessage;     // on failure
+    public String errorBody;        // on failure (Graph API body)
+    public Map<String, Object> whatsappResponse; // on success
+
+    public static MemberSendResult sent(String to, String messageId, String mergedText, Map<String, Object> waResp) {
+      MemberSendResult r = new MemberSendResult();
+      r.to = to;
+      r.status = "SENT";
+      r.messageId = messageId;
+      r.mergedText = mergedText;
+      r.whatsappResponse = waResp;
+      return r;
+    }
+
+    public static MemberSendResult dryRun(String to, String mergedText) {
+      MemberSendResult r = new MemberSendResult();
+      r.to = to;
+      r.status = "DRY_RUN";
+      r.mergedText = mergedText;
+      return r;
+    }
+
+    public static MemberSendResult failed(String to, String errorMessage, Integer httpStatus, String errorBody,
+                                          String messageId, String mergedText) {
+      MemberSendResult r = new MemberSendResult();
+      r.to = to;
+      r.status = "FAILED";
+      r.errorMessage = errorMessage;
+      r.httpStatus = httpStatus;
+      r.errorBody = errorBody;
+      r.messageId = messageId;
+      r.mergedText = mergedText;
+      return r;
+    }
+  }
 }
-
-
-
