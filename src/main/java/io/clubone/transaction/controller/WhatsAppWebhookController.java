@@ -30,7 +30,9 @@ public class WhatsAppWebhookController {
 
     @PostMapping
     public ResponseEntity<String> receiveWebhook(@RequestBody String payload) {
-        System.out.println("Webhook event: " + payload);
+    	 System.out.println("==== WHATSAPP WEBHOOK EVENT ====");
+    	    System.out.println(payload);
+    	    System.out.println("================================");
         return ResponseEntity.ok("EVENT_RECEIVED");
     }
 }

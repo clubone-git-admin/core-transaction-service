@@ -41,6 +41,7 @@ import io.clubone.transaction.response.SubscriptionPlanBatchCreateResponse;
 import io.clubone.transaction.response.SubscriptionPlanCreateResponse;
 import io.clubone.transaction.service.SubscriptionPlanService;
 import io.clubone.transaction.service.TransactionServicev2;
+import io.clubone.transaction.subscription.billing.service.SubscriptionBillingScheduleService;
 import io.clubone.transaction.util.FrequencyUnit;
 import io.clubone.transaction.v2.vo.CyclePriceDTO;
 import io.clubone.transaction.v2.vo.EntitlementDTO;
@@ -71,6 +72,9 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 
 	@Autowired
 	private SubscriptionPromoBillingDAO subscriptionPromoBillingDAO;
+	
+	@Autowired
+	private SubscriptionBillingScheduleService subscriptionBillingScheduleService;
 
 	private static final Logger log = LoggerFactory.getLogger(SubscriptionPlanServiceImpl.class);
 
@@ -124,6 +128,13 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 
 			UUID instanceId = dao.insertSubscriptionInstance(planId, start, end, billingDate, instanceStatusId,
 					createdBy, request.getCurrentCycle(), null);
+			
+			subscriptionBillingScheduleService.generateInitialSchedule(
+			        request,
+			        planId,
+			        instanceId,
+			        createdBy
+			);
 
 			BigDecimal netExTax = firstCycleAmountOrZero(request);
 			BigDecimal taxTotal = computeTaxesFromItemOnly(request.getEntityId(), request.getLevelId(), netExTax);
