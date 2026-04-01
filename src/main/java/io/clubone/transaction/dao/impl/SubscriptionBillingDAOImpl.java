@@ -59,15 +59,16 @@ public class SubscriptionBillingDAOImpl implements SubscriptionBillingDAO {
 			""";
 
 	private static final String SQL_FREQ_NAME = """
-			SELECT frequency_name
-			FROM client_subscription_billing.lu_subscription_frequency
-			WHERE subscription_frequency_id = ?
+			SELECT COALESCE(code, display_name) AS frequency_name
+			FROM billing_config.billing_period_unit
+			WHERE billing_period_unit_id = ?
 			""";
 
 	private static final String SQL_BILLING_DAY_RULE = """
 			SELECT billing_day
-			FROM client_subscription_billing.lu_subscription_billing_day_rule
+			FROM billing_config.subscription_billing_day_rule
 			WHERE subscription_billing_day_rule_id = ?
+			  AND COALESCE(is_active, true) = true
 			""";
 
 	private static final String SQL_STATUS_ID = """
@@ -144,7 +145,7 @@ public class SubscriptionBillingDAOImpl implements SubscriptionBillingDAO {
 
 	    @Override
 	    public List<SubscriptionBillingDayRuleDTO> findAll() {
-	        String sql = "SELECT subscription_billing_day_rule_id, subscription_frequency_id, billing_day, display_name, description, is_active, created_on, created_by, modified_on, modified_by FROM client_subscription_billing.lu_subscription_billing_day_rule";
+	        String sql = "SELECT subscription_billing_day_rule_id, subscription_frequency_id, billing_day, display_name, description, is_active, created_on, created_by, modified_on, modified_by FROM billing_config.subscription_billing_day_rule";
 	        return cluboneJdbcTemplate.query(sql, rowMapper);
 	    }
 }

@@ -21,9 +21,13 @@ import java.util.HashSet;
 import java.util.function.BiConsumer;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.EmptyResultDataAccessException;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.CollectionUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.web.server.ResponseStatusException;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -80,17 +84,28 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	@Transactional(rollbackFor = Exception.class)
 	public CreateInvoiceResponse createInvoice(InvoiceRequest request) {
 
-		final UUID agreementTypeId = transactionDAO.findEntityTypeIdByName("Agreement");
-		final UUID bundleTypeId = transactionDAO.findEntityTypeIdByName("Bundle");
-		final UUID itemTypeId = transactionDAO.findEntityTypeIdByName("Item");
-		final UUID invoiceStatusId = UUID.fromString("b1ee960e-9966-4f2b-9596-88110158948c");
+		if (request == null) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Request body is required");
+		}
+		if (request.getClientRoleId() == null) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "clientRoleId is required");
+		}
+		if (CollectionUtils.isEmpty(request.getEntities())) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+					"entities must contain at least one entry");
+		}
+
+		final UUID agreementTypeId = requireEntityTypeId("Agreement");
+		final UUID bundleTypeId = requireEntityTypeId("Bundle");
+		final UUID itemTypeId = requireEntityTypeId("Item");
+		final UUID invoiceStatusId = transactionDAO.findInvoiceStatusIdByName("PENDING");
 
 		BigDecimal subTotal = BigDecimal.ZERO;      // NET (gross-discount)
 		BigDecimal taxTotal = BigDecimal.ZERO;      // TAX on NET base
 		BigDecimal discountTotal = BigDecimal.ZERO; // informational
 
 		ObjectMapper mapper = new ObjectMapper();
-		UUID applicationId = UUID.fromString("5949a200-82fb-4171-9001-0f77ac439011");
+		final UUID applicationId = request.resolvedApplicationId();
 
 		final Map<UUID, UUID> agreementBusinessIdToRootInvoiceEntityId = new HashMap<>();
 
@@ -99,8 +114,17 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		inv.setInvoiceDate(Timestamp.from(Instant.now()));
 		inv.setClientRoleId(request.getClientRoleId());
 
-		// kept as-is (your invoice level)
-		inv.setLevelId(UUID.fromString("b70ee823-1623-41c1-8c70-260ab4a9a2b6"));
+		// invoice.level_id FK → locations.levels.level_id.
+		// Clients often send locations.levels.reference_entity_id as levelId — resolve to level_id.
+		if (request.getLevelId() == null) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+					"levelId is required (levels.level_id or locations.levels.reference_entity_id; JSON may use levelId or locationId)");
+		}
+		UUID resolvedLevelId = transactionDAO.resolveLevelIdForInvoice(request.getLevelId())
+				.orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST,
+						"levelId is not a valid locations.levels.level_id or reference_entity_id: "
+								+ request.getLevelId()));
+		inv.setLevelId(resolvedLevelId);
 
 		inv.setBillingAddress(request.getBillingAddress());
 		inv.setInvoiceStatusId(invoiceStatusId);
@@ -109,6 +133,15 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 		// ✅ Always use invoice level id consistently
 		final UUID invoiceLevelId = inv.getLevelId();
+
+		inv.setBillingRunId(request.getBillingRunId());
+		UUID billingCollectionTypeId = request.getBillingCollectionTypeId();
+		if (billingCollectionTypeId == null && StringUtils.hasText(request.getBillingCollectionTypeCode())) {
+			billingCollectionTypeId = transactionDAO
+					.findBillingCollectionTypeIdByCode(request.getBillingCollectionTypeCode().trim())
+					.orElse(null);
+		}
+		inv.setBillingCollectionTypeId(billingCollectionTypeId);
 
 		final List<InvoiceEntityDTO> lines = new ArrayList<>();
 
@@ -130,14 +163,17 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 		boolean isAgreement = false;
 
-		if (request.getEntities() != null) {
-			for (Entity e : request.getEntities()) {
+		for (Entity e : request.getEntities()) {
 
-				Optional<EntityTypeDTO> entityTypeOpt = transactionDAO.getEntityTypeById(
-						e.getEntityTypeId() != null ? e.getEntityTypeId()
-								: UUID.fromString("b1c9b95c-5fe0-4062-af85-12ad47908948"));
+				if (e.getEntityTypeId() == null) {
+					throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+							"entities[].entityTypeId is required");
+				}
+				EntityTypeDTO entityTypeRow = transactionDAO.getEntityTypeById(e.getEntityTypeId())
+						.orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST,
+								"Unknown entities[].entityTypeId: " + e.getEntityTypeId()));
 
-				String t = entityTypeOpt.get().getEntityType().toLowerCase();
+				String t = entityTypeRow.getEntityType().toLowerCase();
 
 				switch (t) {
 
@@ -176,13 +212,13 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 								// ✅ No proration for package
 								InvoiceEntityDTO itemLine = buildItemLineFromPayload(
-										it, pkgBusinessEntityId, itemTypeId, e.getStartDate(), false);
+										it, pkgBusinessEntityId, itemTypeId, e.getStartDate(), false, e);
 
 								itemLine.setParentInvoiceEntityId(pkgInvoiceEntityId);
 								final int parentQty = def(e.getQuantity(), 1); // package qty
 								final int entQty = transactionDAO.resolveDefaultQtyFromEntitlement(
 										it.getPricePlanTemplateId(),
-										UUID.fromString("5949a200-82fb-4171-9001-0f77ac439011")
+										applicationId
 								);
 								final int finalQty = qtyFromParentAndEntitlement(parentQty, entQty);
 
@@ -194,9 +230,10 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 										+ " planTemplateId=" + it.getPricePlanTemplateId());
 
 								// ✅ 1) discountIds FIRST (ADD, not overwrite)
-								if (e.getDiscountIds() != null && !e.getDiscountIds().isEmpty()) {
+								List<UUID> pkgDiscountIds = mergeDiscountIds(e, it);
+								if (!pkgDiscountIds.isEmpty()) {
 									Optional<DiscountDetailDTO> best = transactionDAO.findBestDiscountForItemByIds(
-											it.getEntityId(), invoiceLevelId, e.getDiscountIds());
+											it.getEntityId(), invoiceLevelId, pkgDiscountIds);
 
 									best.ifPresent(d -> {
 										BigDecimal qty = BigDecimal.valueOf(def(itemLine.getQuantity(), 1));
@@ -261,12 +298,16 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 					/* ============================== AGREEMENT ============================== */
 					case "agreement": {
 
+						if (e.getEntityId() == null) {
+							throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+									"entities[].entityId is required when entity type is Agreement");
+						}
+						UUID agreementBusinessEntityId = e.getEntityId();
+
 						InvoiceEntityDTO agreement = new InvoiceEntityDTO();
 
 						UUID agreementInvoiceEntityId = UUID.randomUUID();
 						//agreementRootInvoiceEntityIds.add(agreementInvoiceEntityId);
-
-						UUID agreementBusinessEntityId = (e.getEntityId() != null) ? e.getEntityId() : UUID.randomUUID();
 
 						isAgreement = true;
 						
@@ -274,7 +315,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 						agreement.setInvoiceEntityId(agreementInvoiceEntityId);
 						agreement.setEntityId(agreementBusinessEntityId);
 						agreement.setEntityTypeId(agreementTypeId);
-						agreement.setEntityDescription("Agreement");
+						agreement.setEntityDescription(StringUtils.hasText(e.getEntityName()) ? e.getEntityName() : "Agreement");
 						agreement.setQuantity(def(e.getQuantity(), 1));
 						agreement.setUnitPrice(BigDecimal.ZERO);
 						agreement.setDiscountAmount(BigDecimal.ZERO);
@@ -324,7 +365,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 										// Build FULL (no proration). Proration applied AFTER discount+promo (and NOT for FEE items)
 										InvoiceEntityDTO itemLine = buildItemLineFromPayload(
-												it, bundleBusinessEntityId, itemTypeId, e.getStartDate(), false);
+												it, bundleBusinessEntityId, itemTypeId, e.getStartDate(), false, e);
 
 										itemLine.setParentInvoiceEntityId(bundleInvoiceEntityId);
 
@@ -334,7 +375,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 										final int entQty = transactionDAO.resolveDefaultQtyFromEntitlement(
 												it.getPricePlanTemplateId(),
-												UUID.fromString("5949a200-82fb-4171-9001-0f77ac439011")
+												applicationId
 										);
 										final int finalQty = qtyFromParentAndEntitlement(parentQty, entQty);
 
@@ -348,9 +389,10 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 												+ " planTemplateId=" + it.getPricePlanTemplateId());
 
 										// ✅ 1) discountIds FIRST
-										if (e.getDiscountIds() != null && !e.getDiscountIds().isEmpty()) {
+										List<UUID> agrDiscountIds = mergeDiscountIds(e, it);
+										if (!agrDiscountIds.isEmpty()) {
 											Optional<DiscountDetailDTO> best = transactionDAO.findBestDiscountForItemByIds(
-													it.getEntityId(), invoiceLevelId, e.getDiscountIds());
+													it.getEntityId(), invoiceLevelId, agrDiscountIds);
 
 											best.ifPresent(d -> {
 												BigDecimal qty = BigDecimal.valueOf(def(itemLine.getQuantity(), 1));
@@ -466,7 +508,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 											LocalDate nextStart = ctx.periodEndExclusive;
 
 											InvoiceEntityDTO nextLine = buildItemLineFromPayload(
-													it, bundleBusinessEntityId, itemTypeId, nextStart, false);
+													it, bundleBusinessEntityId, itemTypeId, nextStart, false, e);
 
 											nextLine.setParentInvoiceEntityId(bundleInvoiceEntityId);
 											nextLine.setQuantity(billedQty);
@@ -561,13 +603,13 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 							for (Item it : e.getItems()) {
 
 								InvoiceEntityDTO itemLine = buildItemLineFromPayload(
-										it, bundleBusinessEntityId, itemTypeId, e.getStartDate(), false);
+										it, bundleBusinessEntityId, itemTypeId, e.getStartDate(), false, e);
 
 								itemLine.setParentInvoiceEntityId(bundleInvoiceEntityId);
 								final int parentQty = def(e.getQuantity(), 1); // bundle qty
 								final int entQty = transactionDAO.resolveDefaultQtyFromEntitlement(
 										it.getPricePlanTemplateId(),
-										UUID.fromString("5949a200-82fb-4171-9001-0f77ac439011")
+										applicationId
 								);
 								final int finalQty = qtyFromParentAndEntitlement(parentQty, entQty);
 
@@ -578,9 +620,10 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 										+ " finalQty=" + finalQty
 										+ " planTemplateId=" + it.getPricePlanTemplateId());
 
-								if (e.getDiscountIds() != null && !e.getDiscountIds().isEmpty()) {
+								List<UUID> bundleDiscountIds = mergeDiscountIds(e, it);
+								if (!bundleDiscountIds.isEmpty()) {
 									Optional<DiscountDetailDTO> best = transactionDAO.findBestDiscountForItemByIds(
-											it.getEntityId(), invoiceLevelId, e.getDiscountIds());
+											it.getEntityId(), invoiceLevelId, bundleDiscountIds);
 
 									best.ifPresent(d -> {
 										BigDecimal qty = BigDecimal.valueOf(def(itemLine.getQuantity(), 1));
@@ -665,11 +708,11 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 						if (e.getItems() != null && !e.getItems().isEmpty()) {
 							for (Item it : e.getItems()) {
 
-								InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, null, itemTypeId, e.getStartDate(), false);
+								InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, null, itemTypeId, e.getStartDate(), false, e);
 								final int parentQty = def(e.getQuantity(), 1);
 								final int entQty = transactionDAO.resolveDefaultQtyFromEntitlement(
 										it.getPricePlanTemplateId(),
-										UUID.fromString("5949a200-82fb-4171-9001-0f77ac439011")
+										applicationId
 								);
 								final int finalQty = qtyFromParentAndEntitlement(parentQty, entQty);
 
@@ -680,9 +723,10 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 										+ " finalQty=" + finalQty
 										+ " planTemplateId=" + it.getPricePlanTemplateId());
 
-								if (e.getDiscountIds() != null && !e.getDiscountIds().isEmpty()) {
+								List<UUID> itemListDiscountIds = mergeDiscountIds(e, it);
+								if (!itemListDiscountIds.isEmpty()) {
 									Optional<DiscountDetailDTO> best = transactionDAO.findBestDiscountForItemByIds(
-											it.getEntityId(), invoiceLevelId, e.getDiscountIds());
+											it.getEntityId(), invoiceLevelId, itemListDiscountIds);
 
 									best.ifPresent(d -> {
 										BigDecimal qty = BigDecimal.valueOf(def(itemLine.getQuantity(), 1));
@@ -738,13 +782,15 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 							it.setPrice(e.getPrice());
 							it.setPricePlanTemplateId(e.getPricePlanTemplateId());
 							it.setUpsellItem(Boolean.TRUE.equals(e.getUpsellItem()));
+							it.setEntityName(e.getEntityName());
+							it.setStartDate(e.getStartDate());
 
-							InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, null, itemTypeId, e.getStartDate(), false);
+							InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, null, itemTypeId, e.getStartDate(), false, e);
 
 							final int parentQty = def(e.getQuantity(), 1);
 							final int entQty = transactionDAO.resolveDefaultQtyFromEntitlement(
 									it.getPricePlanTemplateId(),
-									UUID.fromString("5949a200-82fb-4171-9001-0f77ac439011")
+									applicationId
 							);
 							final int finalQty = qtyFromParentAndEntitlement(parentQty, entQty);
 
@@ -756,9 +802,10 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 									+ " finalQty=" + finalQty
 									+ " planTemplateId=" + e.getPricePlanTemplateId());
 
-							if (e.getDiscountIds() != null && !e.getDiscountIds().isEmpty()) {
+							List<UUID> itemSingleDiscountIds = mergeDiscountIds(e, it);
+							if (!itemSingleDiscountIds.isEmpty()) {
 								Optional<DiscountDetailDTO> best = transactionDAO.findBestDiscountForItemByIds(
-										it.getEntityId(), invoiceLevelId, e.getDiscountIds());
+										it.getEntityId(), invoiceLevelId, itemSingleDiscountIds);
 
 								best.ifPresent(d -> {
 									BigDecimal qty = BigDecimal.valueOf(def(itemLine.getQuantity(), 1));
@@ -809,9 +856,10 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 					}
 
 					default:
-						break;
+						throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+								"Unsupported entity type for invoice: " + entityTypeRow.getEntityType()
+										+ " (supported: Package, Agreement, Bundle, Item)");
 				}
-			}
 		}
 
 		inv.setSubTotal(scale2(subTotal));                // ✅ NET
@@ -839,66 +887,61 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		}*/
 		UUID firstClientAgreementId = null;
 
-		try {
-		    if (isAgreement && request.getEntities() != null && !request.getEntities().isEmpty()) {
+		if (isAgreement) {
 
-		        // Build parent map once for stamping (performance + correctness)
-		        final Map<UUID, UUID> parentMap = buildParentMap(lines);
+			final Map<UUID, UUID> parentMap = buildParentMap(lines);
 
-		        for (Entity e : request.getEntities()) {
+			for (Entity e : request.getEntities()) {
 
-		            // Only AGREEMENT entities
-		            Optional<EntityTypeDTO> entityTypeOpt = transactionDAO.getEntityTypeById(
-		                    e.getEntityTypeId() != null ? e.getEntityTypeId()
-		                            : UUID.fromString("b1c9b95c-5fe0-4062-af85-12ad47908948"));
+				if (e.getEntityTypeId() == null) {
+					throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+							"entities[].entityTypeId is required");
+				}
+				EntityTypeDTO agreementEntityTypeRow = transactionDAO.getEntityTypeById(e.getEntityTypeId())
+						.orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST,
+								"Unknown entities[].entityTypeId: " + e.getEntityTypeId()));
 
-		            String t = entityTypeOpt.get().getEntityType().toLowerCase();
-		            if (!"agreement".equalsIgnoreCase(t)) continue;
+				String typeName = agreementEntityTypeRow.getEntityType().toLowerCase();
+				if (!"agreement".equals(typeName)) {
+					continue;
+				}
 
-		            final UUID agreementBusinessEntityId = e.getEntityId();
-		            if (agreementBusinessEntityId == null) {
-		                System.out.println("[AGREEMENT][SKIP] agreement entityId is null");
-		                continue;
-		            }
+				final UUID agreementBusinessEntityId = e.getEntityId();
+				if (agreementBusinessEntityId == null) {
+					throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+							"entities[].entityId is required for Agreement when creating client agreement");
+				}
 
-		            final UUID agreementRootInvoiceEntityId =
-		                    agreementBusinessIdToRootInvoiceEntityId.get(agreementBusinessEntityId);
+				final UUID agreementRootInvoiceEntityId = agreementBusinessIdToRootInvoiceEntityId
+						.get(agreementBusinessEntityId);
 
-		            if (agreementRootInvoiceEntityId == null) {
-		                System.out.println("[AGREEMENT][SKIP] no root invoiceEntityId found for agreementId=" + agreementBusinessEntityId);
-		                continue;
-		            }
+				if (agreementRootInvoiceEntityId == null) {
+					throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+							"No invoice line root found for agreement entityId=" + agreementBusinessEntityId);
+				}
 
-		            System.out.println("[AGREEMENT][CREATE_CA] agreementId=" + agreementBusinessEntityId
-		                    + " rootInvoiceEntityId=" + agreementRootInvoiceEntityId);
+				InvoiceRequest perAgreementReq = new InvoiceRequest();
+				perAgreementReq.setClientRoleId(request.getClientRoleId());
+				perAgreementReq.setBillingAddress(request.getBillingAddress());
+				perAgreementReq.setCreatedBy(request.getCreatedBy());
+				perAgreementReq.setLevelId(request.getLevelId());
+				perAgreementReq.setBillingRunId(request.getBillingRunId());
+				perAgreementReq.setBillingCollectionTypeId(request.getBillingCollectionTypeId());
+				perAgreementReq.setBillingCollectionTypeCode(request.getBillingCollectionTypeCode());
+				perAgreementReq.setEntities(List.of(e));
 
-		            // ✅ Create a "single-agreement request" and reuse existing helper
-		            InvoiceRequest perAgreementReq = new InvoiceRequest();
-		            perAgreementReq.setClientRoleId(request.getClientRoleId());
-		            perAgreementReq.setBillingAddress(request.getBillingAddress());
-		            perAgreementReq.setCreatedBy(request.getCreatedBy());
-		            perAgreementReq.setLevelId(request.getLevelId());
-		            perAgreementReq.setEntities(List.of(e)); // ONLY this agreement
+				UUID clientAgreementId = caHelper.createClientAgreementFromInvoice(perAgreementReq);
 
-		            UUID clientAgreementId = caHelper.createClientAgreementFromInvoice(perAgreementReq);
+				if (firstClientAgreementId == null) {
+					firstClientAgreementId = clientAgreementId;
+				}
 
-		            if (firstClientAgreementId == null) firstClientAgreementId = clientAgreementId;
+				stampClientAgreementForRoot(lines, parentMap, agreementRootInvoiceEntityId, clientAgreementId);
+			}
 
-		            // ✅ Stamp ONLY this agreement subtree (agreement + bundles + items)
-		            stampClientAgreementForRoot(lines, parentMap, agreementRootInvoiceEntityId, clientAgreementId);
-
-		            System.out.println("[AGREEMENT][STAMPED_ROOT] agreementId=" + agreementBusinessEntityId
-		                    + " clientAgreementId=" + clientAgreementId);
-		        }
-
-		        // ⚠️ Invoice has only one clientAgreementId field.
-		        // Keep first one for backward compatibility (optional).
-		        if (firstClientAgreementId != null) {
-		            inv.setClientAgreementId(firstClientAgreementId);
-		        }
-		    }
-		} catch (Exception ex) {
-		    System.out.println("Error in agreement purchase: " + ex.getMessage());
+			if (firstClientAgreementId != null) {
+				inv.setClientAgreementId(firstClientAgreementId);
+			}
 		}
 
 
@@ -906,24 +949,50 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		UUID invoiceId = transactionDAO.saveInvoiceV3(inv);
 		String invoiceNumber = transactionDAO.findInvoiceNumber(invoiceId);
 
-		return new CreateInvoiceResponse(invoiceId, invoiceNumber, "PENDING_PAYMENT");
+		CreateInvoiceResponse response = new CreateInvoiceResponse();
+		response.setInvoiceId(invoiceId);
+		response.setInvoiceNumber(invoiceNumber);
+		response.setStatus("PENDING");
+		response.setClientAgreementId(inv.getClientAgreementId());
+		response.setBillingRunId(inv.getBillingRunId());
+		response.setBillingCollectionTypeId(inv.getBillingCollectionTypeId());
+		if (StringUtils.hasText(request.getBillingCollectionTypeCode())) {
+			response.setBillingCollectionTypeCode(request.getBillingCollectionTypeCode().trim());
+		}
+		response.setLineItemCount(inv.getLineItems() != null ? inv.getLineItems().size() : 0);
+		return response;
 	}
 
 	/* ============================================================
 	   DISCOUNTS
 	   ============================================================ */
 
+	private static List<UUID> mergeDiscountIds(Entity entity, Item item) {
+		if (entity == null && item == null) {
+			return List.of();
+		}
+		List<UUID> out = new ArrayList<>();
+		if (entity != null && entity.getDiscountIds() != null) {
+			out.addAll(entity.getDiscountIds());
+		}
+		if (item != null && item.getDiscountIds() != null) {
+			out.addAll(item.getDiscountIds());
+		}
+		return out;
+	}
+
 	private void applyDiscountIds(Entity rootEntity, Item it, InvoiceEntityDTO line, UUID invoiceLevelId) {
 
 		if (rootEntity == null || it == null || line == null) return;
 		if (invoiceLevelId == null) return;
 
-		if (rootEntity.getDiscountIds() == null || rootEntity.getDiscountIds().isEmpty()) return;
+		List<UUID> discountIds = mergeDiscountIds(rootEntity, it);
+		if (discountIds.isEmpty()) return;
 
 		Optional<DiscountDetailDTO> best = transactionDAO.findBestDiscountForItemByIds(
 				it.getEntityId(),
 				invoiceLevelId,
-				rootEntity.getDiscountIds()
+				discountIds
 		);
 
 		if (best.isEmpty()) return;
@@ -1314,7 +1383,8 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			UUID parentId,
 			UUID itemTypeId,
 			LocalDate startDate,
-			boolean prorateEnabled
+			boolean prorateEnabled,
+			Entity lineContextParent
 	) {
 		InvoiceEntityDTO line = new InvoiceEntityDTO();
 		System.out.println("buildItemLineFromPayload");
@@ -1324,11 +1394,12 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 		line.setEntityId(it.getEntityId());
 		line.setEntityTypeId(itemTypeId);
-		line.setEntityDescription("Item");
+		line.setEntityDescription(StringUtils.hasText(it.getEntityName()) ? it.getEntityName() : "Item");
 
 		line.setPricePlanTemplateId(it.getPricePlanTemplateId());
 		line.setPriceBands(it.getPriceBands());
-		line.setContractStartDate(startDate);
+		LocalDate lineStart = it.getStartDate() != null ? it.getStartDate() : startDate;
+		line.setContractStartDate(lineStart);
 
 		// quantity set OUTSIDE
 		line.setQuantity(1);
@@ -1391,13 +1462,73 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		line.setDiscountAmount(BigDecimal.ZERO);
 		line.setTaxAmount(BigDecimal.ZERO);
 		line.setUpsellItem(Boolean.TRUE.equals(it.getUpsellItem()));
+		applyBillingLineContext(line, it, lineContextParent);
 		return line;
+	}
+
+	/**
+	 * Copies subscription / ancillary billing context from the request onto a leaf line.
+	 * {@link Item} overrides {@link Entity} defaults when both are set.
+	 */
+	private void applyBillingLineContext(InvoiceEntityDTO line, Item it, Entity parent) {
+		if (line == null || it == null) {
+			return;
+		}
+		line.setBillingScheduleId(firstUuid(it.getBillingScheduleId(),
+				parent != null ? parent.getBillingScheduleId() : null));
+		line.setSubscriptionInstanceId(firstUuid(it.getSubscriptionInstanceId(),
+				parent != null ? parent.getSubscriptionInstanceId() : null));
+		line.setCycleNumber(firstInt(it.getCycleNumber(),
+				parent != null ? parent.getCycleNumber() : null));
+		line.setServicePeriodStart(firstDate(it.getServicePeriodStart(),
+				parent != null ? parent.getServicePeriodStart() : null));
+		line.setServicePeriodEnd(firstDate(it.getServicePeriodEnd(),
+				parent != null ? parent.getServicePeriodEnd() : null));
+		UUID kindId = it.getChargeLineKindId();
+		if (kindId == null && parent != null) {
+			kindId = parent.getChargeLineKindId();
+		}
+		if (kindId == null) {
+			String code = StringUtils.hasText(it.getChargeLineKindCode()) ? it.getChargeLineKindCode()
+					: (parent != null && StringUtils.hasText(parent.getChargeLineKindCode())
+							? parent.getChargeLineKindCode() : null);
+			if (StringUtils.hasText(code)) {
+				kindId = transactionDAO.findChargeLineKindIdByCode(code.trim()).orElse(null);
+			}
+		}
+		line.setChargeLineKindId(kindId);
+	}
+
+	private static UUID firstUuid(UUID a, UUID b) {
+		return a != null ? a : b;
+	}
+
+	private static Integer firstInt(Integer a, Integer b) {
+		return a != null ? a : b;
+	}
+
+	private static LocalDate firstDate(LocalDate a, LocalDate b) {
+		return a != null ? a : b;
 	}
 
 	/** TAX: item-level only (tax on NET = gross - discount) */
 	private void computeTaxesFromItemOnly(InvoiceEntityDTO line, Item it, UUID levelId) {
 
 		System.out.println("computeTaxesFromItemOnly(net)");
+
+		if (it != null && it.getTaxAmount() != null) {
+			BigDecimal amt = scale2(nz(it.getTaxAmount()));
+			line.setTaxAmount(amt);
+			List<InvoiceEntityTaxDTO> clientTaxes = new ArrayList<>();
+			if (it.getTaxPct() != null) {
+				InvoiceEntityTaxDTO tx = new InvoiceEntityTaxDTO();
+				tx.setTaxRate(scale2(nz(it.getTaxPct())));
+				tx.setTaxAmount(amt);
+				clientTaxes.add(tx);
+			}
+			line.setTaxes(clientTaxes);
+			return;
+		}
 
 		UUID taxGroupId = null;
 		try {
@@ -1454,6 +1585,15 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		BigDecimal sub = nz(line.getUnitPrice()).multiply(q);
 		BigDecimal total = sub.add(nz(line.getTaxAmount())).subtract(nz(line.getDiscountAmount()));
 		line.setTotalAmount(scale2(total));
+	}
+
+	private UUID requireEntityTypeId(String entityTypeName) {
+		try {
+			return transactionDAO.findEntityTypeIdByName(entityTypeName);
+		} catch (EmptyResultDataAccessException e) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+					"Missing or inactive lu_entity_type row for: " + entityTypeName, e);
+		}
 	}
 
 	private static int def(Integer n, int d) {
@@ -1658,7 +1798,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		}
 
 		Entity root = new Entity();
-		root.setEntityTypeId(transactionDAO.findEntityTypeIdByName("Item"));
+		root.setEntityTypeId(requireEntityTypeId("Item"));
 		LocalDate startDate = billingDate
 		        .plusMonths(1)
 		        .withDayOfMonth(1);
@@ -1674,6 +1814,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 		InvoiceRequest req = new InvoiceRequest();
 		req.setClientRoleId(seed.clientRoleId());
+		req.setLevelId(seed.levelId());
 		req.setBillingAddress(seed.billingAddress());
 		req.setCreatedBy(createdBy);
 		req.setEntities(List.of(root));

@@ -6,6 +6,7 @@ import java.util.NoSuchElementException;
 import java.util.UUID;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
+import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -16,6 +17,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import io.clubone.transaction.response.CreateInvoiceResponse;
 import io.clubone.transaction.response.InvoiceDetailResponse;
+import io.clubone.transaction.response.InvoiceFullDetailResponse;
 import io.clubone.transaction.service.InvoiceService;
 import io.clubone.transaction.service.TransactionServicev2;
 import io.clubone.transaction.v2.vo.FutureInvoiceRequestDTO;
@@ -52,13 +54,33 @@ public class TransactionControllerV2 {
 	@GetMapping("/{invoiceId}/detail")
 	public ResponseEntity<?> getInvoiceDetail(@PathVariable UUID invoiceId) {
 		try {
-			InvoiceDetailDTO dto = transactionService.getInvoiceDetail(invoiceId);
-			return ResponseEntity.ok(dto);
+			return ResponseEntity.ok(transactionService.getInvoiceDetail(invoiceId));
 		} catch (NoSuchElementException e) {
 			return ResponseEntity.notFound().build();
-		} catch (Exception e) {
-			return ResponseEntity.status(500).body(e.getMessage());
 		}
+	}
+
+	/**
+	 * Full invoice payload (header + line items + all transactions) by id or invoice number.
+	 * Provide exactly one of {@code invoiceId} or {@code invoiceNumber}.
+	 */
+	@GetMapping("/invoice/full")
+	public ResponseEntity<?> getInvoiceFullDetail(@RequestParam(required = false) UUID invoiceId,
+			@RequestParam(required = false) String invoiceNumber) {
+		boolean hasId = invoiceId != null;
+		boolean hasNum = StringUtils.hasText(invoiceNumber);
+		if (!hasId && !hasNum) {
+			return ResponseEntity.badRequest().body("Provide invoiceId or invoiceNumber");
+		}
+		if (hasId && hasNum) {
+			return ResponseEntity.badRequest().body("Provide only one of invoiceId or invoiceNumber");
+		}
+		InvoiceFullDetailResponse body = invoiceService.getInvoiceFullDetail(invoiceId,
+				hasNum ? invoiceNumber.trim() : null);
+		if (body == null || body.getInvoice() == null) {
+			return ResponseEntity.notFound().build();
+		}
+		return ResponseEntity.ok(body);
 	}
 
 	@GetMapping("/{invoiceId}")

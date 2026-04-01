@@ -37,6 +37,13 @@ public interface TransactionDAO {
 
 	UUID findClientPaymentTxnIdByTransactionId(UUID transactionId);
 
+	/**
+	 * Resolves {@code transactions.lu_invoice_status.invoice_status_id} by {@code status_name}
+	 * (e.g. {@code PENDING}, {@code PAID}, {@code CANCELLED}). Match is case-insensitive; only active rows.
+	 *
+	 * @throws IllegalArgumentException if {@code statusName} is null or blank
+	 * @throws IllegalStateException if no matching active status exists
+	 */
 	UUID findInvoiceStatusIdByName(String statusName);
 
 	void updateInvoiceStatusAndPaidFlag(UUID invoiceId, UUID statusId, boolean paid, UUID modifiedBy);
@@ -108,6 +115,16 @@ public interface TransactionDAO {
 
 	String findFrequencyNameForPlanTemplate(UUID planTemplateId);   // WEEKLY/MONTHLY/QUARTERLY/YEARLY
 	Integer findIntervalCountForPlanTemplate(UUID planTemplateId);  // default 1
-	String findBillingDayText(UUID billingDayRuleId);               // from lu_subscription_billing_day_rule.billing_day (TEXT)
+	String findBillingDayText(UUID billingDayRuleId);               // from billing_config.subscription_billing_day_rule.billing_day (TEXT)
+
+	Optional<UUID> findBillingCollectionTypeIdByCode(String code);
+
+	Optional<UUID> findChargeLineKindIdByCode(String code);
+
+	/**
+	 * Resolves the {@code locations.levels.level_id} to store on {@code transactions.invoice}.
+	 * Accepts either the level PK or {@code locations.levels.reference_entity_id} (what clients often send).
+	 */
+	Optional<UUID> resolveLevelIdForInvoice(UUID levelIdOrReferenceEntityId);
 
 }

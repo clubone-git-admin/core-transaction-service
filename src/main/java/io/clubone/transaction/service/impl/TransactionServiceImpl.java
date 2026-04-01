@@ -101,8 +101,7 @@ public class TransactionServiceImpl implements TransactionService {
 		invoice.setInvoiceDate(Timestamp.from(now));
 		invoice.setClientRoleId(request.getClientRoleId());
 		invoice.setBillingAddress(request.getBillingAddress());
-		invoice.setInvoiceStatusId(UUID.fromString("b1ee960e-9966-4f2b-9596-88110158948c")); // Use constant or fetch
-																								// from DB
+		invoice.setInvoiceStatusId(transactionDAO.findInvoiceStatusIdByName("PENDING"));
 		invoice.setSubTotal(request.getSubTotal());
 		invoice.setTaxAmount(request.getTaxAmount());
 		invoice.setDiscountAmount(request.getDiscountAmount());
@@ -159,7 +158,7 @@ public class TransactionServiceImpl implements TransactionService {
 	@Transactional
 	public CreateInvoiceResponse createInvoice(CreateInvoiceRequest req) {
 
-		req.setInvoiceStatusId(UUID.fromString("b1ee960e-9966-4f2b-9596-88110158948c"));
+		req.setInvoiceStatusId(transactionDAO.findInvoiceStatusIdByName("PENDING"));
 		// Validate totals vs line items
 		BigDecimal lineSum = req.getLineItems().stream().map(TransactionLineItemRequest::getTotalAmount)
 				.filter(Objects::nonNull) // ignore nulls
@@ -194,7 +193,7 @@ public class TransactionServiceImpl implements TransactionService {
 		UUID invoiceId = transactionDAO.saveInvoice(inv);
 		String invoiceNumber = transactionDAO.findInvoiceNumber(invoiceId);
 
-		return new CreateInvoiceResponse(invoiceId, invoiceNumber, "PENDING_PAYMENT");
+		return CreateInvoiceResponse.basic(invoiceId, invoiceNumber, "PENDING_PAYMENT");
 	}
 
 	@Override
@@ -333,7 +332,7 @@ public class TransactionServiceImpl implements TransactionService {
 	@Override
 	public CreateInvoiceResponse createInvoiceV3(CreateInvoiceRequestV3 req) {
 
-		req.setInvoiceStatusId(UUID.fromString("b1ee960e-9966-4f2b-9596-88110158948c"));
+		req.setInvoiceStatusId(transactionDAO.findInvoiceStatusIdByName("PENDING"));
 		UUID itemEntityTypeId = transactionDAO.findEntityTypeIdByName("Item");
 		UUID bundleEntityTypeId = transactionDAO.findEntityTypeIdByName("Bundle");
 		System.out.println("Bundle Entity type Id " + bundleEntityTypeId);
@@ -507,7 +506,7 @@ public class TransactionServiceImpl implements TransactionService {
 		UUID invoiceId = transactionDAO.saveInvoiceV3(inv);
 		String invoiceNumber = transactionDAO.findInvoiceNumber(invoiceId);
 
-		return new CreateInvoiceResponse(invoiceId, invoiceNumber, "PENDING_PAYMENT");
+		return CreateInvoiceResponse.basic(invoiceId, invoiceNumber, "PENDING_PAYMENT");
 	}
 
 	@Override

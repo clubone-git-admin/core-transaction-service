@@ -22,8 +22,7 @@ public interface SubscriptionBillingDAO {
 
 	Optional<String> getFrequencyNameById(UUID subscriptionFrequencyId);
 
-	Optional<String> getBillingDayRuleValue(UUID subscriptionBillingDayRuleId); // returns
-																				// lu_subscription_billing_day_rule.billing_day
+	Optional<String> getBillingDayRuleValue(UUID subscriptionBillingDayRuleId); // billing_config.subscription_billing_day_rule.billing_day
 
 	UUID getSubscriptionInstanceStatusIdByName(String statusName);
 	

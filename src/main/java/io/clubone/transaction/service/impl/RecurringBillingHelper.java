@@ -31,9 +31,9 @@ public class RecurringBillingHelper {
      * @param entityTypeId        FK -> transaction.lu_entity_type (e.g., "Item" or "Bundle")
      * @param clientPaymentMethodId payment method to charge
      * @param amount              amount per cycle
-     * @param subscriptionFrequencyId FK -> lu_subscription_frequency
+     * @param subscriptionFrequencyId FK -> billing_config.billing_period_unit (billing_period_unit_id)
      * @param intervalCount       e.g., 1 (every month), 2 (every 2 months)
-     * @param subscriptionBillingDayRuleId FK -> lu_subscription_billing_day_rule (may define day-of-month/weekday)
+     * @param subscriptionBillingDayRuleId FK -> billing_config.subscription_billing_day_rule
      * @param invoiceId           the invoice created for the first charge
      * @param createdBy           user performing the operation
      * @param invoiceDate         when the first billing occurs
