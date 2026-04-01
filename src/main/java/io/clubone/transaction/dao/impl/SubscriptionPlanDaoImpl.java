@@ -145,9 +145,10 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 		        schedule_status,
 		        is_active,
 		        created_on,
-		        created_by
+		        created_by,
+		        schedule_status_id
 		    )
-		    VALUES (?, ?, ?, ?, 'PENDING', true, now(), ?)
+		    VALUES (?, ?, ?, ?, 'PENDING', true, now(), ?,?)
 		    RETURNING subscription_invoice_schedule_id
 		""";
 
@@ -885,6 +886,7 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 	                } else {
 	                    ps.setNull(i++, Types.OTHER);  // if no created_by, pass NULL
 	                }
+	                ps.setObject(i++, UUID.fromString("a36d4159-77e5-43e4-8156-29b3a402af4f"));
 
 	                return ps;
 	            },
@@ -900,8 +902,5 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 	        throw ex;
 	    }
 	}
-
-
-
 
 }

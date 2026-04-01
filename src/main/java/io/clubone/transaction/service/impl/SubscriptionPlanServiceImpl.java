@@ -26,6 +26,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
 import io.clubone.transaction.dao.EntityLookupDao;
 import io.clubone.transaction.dao.SubscriptionPlanDao;
@@ -85,6 +86,7 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 		// 1) Insert plan
 		UUID planId = dao.insertSubscriptionPlan(request, createdBy);
 		ObjectMapper mapper = new ObjectMapper();
+		mapper.registerModule(new JavaTimeModule());
 		try {
 			System.out.println("Recod " + mapper.writeValueAsString(request.getCyclePrices()));
 			System.out.println("ClientAgreementId " + request.getClientAgreementId());
@@ -105,6 +107,13 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 					request.getSubscriptionPlanPromos());
 		}
 
+		try {
+			System.out.println("request.getTerm() "+mapper.writeValueAsString(request.getTerm()));
+			System.out.println("request.getCyclePrices() "+mapper.writeValueAsString(request.getCyclePrices()));
+		} catch (JsonProcessingException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
 		if (request.getTerm() != null && request.getCyclePrices() != null && !request.getCyclePrices().isEmpty()) {
 
 			LocalDate start = request.getContractStartDate();

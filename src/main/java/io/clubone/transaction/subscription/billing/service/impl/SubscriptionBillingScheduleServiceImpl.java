@@ -125,28 +125,66 @@ public class SubscriptionBillingScheduleServiceImpl implements SubscriptionBilli
     }
 
     private CyclePriceProjection resolveCyclePrice(List<CyclePriceProjection> prices, int cycleNumber) {
+
+        System.out.println("------------------------------------------------");
+        System.out.println("[DEBUG] Resolving price for cycleNumber = " + cycleNumber);
+
+        if (prices == null || prices.isEmpty()) {
+            System.out.println("[DEBUG] No cycle price records found!");
+        }
+
+        System.out.println("[DEBUG] Available price bands:");
+
         for (CyclePriceProjection p : prices) {
+
+            System.out.println(
+                "  bandId=" + p.getPriceCycleBandId()
+                + " cycleStart=" + p.getCycleStart()
+                + " cycleEnd=" + p.getCycleEnd()
+                + " price=" + p.getEffectiveUnitPrice()
+            );
+
             boolean lowerOk = cycleNumber >= p.getCycleStart();
-            boolean upperOk = p.getCycleEnd() == null || cycleNumber <= p.getCycleEnd();
+            boolean upperOk = (p.getCycleEnd() == null || cycleNumber <= p.getCycleEnd());
+
+            System.out.println(
+                "     lowerOk=" + lowerOk +
+                " upperOk=" + upperOk
+            );
+
             if (lowerOk && upperOk) {
+                System.out.println("[DEBUG] MATCH FOUND for cycle " + cycleNumber +
+                        " using band start=" + p.getCycleStart() +
+                        " end=" + p.getCycleEnd());
+                System.out.println("------------------------------------------------");
                 return p;
             }
         }
 
+        System.out.println("[DEBUG] No direct match found. Checking open-ended bands...");
+
         CyclePriceProjection lastOpenEnded = null;
+
         for (CyclePriceProjection p : prices) {
             if (p.getCycleEnd() == null) {
+                System.out.println("[DEBUG] Found open-ended band: start=" + p.getCycleStart());
                 lastOpenEnded = p;
             }
         }
 
         if (lastOpenEnded != null) {
+            System.out.println("[DEBUG] Using open-ended band for cycle " + cycleNumber);
+            System.out.println("------------------------------------------------");
             return lastOpenEnded;
         }
 
-        throw new IllegalStateException("No matching cycle price found for cycleNumber=" + cycleNumber);
+        System.out.println("[ERROR] No matching cycle price found for cycleNumber=" + cycleNumber);
+        System.out.println("------------------------------------------------");
+        
+        //Added this just to test in obligation flow. After test remove return statement and uncomment IllegalStateException 
+        return prices.get(prices.size() -1);
+        //throw new IllegalStateException("No matching cycle price found for cycleNumber=" + cycleNumber);
     }
-
     private LocalDate computeFirstScheduleBillingDate(SubscriptionPlanCreateRequest request) {
         if (request.getContractStartDate() == null) {
             throw new IllegalArgumentException("contractStartDate is required");

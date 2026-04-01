@@ -11,6 +11,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.util.CollectionUtils;
 
 import io.clubone.transaction.dao.InvoiceEntityPromotionDAO;
 import io.clubone.transaction.dao.SubscriptionPlanDao;
@@ -355,9 +356,13 @@ ORDER BY contract_start_date, invoice_entity_id;
 
 			// optional children
 			List<CyclePriceDTO> cyclePrices=fetchCyclePrices(r.invoiceEntityId);
+			if(!CollectionUtils.isEmpty(cyclePrices) && cyclePrices.size()==1) {
+				req.setCyclePrices(cyclePrices);
+			}else {
 			req.setCyclePrices(cyclePrices.stream()
 					.filter(cp -> cp.getDownPaymentUnits() == null || cp.getDownPaymentUnits() == 0)
 					.collect(Collectors.toList()));
+			}
 			//req.setDiscountCodes(fetchDiscounts(r.invoiceEntityId));
 			req.setEntitlements(fetchEntitlements(r.invoiceEntityId));
 			// req.setPromos(...);
