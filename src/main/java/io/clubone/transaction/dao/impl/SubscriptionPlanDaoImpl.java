@@ -95,12 +95,12 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 			""";
 
 	private static final String SQL_BILLING_DAY_RULE = """
-			    SELECT sf.frequency_name, sdr.billing_day
-			    FROM client_subscription_billing.lu_subscription_billing_day_rule sdr
-			    JOIN client_subscription_billing.lu_subscription_frequency sf
-			      ON sf.subscription_frequency_id = sdr.subscription_frequency_id
+			    SELECT COALESCE(sf.code, sf.display_name) AS frequency_name, sdr.billing_day
+			    FROM billing_config.subscription_billing_day_rule sdr
+			    JOIN billing_config.billing_period_unit sf
+			      ON sf.billing_period_unit_id = sdr.subscription_frequency_id
 			    WHERE sdr.subscription_billing_day_rule_id = ?
-			      AND (?::uuid IS NULL OR sf.subscription_frequency_id = ?::uuid)
+			      AND (?::uuid IS NULL OR sf.billing_period_unit_id = ?::uuid)
 			      AND COALESCE(sf.is_active,  true) = true
 			      AND COALESCE(sdr.is_active, true) = true
 			    LIMIT 1
@@ -564,7 +564,7 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 				  sp.entity_type_id,
 
 				  -- frequency
-				  lf.frequency_name,
+				  COALESCE(lf.code, lf.display_name) AS frequency_name,
 
 				  -- terms
 				  COALESCE(spt.remaining_cycles, 0)             AS remaining_cycles,
@@ -608,8 +608,8 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 				  ON si.subscription_instance_id = sbh.subscription_instance_id
 				LEFT JOIN client_subscription_billing.subscription_plan sp
 				  ON sp.subscription_plan_id = si.subscription_plan_id
-				LEFT JOIN client_subscription_billing.lu_subscription_frequency lf
-				  ON lf.subscription_frequency_id = sp.subscription_frequency_id
+				LEFT JOIN billing_config.billing_period_unit lf
+				  ON lf.billing_period_unit_id = sp.subscription_frequency_id
 
 				-- latest plan term (if any)
 				LEFT JOIN LATERAL (

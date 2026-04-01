@@ -13,9 +13,11 @@ public class Entity {
 	private String entityType;
 	private UUID entityTypeId;
 	private UUID entityId;
+	/** Display / description hint (e.g. agreement title from FE). */
+	private String entityName;
 	private LocalDate startDate;
 	private Integer quantity;
-	List<UUID> discountIds;
+	private List<UUID> discountIds;
 	private UUID promotionId;
 	private List<Bundle> bundles; // Only if type == "agreement"
 	private List<Item> items; // For type == "bundle" or "agreement"
@@ -26,5 +28,14 @@ public class Entity {
 	private UUID clientAgreementId;
 	private List<InvoiceEntityTaxDTO> taxes;
 	private List<InvoiceEntityDiscountDTO> discounts;
+
+	/** Defaults for leaf lines under this entity (each {@link Item} can override). */
+	private UUID billingScheduleId;
+	private UUID subscriptionInstanceId;
+	private Integer cycleNumber;
+	private LocalDate servicePeriodStart;
+	private LocalDate servicePeriodEnd;
+	private String chargeLineKindCode;
+	private UUID chargeLineKindId;
 
 }

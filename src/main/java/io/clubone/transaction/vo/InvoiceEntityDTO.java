@@ -34,5 +34,15 @@ public class InvoiceEntityDTO {
 	private List<InvoiceEntityPriceBandDTO> priceBands;
 	private List<InvoiceEntityPromotionDTO> promotions;
 
-	
+	private UUID billingScheduleId;
+	private UUID subscriptionInstanceId;
+	private Integer cycleNumber;
+	private LocalDate servicePeriodStart;
+	private LocalDate servicePeriodEnd;
+	private UUID chargeLineKindId;
+	/** From lu_charge_line_kind when line has charge_line_kind_id */
+	private String chargeLineKindCode;
+	private String chargeLineKindName;
+	private UUID entityVersionId;
+
 }

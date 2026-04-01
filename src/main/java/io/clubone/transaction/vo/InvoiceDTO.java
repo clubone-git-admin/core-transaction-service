@@ -23,5 +23,10 @@ public class InvoiceDTO {
     private UUID levelId;
     private UUID createdBy;
     private UUID clientAgreementId;
+    private UUID billingRunId;
+    private UUID billingCollectionTypeId;
+    /** From lu_billing_collection_type when header has billing_collection_type_id */
+    private String billingCollectionTypeCode;
+    private String billingCollectionTypeName;
     private List<InvoiceEntityDTO> lineItems;
 }

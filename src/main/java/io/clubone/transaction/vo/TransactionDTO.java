@@ -14,6 +14,8 @@ public class TransactionDTO {
     private UUID invoiceId;
     private String transactionCode;
     private Timestamp transactionDate;
+    /** Posted subscription billing history row, when payment ties to a cycle */
+    private UUID subscriptionBillingHistoryId;
     private List<TransactionEntityDTO> lineItems;
     private UUID createdBy;
 }

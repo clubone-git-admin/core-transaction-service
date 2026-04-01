@@ -78,11 +78,11 @@ public class SubscriptionPlanHelper {
         ie.client_agreement_id,
         a.agreement_term_id,
 
-        ppt.subscription_billing_day_rule_id,
-        ppt.subscription_frequency_id,
-        COALESCE(ppt.interval_count, 1) AS interval_count,
-        ppt.total_cycles,
-        sf.frequency_name AS subscription_frequency_name,
+        ppt_term.subscription_billing_day_rule_id,
+        lpt.billing_period_unit_id AS subscription_frequency_id,
+        COALESCE(ppt_term.interval_count, 1) AS interval_count,
+        ppt_term.total_cycles,
+        COALESCE(sf.code, sf.display_name) AS subscription_frequency_name,
         i.level_id,
         at.duration_value        AS term_duration_value,
         ut.code                  AS term_duration_unit_code,
@@ -94,22 +94,22 @@ public class SubscriptionPlanHelper {
                 ie.client_agreement_id,
                 ie.entity_id,
                 a.agreement_term_id,
-                ppt.subscription_billing_day_rule_id,
-                ppt.subscription_frequency_id
+                ppt_term.subscription_billing_day_rule_id,
+                lpt.billing_period_unit_id
         ) AS current_cycle,
 
         -- ✅ remaining = total_cycles - count(rows)
         CASE
-            WHEN ppt.total_cycles IS NULL THEN NULL
+            WHEN ppt_term.total_cycles IS NULL THEN NULL
             ELSE GREATEST(
-                ppt.total_cycles
+                ppt_term.total_cycles
                 - COUNT(*) OVER (
                     PARTITION BY
                         ie.client_agreement_id,
                         ie.entity_id,
                         a.agreement_term_id,
-                        ppt.subscription_billing_day_rule_id,
-                        ppt.subscription_frequency_id
+                        ppt_term.subscription_billing_day_rule_id,
+                        lpt.billing_period_unit_id
                 ),
                 0
             )
@@ -120,8 +120,8 @@ public class SubscriptionPlanHelper {
                 ie.client_agreement_id,
                 ie.entity_id,
                 a.agreement_term_id,
-                ppt.subscription_billing_day_rule_id,
-                ppt.subscription_frequency_id
+                ppt_term.subscription_billing_day_rule_id,
+                lpt.billing_period_unit_id
             ORDER BY
                 (ie.contract_start_date + INTERVAL '1 month')::date ASC,
                 ie.contract_start_date DESC,
@@ -135,8 +135,10 @@ public class SubscriptionPlanHelper {
       ON t.invoice_id = i.invoice_id
     JOIN package.package_plan_template ppt
       ON ppt.package_plan_template_id = ie.price_plan_template_id
-    JOIN client_subscription_billing.lu_subscription_frequency sf
-      ON sf.subscription_frequency_id = ppt.subscription_frequency_id
+    JOIN package.lu_plan_template lpt
+      ON lpt.lu_plan_template_id = ppt.lu_plan_template_id
+    JOIN billing_config.billing_period_unit sf
+      ON sf.billing_period_unit_id = lpt.billing_period_unit_id
 
     LEFT JOIN client_agreements.client_agreement ca
       ON ca.client_agreement_id = ie.client_agreement_id
@@ -146,6 +148,17 @@ public class SubscriptionPlanHelper {
       ON at.agreement_term_id = a.agreement_term_id
     LEFT JOIN agreements.lu_duration_unit_type ut
       ON ut.duration_unit_type_id = at.duration_unit_type_id
+    LEFT JOIN LATERAL (
+      SELECT tc.subscription_billing_day_rule_id,
+             tc.interval_count,
+             tc.total_cycles
+      FROM package.package_plan_template_term_config tc
+      WHERE tc.package_plan_template_id = ppt.package_plan_template_id
+        AND COALESCE(tc.is_active, true) = true
+        AND (at.agreement_term_id IS NULL OR tc.agreement_term_id = at.agreement_term_id)
+      ORDER BY tc.created_on DESC NULLS LAST, tc.package_plan_template_term_config_id
+      LIMIT 1
+    ) ppt_term ON TRUE
 
     JOIN items.item it
       ON it.item_id = ie.entity_id
@@ -160,7 +173,7 @@ public class SubscriptionPlanHelper {
       AND COALESCE(sf.is_active, true) = true
       AND COALESCE(it.is_active, true) = true
       AND COALESCE(ig.is_active, true) = true
-      AND ppt.subscription_frequency_id IS NOT NULL
+      AND lpt.billing_period_unit_id IS NOT NULL
       AND ig.code <> 'FEE'
 )
 SELECT
@@ -294,12 +307,15 @@ ORDER BY contract_start_date, invoice_entity_id;
 				      COALESCE(e.is_unlimited, false) AS is_unlimited,
 				      e.max_redemptions_per_day
 				    FROM package.package_plan_template_entitlement e
+				    JOIN package.package_plan_template_term_config tc
+				      ON tc.package_plan_template_term_config_id = e.package_plan_template_term_config_id
 				    JOIN package.package_plan_template bpt
-				      ON bpt.package_plan_template_id = e.package_plan_template_id
+				      ON bpt.package_plan_template_id = tc.package_plan_template_id
 				    JOIN "transactions".invoice_entity ie
-				      ON ie.price_plan_template_id = e.package_plan_template_id
+				      ON ie.price_plan_template_id = bpt.package_plan_template_id
 				    WHERE ie.invoice_entity_id = ?
 				      AND COALESCE(bpt.is_active, true) = true
+				      AND COALESCE(tc.is_active, true) = true
 				    ORDER BY e.created_on
 				""";
 
