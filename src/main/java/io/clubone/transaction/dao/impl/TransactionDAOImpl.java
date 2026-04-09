@@ -34,7 +34,6 @@ import io.clubone.transaction.v2.vo.CycleBandRef;
 import io.clubone.transaction.v2.vo.DiscountDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailRaw;
-import io.clubone.transaction.v2.vo.InvoiceEntityDiscountDTO;
 import io.clubone.transaction.v2.vo.InvoiceEntityPriceBandDTO;
 import io.clubone.transaction.v2.vo.InvoiceEntityPromotionDTO;
 import io.clubone.transaction.v2.vo.PaymentTimelineItemDTO;
@@ -129,7 +128,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 			JOIN finance.tax_rate_allocation tra
 			  ON tra.tax_rate_id = tr.tax_rate_id
 			WHERE tr.tax_group_id = ?
-			  AND tr.level_id = '9dcc30ea-e4cd-49b4-8e47-3e9bd8a5de0e'
+			  AND tr.level_id = ?
 			""";
 
 	private static final String BUNDLE_PRICE_BAND_SQL = "SELECT unit_price, down_payment_units FROM package.package_price_cycle_band WHERE package_price_cycle_band_id = ?";
@@ -250,16 +249,17 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    client_agreement_id,
 				    billing_run_id,
 				    billing_collection_type_id,
-				    created_on
+				    created_on,
+				    created_by
 				) VALUES (
-				    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW()
+				    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?
 				);
 								""";
 
 		cluboneJdbcTemplate.update(insertInvoiceSql, invoiceId, dto.getInvoiceNumber(), dto.getInvoiceDate(),
 				dto.getClientRoleId(), dto.getLevelId(), dto.getBillingAddress(), dto.getInvoiceStatusId(), totalSum,
 				subtotal, taxSum, discountSum, Boolean.TRUE.equals(dto.isPaid()), dto.getClientAgreementId(),
-				dto.getBillingRunId(), dto.getBillingCollectionTypeId());
+				dto.getBillingRunId(), dto.getBillingCollectionTypeId(), dto.getCreatedBy());
 
 		// 2) Resolve BUNDLE type id once (for parent/child grouping)
 		UUID bundleTypeId = cluboneJdbcTemplate.queryForObject(
@@ -274,9 +274,9 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    invoice_entity_id, parent_invoice_entity_id, invoice_id,
 				    entity_type_id, entity_id, entity_description,
 				    quantity, unit_price, discount_amount, tax_amount, total_amount,
-				    created_on, created_by, price_plan_template_id, contract_start_date, client_agreement_id,
+				    created_on, created_by, price_plan_template_id, client_agreement_id,
 				    billing_schedule_id, subscription_instance_id, cycle_number,
-				    service_period_start, service_period_end, charge_line_kind_id
+				    service_period_start, service_period_end, charge_line_kind_id, entity_version_id
 				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				""";
 
@@ -286,14 +286,6 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    invoice_entity_tax_id, invoice_entity_id, tax_rate_id, tax_rate_percentage, tax_amount,
 				    created_on, created_by,tax_rate_allocation_id
 				) VALUES (?, ?, ?, ?, ?, NOW(), ?,?)
-				""";
-
-		// [NEW] 5) Insert discounts per entity
-		final String insertDiscountSql = """
-				INSERT INTO transactions.invoice_entity_discount (
-				    invoice_entity_discount_id, invoice_entity_id, discount_id, discount_amount,
-				    adjustment_type_id, calculation_type_id, is_active, created_on, created_by
-				) VALUES (?, ?, ?, ?, ?, ?, true, NOW(), ?)
 				""";
 
 		// 5b) Insert price bands per entity (after invoice_entity insert)
@@ -336,10 +328,11 @@ public class TransactionDAOImpl implements TransactionDAO {
 			cluboneJdbcTemplate.update(insertEntitySql, ieId, parentId, invoiceId, li.getEntityTypeId(),
 					li.getEntityId(), li.getEntityDescription(), li.getQuantity(), li.getUnitPrice(),
 					li.getDiscountAmount(), li.getTaxAmount(), li.getTotalAmount(),
-					dto.getCreatedBy(), li.getPricePlanTemplateId(), li.getContractStartDate(),
+					dto.getCreatedBy(), li.getPricePlanTemplateId(),
 					li.getClientAgreementId(),
 					li.getBillingScheduleId(), li.getSubscriptionInstanceId(), li.getCycleNumber(),
-					li.getServicePeriodStart(), li.getServicePeriodEnd(), li.getChargeLineKindId());
+					li.getServicePeriodStart(), li.getServicePeriodEnd(), li.getChargeLineKindId(),
+					li.getEntityVersionId());
 
 			if (isBundleHeader) {
 				lastBundleHeaderId = ieId;
@@ -357,25 +350,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 				}
 			}
 
-			// [NEW] Insert discounts (each applied discount row)
-			if (li.getDiscounts() != null && !li.getDiscounts().isEmpty()) {
-				for (InvoiceEntityDiscountDTO d : li.getDiscounts()) {
-					UUID iedId = UUID.randomUUID();
-
-					// Defensive: ensure mandatory FKs are present
-					UUID discountId = d.getDiscountId();
-					BigDecimal discountAmt = d.getDiscountAmount() == null ? BigDecimal.ZERO : d.getDiscountAmount();
-					UUID adjustmentTypeId = d.getAdjustmentTypeId(); // must exist in discount.lu_adjustment_type
-					UUID calculationTypeId = d.getCalculationTypeId(); // must exist in discount.lu_calculation_type
-
-					// You can add validations here if needed:
-					// Objects.requireNonNull(discountId, "discountId is required on
-					// InvoiceEntityDiscountDTO");
-
-					cluboneJdbcTemplate.update(insertDiscountSql, iedId, ieId, discountId, discountAmt,
-							adjustmentTypeId, calculationTypeId, dto.getCreatedBy());
-				}
-			}
+			// Discount amounts are stored on invoice_entity.discount_amount; no separate discount line table.
 
 			// [NEW] Insert price bands tied to this invoice_entity line
 			if (li.getPriceBands() != null && !li.getPriceBands().isEmpty()) {
@@ -736,7 +711,10 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 	@Override
 	public List<TaxRateAllocationDTO> getTaxRatesByGroupAndLevel(UUID taxGroupId, UUID levelId) {
-		return cluboneJdbcTemplate.query(TAX_RATE_SQL, TAX_RATE_ROW_MAPPER, taxGroupId);
+		if (taxGroupId == null || levelId == null) {
+			return Collections.emptyList();
+		}
+		return cluboneJdbcTemplate.query(TAX_RATE_SQL, TAX_RATE_ROW_MAPPER, taxGroupId, levelId);
 	}
 
 	@Override
@@ -1418,8 +1396,6 @@ public class TransactionDAOImpl implements TransactionDAO {
         ie.entity_id,
         ie.price_plan_template_id,
         bpcb.package_price_cycle_band_id AS price_cycle_band_id,
-        ie.contract_start_date,
-
         ROW_NUMBER() OVER (
             PARTITION BY
                 ie.parent_invoice_entity_id,
@@ -1427,7 +1403,6 @@ public class TransactionDAOImpl implements TransactionDAO {
                 ie.entity_id,
                 ie.price_plan_template_id
             ORDER BY
-                ie.contract_start_date DESC NULLS LAST,
                 ie.created_on DESC,
                 ie.invoice_entity_id DESC
         ) AS rn
@@ -1727,6 +1702,45 @@ WHERE rn = 1;
 					  AND COALESCE(is_active, true) = true
 					LIMIT 1
 					""", UUID.class, code);
+			return Optional.ofNullable(id);
+		} catch (EmptyResultDataAccessException e) {
+			return Optional.empty();
+		}
+	}
+
+	@Override
+	public Optional<UUID> findFirstActiveBillingCollectionTypeId() {
+		try {
+			UUID id = cluboneJdbcTemplate.queryForObject("""
+					SELECT billing_collection_type_id
+					FROM transactions.lu_billing_collection_type
+					WHERE COALESCE(is_active, true) = true
+					ORDER BY sort_order NULLS LAST, code
+					LIMIT 1
+					""", UUID.class);
+			return Optional.ofNullable(id);
+		} catch (EmptyResultDataAccessException e) {
+			return Optional.empty();
+		}
+	}
+
+	@Override
+	public Optional<UUID> findCurrentAgreementVersionId(UUID agreementId, LocalDate asOf) {
+		if (agreementId == null || asOf == null) {
+			return Optional.empty();
+		}
+		try {
+			UUID id = cluboneJdbcTemplate.queryForObject("""
+					SELECT av.agreement_version_id
+					FROM agreements.agreement_version av
+					WHERE av.agreement_id = ?
+					  AND COALESCE(av.is_active, true) = true
+					  AND COALESCE(av.is_published, true) = true
+					  AND CAST(av.valid_from AS date) <= CAST(? AS date)
+					  AND (av.valid_to IS NULL OR CAST(av.valid_to AS date) >= CAST(? AS date))
+					ORDER BY (av.is_current IS TRUE) DESC, av.valid_from DESC
+					LIMIT 1
+		""", UUID.class, agreementId, asOf, asOf);
 			return Optional.ofNullable(id);
 		} catch (EmptyResultDataAccessException e) {
 			return Optional.empty();

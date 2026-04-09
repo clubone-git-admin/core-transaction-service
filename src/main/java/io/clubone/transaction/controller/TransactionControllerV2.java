@@ -108,8 +108,8 @@ public class TransactionControllerV2 {
 	    int cycleNumber = body.getCycleNumber();
 	    LocalDate billingDate = body.getBillingDate() != null ? body.getBillingDate() : LocalDate.now();
 
-	    CreateInvoiceResponse resp =
-	        transactionService.createFutureInvoice(invoiceId, cycleNumber, billingDate, actorId,clientAgreementId);
+	    CreateInvoiceResponse resp = transactionService.createFutureInvoice(invoiceId, cycleNumber, billingDate,
+			    actorId, clientAgreementId, body.getApplicationId(), body.getLevelId());
 
 	    return ResponseEntity.ok(resp);
 	  }

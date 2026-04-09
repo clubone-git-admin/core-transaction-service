@@ -19,7 +19,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.BadSqlGrammarException;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -158,8 +160,13 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 			UUID seedInvoiceId = request.getInvoiceId();
 
 			if (seedInvoiceId != null) {
+				if (request.getApplicationId() == null || request.getLevelId() == null) {
+					throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+							"applicationId and levelId are required when invoiceId is set (future invoice)");
+				}
 				CreateInvoiceResponse futureInvResp = tranServiceV2.createFutureInvoice(seedInvoiceId, cycleNumber,
-						billingDate, createdBy, request.getClientAgreementId());
+						billingDate, createdBy, request.getClientAgreementId(), request.getApplicationId(),
+						request.getLevelId());
 
 				futureInvoiceId = futureInvResp.getInvoiceId(); // ✅ use new invoice id
 				System.out.println(

@@ -35,6 +35,8 @@ public class SubscriptionPlanCreateRequest {
 	
 	private UUID invoiceId;
 	private UUID levelId;
+	/** Required when {@link #invoiceId} is set (future invoice uses this with levelId). */
+	private UUID applicationId;
 
 	// Children (all optional lists)
 	private List<CyclePriceDTO> cyclePrices;
@@ -175,6 +177,14 @@ public class SubscriptionPlanCreateRequest {
 
 	public void setLevelId(UUID levelId) {
 		this.levelId = levelId;
+	}
+
+	public UUID getApplicationId() {
+		return applicationId;
+	}
+
+	public void setApplicationId(UUID applicationId) {
+		this.applicationId = applicationId;
 	}
 
 	public UUID getClientAgreementId() {

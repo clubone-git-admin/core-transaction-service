@@ -11,9 +11,6 @@ import lombok.Data;
 @Data
 public class InvoiceRequest {
 
-	private static final UUID DEFAULT_APPLICATION_ID =
-			UUID.fromString("5949a200-82fb-4171-9001-0f77ac439011");
-
 	private UUID clientRoleId;
 	/**
 	 * Either {@code locations.levels.level_id} (PK) or {@code locations.levels.reference_entity_id}
@@ -37,16 +34,12 @@ public class InvoiceRequest {
 	 */
 	private String billingCollectionTypeCode;
 
-	/** Application context for entitlements, fee lookup, promotions (defaults if omitted). */
+	/** Application context for entitlements, fee lookup, promotions (required). */
 	private UUID applicationId;
 
 	/** Optional POS / checkout metadata from the client (accepted for forward compatibility). */
 	private String currencyCode;
 	private String timezone;
 	private String availabilityTypeCode;
-
-	public UUID resolvedApplicationId() {
-		return applicationId != null ? applicationId : DEFAULT_APPLICATION_ID;
-	}
 
 }

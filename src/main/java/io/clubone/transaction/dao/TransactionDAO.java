@@ -1,6 +1,7 @@
 package io.clubone.transaction.dao;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -118,6 +119,14 @@ public interface TransactionDAO {
 	String findBillingDayText(UUID billingDayRuleId);               // from billing_config.subscription_billing_day_rule.billing_day (TEXT)
 
 	Optional<UUID> findBillingCollectionTypeIdByCode(String code);
+
+	/** Lowest sort_order active row when code-based lookup is not used. */
+	Optional<UUID> findFirstActiveBillingCollectionTypeId();
+
+	/**
+	 * Current agreement_version for an agreement as of a date (matches typical agreement_version validity window).
+	 */
+	Optional<UUID> findCurrentAgreementVersionId(UUID agreementId, LocalDate asOf);
 
 	Optional<UUID> findChargeLineKindIdByCode(String code);
 

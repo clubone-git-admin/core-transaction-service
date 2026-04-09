@@ -71,8 +71,8 @@ public class SubscriptionPlanHelper {
         ie.invoice_entity_id,
         ie.entity_id,                 -- entity_id == item_id
         ie.entity_type_id,
-        ie.contract_start_date,
-        (ie.contract_start_date + INTERVAL '1 month')::date AS contract_end_date,
+        COALESCE(ie.service_period_start, CAST(ie.created_on AS date)) AS contract_start_date,
+        (COALESCE(ie.service_period_start, CAST(ie.created_on AS date)) + INTERVAL '1 month')::date AS contract_end_date,
         i.created_by,
 
         ie.client_agreement_id,
@@ -123,8 +123,8 @@ public class SubscriptionPlanHelper {
                 ppt_term.subscription_billing_day_rule_id,
                 lpt.billing_period_unit_id
             ORDER BY
-                (ie.contract_start_date + INTERVAL '1 month')::date ASC,
-                ie.contract_start_date DESC,
+                (COALESCE(ie.service_period_start, CAST(ie.created_on AS date)) + INTERVAL '1 month')::date ASC,
+                COALESCE(ie.service_period_start, CAST(ie.created_on AS date)) DESC,
                 ie.created_on DESC,
                 ie.invoice_entity_id DESC
         ) AS rn
@@ -199,7 +199,7 @@ SELECT
     remaining_cycle
 FROM base
 WHERE rn = 1
-ORDER BY contract_start_date, invoice_entity_id;
+ORDER BY contract_start_date NULLS LAST, invoice_entity_id;
 """;
 
 	    return cluboneJdbcTemplate.query(sql, (rs, rn) -> {
@@ -281,21 +281,8 @@ ORDER BY contract_start_date, invoice_entity_id;
 	}
 
 	public List<DiscountCodeDTO> fetchDiscounts(UUID invoiceEntityId) {
-		final String sql = """
-				    SELECT discount_id, discount_amount, adjustment_type_id, calculation_type_id
-				    FROM "transactions".invoice_entity_discount
-				    WHERE invoice_entity_id = ?
-				      AND COALESCE(is_active, true) = true
-				    ORDER BY created_on
-				""";
-		return cluboneJdbcTemplate.query(sql, (rs, rowNum) -> {
-			DiscountCodeDTO dto = new DiscountCodeDTO();
-			dto.setDiscountId((UUID) rs.getObject("discount_id"));
-			// dto.setDiscountAmount(rs.getBigDecimal("discount_amount"));
-			// dto.setAdjustmentTypeId((UUID) rs.getObject("adjustment_type_id"));
-			// dto.setCalculationTypeId((UUID) rs.getObject("calculation_type_id"));
-			return dto;
-		}, invoiceEntityId);
+		// Discounts are applied on invoice_entity.discount_amount only; no per-line discount table.
+		return List.of();
 	}
 
 	public List<EntitlementDTO> fetchEntitlements(UUID invoiceEntityId) {

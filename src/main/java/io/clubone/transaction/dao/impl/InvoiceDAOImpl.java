@@ -1,5 +1,7 @@
 package io.clubone.transaction.dao.impl;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
@@ -22,6 +24,7 @@ import org.springframework.stereotype.Service;
 import io.clubone.transaction.dao.EntityLookupDao;
 import io.clubone.transaction.dao.InvoiceDAO;
 import io.clubone.transaction.dao.InvoiceEntityPromotionDAO;
+import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.dao.InvoiceEntityPromotionDAO.InvoiceEntityPromotionRow;
 import io.clubone.transaction.v2.vo.EntityLevelInfoDTO;
 import io.clubone.transaction.v2.vo.InvoiceEntityPriceBandDTO;
@@ -29,6 +32,7 @@ import io.clubone.transaction.v2.vo.InvoiceEntityPromotionDTO;
 import io.clubone.transaction.vo.InvoiceDTO;
 import io.clubone.transaction.vo.InvoiceEntityDTO;
 import io.clubone.transaction.vo.InvoiceEntityTaxDTO;
+import io.clubone.transaction.vo.TaxRateAllocationDTO;
 import io.clubone.transaction.vo.TransactionDTO;
 
 @Service
@@ -43,6 +47,9 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 
 	@Autowired
 	private InvoiceEntityPromotionDAO invoiceEntityPromotionDAO;
+
+	@Autowired
+	private TransactionDAO transactionDAO;
 
 	private static final String INV_HEADER_SQL = """
 			SELECT
@@ -81,7 +88,7 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 			  ie.entity_id                AS entityId,
 			  ie.price_plan_template_id   AS pricePlanTemplateId,
 			  ie.entity_description       AS entityDescription,
-			  CAST(ie.contract_start_date AS date) AS contractStartDate,
+			  COALESCE(CAST(ie.service_period_start AS date), CAST(ie.created_on AS date)) AS contractStartDate,
 			  COALESCE(ie.quantity, 0)    AS quantity,
 			  ie.unit_price               AS unitPrice,
 			  ie.discount_amount          AS discountAmount,
@@ -101,7 +108,7 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 			  ie.entity_id                AS entityId,
 			  ie.price_plan_template_id   AS pricePlanTemplateId,
 			  ie.entity_description       AS entityDescription,
-			  CAST(ie.contract_start_date AS date) AS contractStartDate,
+			  COALESCE(CAST(ie.service_period_start AS date), CAST(ie.created_on AS date)) AS contractStartDate,
 			  COALESCE(ie.quantity, 0)    AS quantity,
 			  ie.unit_price               AS unitPrice,
 			  ie.discount_amount          AS discountAmount,
@@ -183,7 +190,8 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 		Map<UUID, List<InvoiceEntityTaxDTO>> taxes = fetchTaxesFor(lines);
 		for (InvoiceEntityDTO li : lines) {
 			resolveEntityName(invoice, li);
-			li.setTaxes(taxes.getOrDefault(li.getInvoiceEntityId(), List.of()));
+			li.setTaxes(mergeAndEnrichTaxes(invoice, li,
+					taxes.getOrDefault(li.getInvoiceEntityId(), List.of())));
 		}
 	}
 
@@ -199,11 +207,123 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 
 		for (InvoiceEntityDTO li : lines) {
 			resolveEntityName(invoice, li);
-			li.setTaxes(taxes.getOrDefault(li.getInvoiceEntityId(), List.of()));
+			li.setTaxes(mergeAndEnrichTaxes(invoice, li,
+					taxes.getOrDefault(li.getInvoiceEntityId(), List.of())));
 			li.setDiscounts(Collections.emptyList());
 			li.setPriceBands(bands.getOrDefault(li.getInvoiceEntityId(), List.of()));
 			li.setPromotions(toPromotionDtos(promos.getOrDefault(li.getInvoiceEntityId(), List.of())));
 		}
+	}
+
+	/**
+	 * Finance-backed lines have rows in {@code invoice_entity_tax}. POS/client-only tax is stored on
+	 * {@link InvoiceEntityDTO#getTaxAmount()} only (no FKs), so the DB query returns nothing — we
+	 * synthesize one summary row for read APIs, then {@link #enrichSyntheticTaxFromFinance} fills
+	 * IDs when the rate matches finance config.
+	 */
+	private static List<InvoiceEntityTaxDTO> taxesFromDbOrLineFallback(List<InvoiceEntityTaxDTO> fromDb,
+			InvoiceEntityDTO li) {
+		if (fromDb != null && !fromDb.isEmpty()) {
+			return fromDb;
+		}
+		if (li.getTaxAmount() == null || li.getTaxAmount().compareTo(BigDecimal.ZERO) <= 0) {
+			return List.of();
+		}
+		InvoiceEntityTaxDTO t = new InvoiceEntityTaxDTO();
+		t.setTaxAmount(li.getTaxAmount());
+		BigDecimal unit = li.getUnitPrice() != null ? li.getUnitPrice() : BigDecimal.ZERO;
+		int q = Math.max(1, li.getQuantity());
+		BigDecimal disc = li.getDiscountAmount() != null ? li.getDiscountAmount() : BigDecimal.ZERO;
+		BigDecimal net = unit.multiply(BigDecimal.valueOf(q)).subtract(disc);
+		if (net.compareTo(BigDecimal.ZERO) > 0) {
+			t.setTaxRate(li.getTaxAmount().multiply(new BigDecimal("100")).divide(net, 4, RoundingMode.HALF_UP));
+		}
+		return List.of(t);
+	}
+
+	private List<InvoiceEntityTaxDTO> mergeAndEnrichTaxes(InvoiceDTO invoice, InvoiceEntityDTO li,
+			List<InvoiceEntityTaxDTO> fromDb) {
+		List<InvoiceEntityTaxDTO> merged = taxesFromDbOrLineFallback(fromDb, li);
+		for (InvoiceEntityTaxDTO tx : merged) {
+			enrichSyntheticTaxFromFinance(invoice, li, tx);
+		}
+		return merged;
+	}
+
+	/**
+	 * POS create does not persist {@code invoice_entity_tax} without finance FKs, so synthetic rows
+	 * have null IDs until we match {@code taxRate} to {@link TaxRateAllocationDTO} for item+level.
+	 */
+	private void enrichSyntheticTaxFromFinance(InvoiceDTO invoice, InvoiceEntityDTO li, InvoiceEntityTaxDTO t) {
+		if (t == null) {
+			return;
+		}
+		if (t.getTaxRateAllocationId() != null && t.getTaxAuthority() == null) {
+			t.setTaxAuthority(lookupTaxAuthorityName(t.getTaxRateAllocationId()));
+			return;
+		}
+		if (t.getTaxRateId() != null) {
+			return;
+		}
+		if (invoice.getLevelId() == null || li.getEntityId() == null || t.getTaxRate() == null) {
+			return;
+		}
+		try {
+			UUID taxGroupId = transactionDAO.findTaxGroupIdForItem(li.getEntityId(), invoice.getLevelId());
+			if (taxGroupId == null) {
+				return;
+			}
+			List<TaxRateAllocationDTO> allocs = transactionDAO.getTaxRatesByGroupAndLevel(taxGroupId,
+					invoice.getLevelId());
+			TaxRateAllocationDTO match = matchTaxAllocationByPercentage(allocs, t.getTaxRate());
+			if (match != null) {
+				t.setTaxRateId(match.getTaxRateId());
+				t.setTaxRateAllocationId(match.getTaxRateAllocationId());
+				t.setTaxRate(match.getTaxRatePercentage());
+				t.setTaxAuthority(lookupTaxAuthorityName(match.getTaxRateAllocationId()));
+			}
+		} catch (Exception ignored) {
+			// leave synthetic row as amount + effective % only
+		}
+	}
+
+	private String lookupTaxAuthorityName(UUID taxRateAllocationId) {
+		if (taxRateAllocationId == null) {
+			return null;
+		}
+		try {
+			return cluboneJdbcTemplate.queryForObject("""
+					SELECT ta."name"
+					FROM finance.tax_rate_allocation tra
+					JOIN finance.tax_authority ta ON ta.tax_authority_id = tra.tax_authority_id
+					WHERE tra.tax_rate_allocation_id = ?
+					LIMIT 1
+					""", String.class, taxRateAllocationId);
+		} catch (EmptyResultDataAccessException e) {
+			return null;
+		}
+	}
+
+	private static TaxRateAllocationDTO matchTaxAllocationByPercentage(List<TaxRateAllocationDTO> allocs,
+			BigDecimal effectivePct) {
+		if (allocs == null || allocs.isEmpty() || effectivePct == null) {
+			return null;
+		}
+		TaxRateAllocationDTO best = null;
+		BigDecimal bestDiff = null;
+		for (TaxRateAllocationDTO a : allocs) {
+			if (a.getTaxRatePercentage() == null) {
+				continue;
+			}
+			BigDecimal diff = a.getTaxRatePercentage().subtract(effectivePct).abs();
+			if (diff.compareTo(new BigDecimal("0.25")) <= 0) {
+				if (best == null || bestDiff == null || diff.compareTo(bestDiff) < 0) {
+					best = a;
+					bestDiff = diff;
+				}
+			}
+		}
+		return best;
 	}
 
 	private void resolveEntityName(InvoiceDTO invoice, InvoiceEntityDTO li) {

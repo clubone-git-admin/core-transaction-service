@@ -37,5 +37,10 @@ public class Entity {
 	private LocalDate servicePeriodEnd;
 	private String chargeLineKindCode;
 	private UUID chargeLineKindId;
+	/**
+	 * Required for Agreement and Bundle invoice lines: {@code agreements.agreement_version_id} or
+	 * {@code bundles_new.bundle_version_id} (see POS {@code /api/pos/agreement/catalog} {@code versionId}).
+	 */
+	private UUID entityVersionId;
 
 }

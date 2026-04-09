@@ -21,6 +21,7 @@ import java.util.HashSet;
 import java.util.function.BiConsumer;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -80,6 +81,13 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	@Autowired
 	private PromotionEffectDAO promotionEffectDAO;
 
+	@Value("${clubone.invoice.initial-status-name:PENDING}")
+	private String initialInvoiceStatusName;
+
+	/** If request omits billing collection id/code, resolve this code from lu_billing_collection_type (optional). */
+	@Value("${clubone.invoice.fallback-billing-collection-type-code:STANDARD}")
+	private String fallbackBillingCollectionTypeCode;
+
 	@Override
 	@Transactional(rollbackFor = Exception.class)
 	public CreateInvoiceResponse createInvoice(InvoiceRequest request) {
@@ -94,18 +102,21 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
 					"entities must contain at least one entry");
 		}
+		if (request.getApplicationId() == null) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "applicationId is required");
+		}
 
 		final UUID agreementTypeId = requireEntityTypeId("Agreement");
 		final UUID bundleTypeId = requireEntityTypeId("Bundle");
 		final UUID itemTypeId = requireEntityTypeId("Item");
-		final UUID invoiceStatusId = transactionDAO.findInvoiceStatusIdByName("PENDING");
+		final UUID invoiceStatusId = transactionDAO.findInvoiceStatusIdByName(initialInvoiceStatusName);
 
 		BigDecimal subTotal = BigDecimal.ZERO;      // NET (gross-discount)
 		BigDecimal taxTotal = BigDecimal.ZERO;      // TAX on NET base
 		BigDecimal discountTotal = BigDecimal.ZERO; // informational
 
 		ObjectMapper mapper = new ObjectMapper();
-		final UUID applicationId = request.resolvedApplicationId();
+		final UUID applicationId = request.getApplicationId();
 
 		final Map<UUID, UUID> agreementBusinessIdToRootInvoiceEntityId = new HashMap<>();
 
@@ -142,6 +153,14 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 					.orElse(null);
 		}
 		inv.setBillingCollectionTypeId(billingCollectionTypeId);
+		if (inv.getBillingCollectionTypeId() == null && StringUtils.hasText(fallbackBillingCollectionTypeCode)) {
+			inv.setBillingCollectionTypeId(
+					transactionDAO.findBillingCollectionTypeIdByCode(fallbackBillingCollectionTypeCode.trim())
+							.orElse(null));
+		}
+		if (inv.getBillingCollectionTypeId() == null) {
+			inv.setBillingCollectionTypeId(transactionDAO.findFirstActiveBillingCollectionTypeId().orElse(null));
+		}
 
 		final List<InvoiceEntityDTO> lines = new ArrayList<>();
 
@@ -192,7 +211,8 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 						pkg.setUnitPrice(BigDecimal.ZERO);
 						pkg.setDiscountAmount(BigDecimal.ZERO);
 						pkg.setTaxAmount(BigDecimal.ZERO);
-						pkg.setContractStartDate(e.getStartDate());
+						pkg.setServicePeriodStart(e.getStartDate());
+						pkg.setEntityVersionId(e.getEntityVersionId());
 
 						lines.add(pkg);
 
@@ -212,7 +232,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 								// ✅ No proration for package
 								InvoiceEntityDTO itemLine = buildItemLineFromPayload(
-										it, pkgBusinessEntityId, itemTypeId, e.getStartDate(), false, e);
+										it, pkgBusinessEntityId, itemTypeId, e.getStartDate(), false, e, invoiceLevelId);
 
 								itemLine.setParentInvoiceEntityId(pkgInvoiceEntityId);
 								final int parentQty = def(e.getQuantity(), 1); // package qty
@@ -241,10 +261,18 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 										BigDecimal discAmt = BigDecimal.ZERO;
 
 										switch (d.getCalculationMode()) {
-											case PERCENTAGE -> discAmt = lineSub.multiply(nz(d.getDiscountRate()))
-													.divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
-											case AMOUNT_PER_QTY -> discAmt = nz(d.getDiscountAmount()).multiply(qty);
-											case AMOUNT_PER_LINE -> discAmt = nz(d.getDiscountAmount());
+											case PERCENTAGE -> {
+												discAmt = lineSub.multiply(nz(d.getDiscountRate()))
+														.divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
+											}
+											case AMOUNT_PER_QTY -> {
+												discAmt = nz(d.getDiscountAmount()).multiply(qty);
+											}
+											case AMOUNT_PER_LINE -> {
+												discAmt = nz(d.getDiscountAmount());
+											}
+											default -> {
+											}
 										}
 
 										itemLine.setDiscountAmount(scale2(nz(itemLine.getDiscountAmount()).add(discAmt)));
@@ -320,7 +348,12 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 						agreement.setUnitPrice(BigDecimal.ZERO);
 						agreement.setDiscountAmount(BigDecimal.ZERO);
 						agreement.setTaxAmount(BigDecimal.ZERO);
-						agreement.setContractStartDate(e.getStartDate());
+						agreement.setServicePeriodStart(e.getStartDate());
+						agreement.setEntityVersionId(e.getEntityVersionId());
+						if (agreement.getEntityVersionId() == null) {
+							throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+									"entities[].entityVersionId is required when entity type is Agreement");
+						}
 
 						lines.add(agreement);
 
@@ -341,7 +374,15 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 								InvoiceEntityDTO bundle = new InvoiceEntityDTO();
 
 								UUID bundleInvoiceEntityId = UUID.randomUUID();
-								UUID bundleBusinessEntityId = (b.getEntityId() != null) ? b.getEntityId() : UUID.randomUUID();
+								if (b.getEntityId() == null) {
+									throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+											"bundles[].entityId is required (business id of the bundle, not the agreement id)");
+								}
+								if (b.getEntityId().equals(agreementBusinessEntityId)) {
+									throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+											"bundles[].entityId must be the bundle catalog id; it cannot equal entities[].entityId (agreement)");
+								}
+								UUID bundleBusinessEntityId = b.getEntityId();
 
 								bundle.setInvoiceEntityId(bundleInvoiceEntityId);
 								bundle.setParentInvoiceEntityId(agreementInvoiceEntityId);
@@ -352,7 +393,12 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 								bundle.setUnitPrice(BigDecimal.ZERO);
 								bundle.setDiscountAmount(BigDecimal.ZERO);
 								bundle.setTaxAmount(BigDecimal.ZERO);
-								bundle.setContractStartDate(e.getStartDate());
+								bundle.setServicePeriodStart(e.getStartDate());
+								bundle.setEntityVersionId(b.getEntityVersionId());
+								if (bundle.getEntityVersionId() == null) {
+									throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+											"bundles[].entityVersionId is required under an Agreement");
+								}
 
 								lines.add(bundle);
 
@@ -365,7 +411,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 										// Build FULL (no proration). Proration applied AFTER discount+promo (and NOT for FEE items)
 										InvoiceEntityDTO itemLine = buildItemLineFromPayload(
-												it, bundleBusinessEntityId, itemTypeId, e.getStartDate(), false, e);
+												it, bundleBusinessEntityId, itemTypeId, e.getStartDate(), false, e, invoiceLevelId);
 
 										itemLine.setParentInvoiceEntityId(bundleInvoiceEntityId);
 
@@ -400,10 +446,18 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 												BigDecimal discAmt = BigDecimal.ZERO;
 
 												switch (d.getCalculationMode()) {
-													case PERCENTAGE -> discAmt = lineSub.multiply(nz(d.getDiscountRate()))
-															.divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
-													case AMOUNT_PER_QTY -> discAmt = nz(d.getDiscountAmount()).multiply(qty);
-													case AMOUNT_PER_LINE -> discAmt = nz(d.getDiscountAmount());
+													case PERCENTAGE -> {
+														discAmt = lineSub.multiply(nz(d.getDiscountRate()))
+																.divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
+													}
+													case AMOUNT_PER_QTY -> {
+														discAmt = nz(d.getDiscountAmount()).multiply(qty);
+													}
+													case AMOUNT_PER_LINE -> {
+														discAmt = nz(d.getDiscountAmount());
+													}
+													default -> {
+													}
 												}
 
 												itemLine.setDiscountAmount(scale2(nz(itemLine.getDiscountAmount()).add(discAmt)));
@@ -470,6 +524,38 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 											continue;
 										}
 
+										// POS / checkout: final unit price + tax on each line — do not split across
+										// billing periods (avoids duplicate lines and double-applying client taxAmount).
+										if (it.getTaxAmount() != null && it.getPrice() != null) {
+											final int itemRequestedQty = def(it.getQuantity(), 1);
+											final int posLineQty = Math.max(1, parentQty) * Math.max(1, itemRequestedQty);
+											// Respect payload quantity (entitlement finalQty is ignored here).
+											// When itemRequestedQty > 1, treat `price` as extended line net before tax
+											// for those units; derive stored unit price so line net + tax stay consistent.
+											if (itemRequestedQty > 1) {
+												BigDecimal extNet = bd(it.getPrice());
+												BigDecimal perUnit = extNet.divide(BigDecimal.valueOf(itemRequestedQty), 4,
+														RoundingMode.HALF_UP);
+												itemLine.setUnitPrice(scale2(perUnit));
+											}
+											itemLine.setQuantity(posLineQty);
+											computeTaxesFromItemOnly(itemLine, it, invoiceLevelId);
+											finalizeLeaf(itemLine);
+
+											subTotal = subTotal.add(lineNet(itemLine));
+											taxTotal = taxTotal.add(nz(itemLine.getTaxAmount()));
+											discountTotal = discountTotal.add(nz(itemLine.getDiscountAmount()));
+
+											BigDecimal qty = BigDecimal.valueOf(def(itemLine.getQuantity(), 1));
+											BigDecimal childGross = nz(itemLine.getUnitPrice()).multiply(qty);
+											bundleGross = bundleGross.add(childGross);
+											bundleDiscount = bundleDiscount.add(nz(itemLine.getDiscountAmount()));
+											bundleTax = bundleTax.add(nz(itemLine.getTaxAmount()));
+
+											lines.add(itemLine);
+											continue;
+										}
+
 										// Resolve frequency + cutoff + calendar period
 										final CalendarBillingContext ctx = resolveCalendarBillingContextForPlan(it.getPricePlanTemplateId(), startDate);
 
@@ -508,7 +594,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 											LocalDate nextStart = ctx.periodEndExclusive;
 
 											InvoiceEntityDTO nextLine = buildItemLineFromPayload(
-													it, bundleBusinessEntityId, itemTypeId, nextStart, false, e);
+													it, bundleBusinessEntityId, itemTypeId, nextStart, false, e, invoiceLevelId);
 
 											nextLine.setParentInvoiceEntityId(bundleInvoiceEntityId);
 											nextLine.setQuantity(billedQty);
@@ -565,10 +651,14 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 					case "bundle": {
 
 						System.out.println("Bundle");
+						if (e.getEntityId() == null) {
+							throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+									"entityId is required when entity type is Bundle (business id of the bundle)");
+						}
 						InvoiceEntityDTO bundle = new InvoiceEntityDTO();
 
 						UUID bundleInvoiceEntityId = UUID.randomUUID();
-						UUID bundleBusinessEntityId = (e.getEntityId() != null) ? e.getEntityId() : UUID.randomUUID();
+						UUID bundleBusinessEntityId = e.getEntityId();
 
 						bundle.setInvoiceEntityId(bundleInvoiceEntityId);
 						bundle.setEntityId(bundleBusinessEntityId);
@@ -578,7 +668,12 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 						bundle.setUnitPrice(BigDecimal.ZERO);
 						bundle.setDiscountAmount(BigDecimal.ZERO);
 						bundle.setTaxAmount(BigDecimal.ZERO);
-						bundle.setContractStartDate(e.getStartDate());
+						bundle.setServicePeriodStart(e.getStartDate());
+						bundle.setEntityVersionId(e.getEntityVersionId());
+						if (bundle.getEntityVersionId() == null) {
+							throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+									"entities[].entityVersionId is required when entity type is Bundle");
+						}
 
 						lines.add(bundle);
 
@@ -603,7 +698,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 							for (Item it : e.getItems()) {
 
 								InvoiceEntityDTO itemLine = buildItemLineFromPayload(
-										it, bundleBusinessEntityId, itemTypeId, e.getStartDate(), false, e);
+										it, bundleBusinessEntityId, itemTypeId, e.getStartDate(), false, e, invoiceLevelId);
 
 								itemLine.setParentInvoiceEntityId(bundleInvoiceEntityId);
 								final int parentQty = def(e.getQuantity(), 1); // bundle qty
@@ -635,8 +730,14 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 												BigDecimal pct = nz(d.getDiscountRate());
 												discAmt = lineSub.multiply(pct).divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
 											}
-											case AMOUNT_PER_QTY -> discAmt = nz(d.getDiscountAmount()).multiply(qty);
-											case AMOUNT_PER_LINE -> discAmt = nz(d.getDiscountAmount());
+											case AMOUNT_PER_QTY -> {
+												discAmt = nz(d.getDiscountAmount()).multiply(qty);
+											}
+											case AMOUNT_PER_LINE -> {
+												discAmt = nz(d.getDiscountAmount());
+											}
+											default -> {
+											}
 										}
 
 										itemLine.setDiscountAmount(scale2(nz(itemLine.getDiscountAmount()).add(discAmt)));
@@ -708,7 +809,8 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 						if (e.getItems() != null && !e.getItems().isEmpty()) {
 							for (Item it : e.getItems()) {
 
-								InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, null, itemTypeId, e.getStartDate(), false, e);
+								InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, null, itemTypeId, e.getStartDate(), false, e,
+										invoiceLevelId);
 								final int parentQty = def(e.getQuantity(), 1);
 								final int entQty = transactionDAO.resolveDefaultQtyFromEntitlement(
 										it.getPricePlanTemplateId(),
@@ -738,8 +840,14 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 												BigDecimal pct = nz(d.getDiscountRate());
 												discAmt = lineSub.multiply(pct).divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
 											}
-											case AMOUNT_PER_QTY -> discAmt = nz(d.getDiscountAmount()).multiply(qty);
-											case AMOUNT_PER_LINE -> discAmt = nz(d.getDiscountAmount());
+											case AMOUNT_PER_QTY -> {
+												discAmt = nz(d.getDiscountAmount()).multiply(qty);
+											}
+											case AMOUNT_PER_LINE -> {
+												discAmt = nz(d.getDiscountAmount());
+											}
+											default -> {
+											}
 										}
 
 										itemLine.setDiscountAmount(scale2(nz(itemLine.getDiscountAmount()).add(discAmt)));
@@ -784,8 +892,10 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 							it.setUpsellItem(Boolean.TRUE.equals(e.getUpsellItem()));
 							it.setEntityName(e.getEntityName());
 							it.setStartDate(e.getStartDate());
+							it.setEntityVersionId(e.getEntityVersionId());
 
-							InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, null, itemTypeId, e.getStartDate(), false, e);
+							InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, null, itemTypeId, e.getStartDate(), false, e,
+									invoiceLevelId);
 
 							final int parentQty = def(e.getQuantity(), 1);
 							final int entQty = transactionDAO.resolveDefaultQtyFromEntitlement(
@@ -817,8 +927,14 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 											BigDecimal pct = nz(d.getDiscountRate());
 											discAmt = lineSub.multiply(pct).divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
 										}
-										case AMOUNT_PER_QTY -> discAmt = nz(d.getDiscountAmount()).multiply(qty);
-										case AMOUNT_PER_LINE -> discAmt = nz(d.getDiscountAmount());
+										case AMOUNT_PER_QTY -> {
+											discAmt = nz(d.getDiscountAmount()).multiply(qty);
+										}
+										case AMOUNT_PER_LINE -> {
+											discAmt = nz(d.getDiscountAmount());
+										}
+										default -> {
+										}
 									}
 
 									itemLine.setDiscountAmount(scale2(nz(itemLine.getDiscountAmount()).add(discAmt)));
@@ -922,6 +1038,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 				InvoiceRequest perAgreementReq = new InvoiceRequest();
 				perAgreementReq.setClientRoleId(request.getClientRoleId());
+				perAgreementReq.setApplicationId(request.getApplicationId());
 				perAgreementReq.setBillingAddress(request.getBillingAddress());
 				perAgreementReq.setCreatedBy(request.getCreatedBy());
 				perAgreementReq.setLevelId(request.getLevelId());
@@ -952,7 +1069,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		CreateInvoiceResponse response = new CreateInvoiceResponse();
 		response.setInvoiceId(invoiceId);
 		response.setInvoiceNumber(invoiceNumber);
-		response.setStatus("PENDING");
+		response.setStatus(transactionDAO.currentInvoiceStatusName(invoiceId));
 		response.setClientAgreementId(inv.getClientAgreementId());
 		response.setBillingRunId(inv.getBillingRunId());
 		response.setBillingCollectionTypeId(inv.getBillingCollectionTypeId());
@@ -1384,7 +1501,8 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			UUID itemTypeId,
 			LocalDate startDate,
 			boolean prorateEnabled,
-			Entity lineContextParent
+			Entity lineContextParent,
+			UUID invoiceLevelId
 	) {
 		InvoiceEntityDTO line = new InvoiceEntityDTO();
 		System.out.println("buildItemLineFromPayload");
@@ -1399,7 +1517,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		line.setPricePlanTemplateId(it.getPricePlanTemplateId());
 		line.setPriceBands(it.getPriceBands());
 		LocalDate lineStart = it.getStartDate() != null ? it.getStartDate() : startDate;
-		line.setContractStartDate(lineStart);
 
 		// quantity set OUTSIDE
 		line.setQuantity(1);
@@ -1425,16 +1542,14 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 				unitPrice = fullUnit;
 
 				if (isProrateApplicable) {
-					LocalDate start = (line.getContractStartDate() != null)
-							? line.getContractStartDate()
-							: LocalDate.now();
+					LocalDate prorationDate = (lineStart != null) ? lineStart : LocalDate.now();
 
-					BigDecimal factor = transactionUtils.prorateFactorForCurrentMonth(start);
-					unitPrice = scale2(fullUnit.multiply(factor));
+					BigDecimal prorationFactor = transactionUtils.prorateFactorForCurrentMonth(prorationDate);
+					unitPrice = scale2(fullUnit.multiply(prorationFactor));
 
 					System.out.println("[PRORATE][BANDS] itemId=" + it.getEntityId()
 							+ " baseUnit=" + fullUnit
-							+ " factor=" + factor
+							+ " factor=" + prorationFactor
 							+ " proratedUnit=" + unitPrice);
 				}
 			}
@@ -1444,15 +1559,13 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			unitPrice = scale2(bd(it.getPrice()));
 
 			if (isProrateApplicable) {
-				LocalDate start = (line.getContractStartDate() != null)
-						? line.getContractStartDate()
-						: LocalDate.now();
-				BigDecimal factor = transactionUtils.prorateFactorForCurrentMonth(start);
-				unitPrice = scale2(unitPrice.multiply(factor));
+				LocalDate prorationDate2 = (lineStart != null) ? lineStart : LocalDate.now();
+				BigDecimal prorationFactorNb = transactionUtils.prorateFactorForCurrentMonth(prorationDate2);
+				unitPrice = scale2(unitPrice.multiply(prorationFactorNb));
 
 				System.out.println("[PRORATE][NO_BANDS] itemId=" + it.getEntityId()
 						+ " baseUnit=" + scale2(bd(it.getPrice()))
-						+ " factor=" + factor
+						+ " factor=" + prorationFactorNb
 						+ " proratedUnit=" + unitPrice);
 			}
 		}
@@ -1463,6 +1576,14 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		line.setTaxAmount(BigDecimal.ZERO);
 		line.setUpsellItem(Boolean.TRUE.equals(it.getUpsellItem()));
 		applyBillingLineContext(line, it, lineContextParent);
+		line.setEntityVersionId(it.getEntityVersionId());
+		if (line.getEntityVersionId() == null) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+					"items[].entityVersionId is required for each catalog item line (itemId=" + it.getEntityId() + ")");
+		}
+		if (line.getServicePeriodStart() == null && lineStart != null) {
+			line.setServicePeriodStart(lineStart);
+		}
 		return line;
 	}
 
@@ -1519,14 +1640,16 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		if (it != null && it.getTaxAmount() != null) {
 			BigDecimal amt = scale2(nz(it.getTaxAmount()));
 			line.setTaxAmount(amt);
-			List<InvoiceEntityTaxDTO> clientTaxes = new ArrayList<>();
+			InvoiceEntityTaxDTO tx = new InvoiceEntityTaxDTO();
+			tx.setTaxAmount(amt);
 			if (it.getTaxPct() != null) {
-				InvoiceEntityTaxDTO tx = new InvoiceEntityTaxDTO();
 				tx.setTaxRate(scale2(nz(it.getTaxPct())));
-				tx.setTaxAmount(amt);
-				clientTaxes.add(tx);
 			}
-			line.setTaxes(clientTaxes);
+			if (it.getTaxRateId() != null && it.getTaxRateAllocationId() != null) {
+				tx.setTaxRateId(it.getTaxRateId());
+				tx.setTaxRateAllocationId(it.getTaxRateAllocationId());
+			}
+			line.setTaxes(List.of(tx));
 			return;
 		}
 
@@ -1740,15 +1863,19 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			UUID invoiceId,
 			int cycleNumber,
 			LocalDate billingDate,
-			UUID actorId,UUID clientAgreementId
+			UUID actorId,
+			UUID clientAgreementId,
+			UUID applicationId,
+			UUID levelId
 	) {
 
 		if (invoiceId == null) throw new IllegalArgumentException("invoiceId is required");
 		if (cycleNumber <= 0) throw new IllegalArgumentException("cycleNumber must be >= 1");
 		if (billingDate == null) billingDate = LocalDate.now();
+		if (applicationId == null) throw new IllegalArgumentException("applicationId is required");
+		if (levelId == null) throw new IllegalArgumentException("levelId is required");
 
 		final var seed = transactionDAO.fetchInvoiceSeed(invoiceId);
-		final UUID applicationId = UUID.fromString("5949a200-82fb-4171-9001-0f77ac439011");
 		final UUID createdBy = (actorId != null ? actorId : seed.createdBy());
 		System.out.println("cycleNumber " + cycleNumber);
 		final var oldLines = transactionDAO.fetchBillableLeafLines(invoiceId, cycleNumber,clientAgreementId);
@@ -1814,7 +1941,8 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 		InvoiceRequest req = new InvoiceRequest();
 		req.setClientRoleId(seed.clientRoleId());
-		req.setLevelId(seed.levelId());
+		req.setApplicationId(applicationId);
+		req.setLevelId(levelId);
 		req.setBillingAddress(seed.billingAddress());
 		req.setCreatedBy(createdBy);
 		req.setEntities(List.of(root));
@@ -1867,9 +1995,18 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 
 	@Override
-	public CreateInvoiceResponse createFutureInvoice(UUID invoiceId, int cycleNumber, LocalDate billingDate, UUID actorId,UUID clientAgreementId) {
+	public CreateInvoiceResponse createFutureInvoice(UUID invoiceId, int cycleNumber, LocalDate billingDate, UUID actorId,
+			UUID clientAgreementId, UUID applicationId, UUID levelId) {
+		if (applicationId == null) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "applicationId is required in request body");
+		}
+		if (levelId == null) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+					"levelId is required in request body (JSON may use locationId)");
+		}
 		System.out.println("Building future invoice request");
-		InvoiceRequest req = buildFutureInvoiceRequest(invoiceId, cycleNumber, billingDate, actorId, clientAgreementId);
+		InvoiceRequest req = buildFutureInvoiceRequest(invoiceId, cycleNumber, billingDate, actorId, clientAgreementId,
+				applicationId, levelId);
 		System.out.println("Creating future invoice");
 		return createInvoice(req);
 	}
