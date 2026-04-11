@@ -87,6 +87,13 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 			    LIMIT 1
 			""";
 
+	private static final String SQL_FIND_CPM_BY_CPT = """
+			    SELECT cpt.client_payment_method_id
+			    FROM client_payments.client_payment_transaction cpt
+			    WHERE cpt.client_payment_transaction_id = ?
+			    LIMIT 1
+			""";
+
 	private static final String SQL_PLAN_TERM_INSERT = """
 			    INSERT INTO client_subscription_billing.subscription_plan_term
 			        (subscription_plan_id, remaining_cycles, end_date, created_by, modified_by)
@@ -486,6 +493,19 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 	public Optional<UUID> findClientPaymentMethodIdByTransactionId(UUID transactionId) {
 		try {
 			UUID id = cluboneJdbcTemplate.queryForObject(SQL_FIND_CPM_BY_TXN, UUID.class, transactionId);
+			return Optional.ofNullable(id);
+		} catch (EmptyResultDataAccessException e) {
+			return Optional.empty();
+		}
+	}
+
+	@Override
+	public Optional<UUID> findClientPaymentMethodIdByClientPaymentTransactionId(UUID clientPaymentTransactionId) {
+		if (clientPaymentTransactionId == null) {
+			return Optional.empty();
+		}
+		try {
+			UUID id = cluboneJdbcTemplate.queryForObject(SQL_FIND_CPM_BY_CPT, UUID.class, clientPaymentTransactionId);
 			return Optional.ofNullable(id);
 		} catch (EmptyResultDataAccessException e) {
 			return Optional.empty();

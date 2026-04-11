@@ -108,7 +108,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 			SELECT
 			    i.client_role_id,
 			    i.total_amount,
-			    i.level_id
+			    i.level_id,
+			    i.client_agreement_id
 			FROM "transactions".invoice i
 			WHERE i.invoice_id = ?
 			""";
@@ -505,6 +506,40 @@ public class TransactionDAOImpl implements TransactionDAO {
 	}
 
 	@Override
+	public Optional<UUID> tryFindInvoiceStatusIdByName(String statusName) {
+		if (statusName == null || statusName.isBlank()) {
+			return Optional.empty();
+		}
+		try {
+			return Optional.of(cluboneJdbcTemplate.queryForObject("""
+					SELECT invoice_status_id
+					FROM transactions.lu_invoice_status
+					WHERE LOWER(TRIM(status_name)) = LOWER(TRIM(?))
+					  AND COALESCE(is_active, true) = true
+					LIMIT 1
+					""", UUID.class, statusName.trim()));
+		} catch (EmptyResultDataAccessException e) {
+			return Optional.empty();
+		}
+	}
+
+	@Override
+	public UUID findTransactionIdByInvoiceAndClientPaymentTransaction(UUID invoiceId,
+			UUID clientPaymentTransactionId) {
+		if (invoiceId == null || clientPaymentTransactionId == null) {
+			return null;
+		}
+		List<UUID> ids = cluboneJdbcTemplate.query("""
+				SELECT transaction_id
+				  FROM transactions.transaction
+				 WHERE invoice_id = ?
+				   AND client_payment_transaction_id = ?
+				 LIMIT 1
+				""", (rs, rn) -> UUID.fromString(rs.getString(1)), invoiceId, clientPaymentTransactionId);
+		return ids.isEmpty() ? null : ids.get(0);
+	}
+
+	@Override
 	public void updateInvoiceStatusAndPaidFlag(UUID invoiceId, UUID statusId, boolean paid, UUID modifiedBy) {
 		cluboneJdbcTemplate.update("""
 				    UPDATE transactions.invoice
@@ -683,6 +718,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 			dto.setClientRoleId((UUID) rs.getObject("client_role_id"));
 			dto.setTotalAmount(rs.getBigDecimal("total_amount"));
 			dto.setLevelId((UUID) rs.getObject("level_id"));
+			dto.setClientAgreementId((UUID) rs.getObject("client_agreement_id"));
 			return dto;
 		}
 	};

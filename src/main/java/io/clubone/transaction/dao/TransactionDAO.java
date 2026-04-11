@@ -47,6 +47,17 @@ public interface TransactionDAO {
 	 */
 	UUID findInvoiceStatusIdByName(String statusName);
 
+	/**
+	 * Same lookup as {@link #findInvoiceStatusIdByName(String)} but returns empty when no active row exists
+	 * (e.g. optional {@code PARTIALLY_PAID} in environments that have not seeded that status yet).
+	 */
+	Optional<UUID> tryFindInvoiceStatusIdByName(String statusName);
+
+	/**
+	 * Idempotency for gateway finalize: same invoice + same CPT should resolve to the same transaction row.
+	 */
+	UUID findTransactionIdByInvoiceAndClientPaymentTransaction(UUID invoiceId, UUID clientPaymentTransactionId);
+
 	void updateInvoiceStatusAndPaidFlag(UUID invoiceId, UUID statusId, boolean paid, UUID modifiedBy);
 
 	String currentInvoiceStatusName(UUID invoiceId);

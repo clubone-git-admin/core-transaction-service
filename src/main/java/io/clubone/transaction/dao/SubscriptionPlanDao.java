@@ -93,6 +93,12 @@ public interface SubscriptionPlanDao {
 
 	Optional<UUID> findClientPaymentMethodIdByTransactionId(UUID transactionId);
 
+	/**
+	 * Resolves default payment method for a payment transaction row (no join through
+	 * {@code transactions.transaction} — use when persist runs in {@code REQUIRES_NEW} and the txn row is not yet visible).
+	 */
+	Optional<UUID> findClientPaymentMethodIdByClientPaymentTransactionId(UUID clientPaymentTransactionId);
+
 	UUID insert(UUID subscriptionPlanId, int remainingCycles, LocalDate endDate, UUID createdBy);
 
 	Optional<BillingRule> findRule(UUID frequencyId, UUID dayRuleId);

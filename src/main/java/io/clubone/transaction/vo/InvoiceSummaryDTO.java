@@ -9,4 +9,6 @@ public class InvoiceSummaryDTO {
     private UUID clientRoleId;
     private BigDecimal totalAmount;
     private UUID levelId;
+    /** From transactions.invoice — used when finalize request omits clientAgreementId. */
+    private UUID clientAgreementId;
 }

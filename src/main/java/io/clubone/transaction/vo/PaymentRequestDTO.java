@@ -7,6 +7,8 @@ import lombok.Data;
 @Data
 public class PaymentRequestDTO {
     private UUID clientRoleId;
+    /** When set, payment service can allocate cash/card capture to this receivable. */
+    private UUID invoiceId;
     private BigDecimal amount;
     private String paymentGatewayCode; // e.g., "MANUAL"
     private String paymentMethodCode;  // e.g., "CASH"

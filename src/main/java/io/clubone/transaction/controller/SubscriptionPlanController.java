@@ -11,8 +11,10 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import io.clubone.transaction.helper.SubscriptionPlanHelper;
+import io.clubone.transaction.request.BillingQuoteFinalizeSpec;
 import io.clubone.transaction.request.SubscriptionPlanBatchCreateRequest;
 import io.clubone.transaction.request.SubscriptionPlanCreateRequest;
+import io.clubone.transaction.response.BillingQuoteLineItemsResponse;
 import io.clubone.transaction.response.SubscriptionPlanBatchCreateResponse;
 import io.clubone.transaction.response.SubscriptionPlanCreateResponse;
 import io.clubone.transaction.service.SubscriptionPlanService;
@@ -46,10 +48,14 @@ public class SubscriptionPlanController {
 		return ResponseEntity.ok(service.createPlans(request, createdBy));
 	}
 
-	@GetMapping("/build-request")
-	public ResponseEntity<List<SubscriptionPlanCreateRequest>> buildRequest(@RequestParam UUID invoiceId,
-			@RequestParam UUID transactionId) {
-		return ResponseEntity.ok(helperService.buildRequests(invoiceId, transactionId));
+	/**
+	 * Preview billing quote line-items by calling the billing vendor API (same payload as v3 finalize
+	 * {@code billingQuoteFinalizeSpecs}).
+	 */
+	@PostMapping("/billing-quote/line-items")
+	public ResponseEntity<List<BillingQuoteLineItemsResponse>> fetchBillingQuoteLineItems(
+			@RequestBody List<BillingQuoteFinalizeSpec> specs) {
+		return ResponseEntity.ok(helperService.fetchQuoteLineItems(specs));
 	}
 
 	@GetMapping("/{subscriptionPlanId}/detail")

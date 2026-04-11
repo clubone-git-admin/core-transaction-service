@@ -16,6 +16,7 @@ import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.CollectionUtils;
@@ -25,19 +26,18 @@ import io.clubone.transaction.dao.InvoiceDAO;
 import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.helper.AgreementHelper;
 import io.clubone.transaction.helper.InvoiceNotificationHelper;
+import io.clubone.transaction.billing.quote.BillingQuoteSubscriptionPersistenceService;
 import io.clubone.transaction.helper.SubscriptionPlanHelper;
 import io.clubone.transaction.request.CreateInvoiceRequest;
 import io.clubone.transaction.request.CreateInvoiceRequestV3;
 import io.clubone.transaction.request.CreateTransactionRequest;
 import io.clubone.transaction.request.FinalizeTransactionRequest;
 import io.clubone.transaction.request.InvoiceResponseDTO;
-import io.clubone.transaction.request.SubscriptionPlanBatchCreateRequest;
-import io.clubone.transaction.request.SubscriptionPlanCreateRequest;
 import io.clubone.transaction.request.TransactionLineItemRequest;
+import io.clubone.transaction.response.BillingQuoteLineItemsResponse;
 import io.clubone.transaction.response.CreateInvoiceResponse;
 import io.clubone.transaction.response.FinalizeTransactionResponse;
 import io.clubone.transaction.service.PaymentService;
-import io.clubone.transaction.service.SubscriptionPlanService;
 import io.clubone.transaction.service.TransactionService;
 import io.clubone.transaction.vo.BundleDTO;
 import io.clubone.transaction.vo.BundleItemPriceDTO;
@@ -69,8 +69,8 @@ public class TransactionServiceImpl implements TransactionService {
 	private SubscriptionPlanHelper subscriptionPlanHelper;
 
 	@Autowired
-	private SubscriptionPlanService subscriptionPlanService;
-	
+	private BillingQuoteSubscriptionPersistenceService billingQuoteSubscriptionPersistenceService;
+
 	@Autowired
 	private AgreementHelper agreementHelper;
 	
@@ -81,6 +81,15 @@ public class TransactionServiceImpl implements TransactionService {
 	private InvoiceNotificationHelper invoiceNotificationHelper;
 
 	private static final Logger logger = LoggerFactory.getLogger(TransactionServiceImpl.class);
+
+	@Value("${clubone.transaction.finalize.amount-tolerance:0.09}")
+	private BigDecimal finalizeAmountTolerance;
+
+	@Value("${clubone.transaction.finalize.partially-paid-status-name:}")
+	private String partiallyPaidStatusName;
+
+	@Value("${clubone.invoice.initial-status-name:PENDING}")
+	private String invoiceInitialStatusName;
 
 	@Override
 	public UUID createInvoice(InvoiceDTO dto) {
@@ -510,181 +519,272 @@ public class TransactionServiceImpl implements TransactionService {
 	}
 
 	@Override
+	@Transactional
 	public FinalizeTransactionResponse finalizeTransactionV3(FinalizeTransactionRequest req) {
-		// Idempotency guard: if a transaction already exists for this invoice, return
-		// it
-		UUID existingTxn = transactionDAO.findTransactionIdByInvoiceId(req.getInvoiceId());
-		if (existingTxn != null) {
-			UUID existingCpt = transactionDAO.findClientPaymentTxnIdByTransactionId(existingTxn);
-			String status = transactionDAO.currentInvoiceStatusName(req.getInvoiceId());
-			//return new FinalizeTransactionResponse(req.getInvoiceId(), status, existingCpt, existingTxn, "");
+		logger.info(
+				"[transactions/v3/finalize] step=start invoiceId={} paymentGatewayCode={} paymentMethodCode={} hasClientPaymentTransactionId={} amountToPayNow={} billingQuoteSpecCount={} clientAgreementId={}",
+				req.getInvoiceId(), req.getPaymentGatewayCode(), req.getPaymentMethodCode(),
+				req.getClientPaymentTransactionId() != null, req.getAmountToPayNow(),
+				req.getBillingQuoteFinalizeSpecs() == null ? 0 : req.getBillingQuoteFinalizeSpecs().size(),
+				req.getClientAgreementId());
+
+		if (req.getInvoiceId() == null) {
+			logger.warn("[transactions/v3/finalize] step=validation outcome=reject reason=missing_invoice_id");
+			return new FinalizeTransactionResponse(null, "UNPAID", null, null, "invoiceId is required");
 		}
 
-		Optional<InvoiceSummaryDTO> invoiceSummary = transactionDAO.getInvoiceSummaryById(req.getInvoiceId());
-		System.out.println("clienRoleId "+invoiceSummary.get().getClientRoleId());
-		if (invoiceSummary.isPresent() && invoiceSummary.get() != null) {
-			req.setClientRoleId(invoiceSummary.get().getClientRoleId());
-			req.setTotalAmount(invoiceSummary.get().getTotalAmount());
-			System.out.println("Total Amount "+req.getTotalAmount()+" Remaining Amount "+req.getAmountToPayNow());
-			BigDecimal tolerance = new BigDecimal("0.09");
+		Optional<InvoiceSummaryDTO> invoiceSummaryOpt = transactionDAO.getInvoiceSummaryById(req.getInvoiceId());
+		if (invoiceSummaryOpt.isEmpty()) {
+			logger.warn("[transactions/v3/finalize] step=load_invoice outcome=reject invoiceId={} reason=not_found",
+					req.getInvoiceId());
+			return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null, "Invoice not found");
+		}
+		InvoiceSummaryDTO invoiceSummary = invoiceSummaryOpt.get();
+		req.setClientRoleId(invoiceSummary.getClientRoleId());
+		req.setTotalAmount(invoiceSummary.getTotalAmount());
+		req.setLevelId(invoiceSummary.getLevelId());
+		final UUID effectiveClientAgreementId = req.getClientAgreementId() != null ? req.getClientAgreementId()
+				: invoiceSummary.getClientAgreementId();
+		logger.info(
+				"[transactions/v3/finalize] step=load_invoice outcome=ok invoiceId={} clientRoleId={} levelId={} invoiceTotal={} invoiceClientAgreementId={}",
+				req.getInvoiceId(), invoiceSummary.getClientRoleId(), invoiceSummary.getLevelId(),
+				invoiceSummary.getTotalAmount(), invoiceSummary.getClientAgreementId());
+		logger.info(
+				"[transactions/v3/finalize] step=resolve_client_agreement invoiceId={} source={} effectiveClientAgreementId={}",
+				req.getInvoiceId(),
+				req.getClientAgreementId() != null ? "request"
+						: (effectiveClientAgreementId != null ? "invoice" : "none"),
+				effectiveClientAgreementId);
 
-			BigDecimal diff = req.getAmountToPayNow()
-			        .subtract(req.getTotalAmount())
-			        .abs()
-			        .setScale(2, RoundingMode.HALF_UP);
+		final boolean isManual = isManualPaymentGateway(req);
+		logger.info("[transactions/v3/finalize] step=payment_mode invoiceId={} isManual={} gatewayCode={}",
+				req.getInvoiceId(), isManual, req.getPaymentGatewayCode());
 
-			if (diff.compareTo(tolerance) > 0) {
-			    /*return new FinalizeTransactionResponse(
-			        req.getInvoiceId(),
-			        "UNPAID",
-			        null,
-			        null,
-			        "Price not matching with invoice created"
-			    );*/
-			}
+		BigDecimal tolerance = finalizeAmountTolerance != null ? finalizeAmountTolerance.setScale(2, RoundingMode.HALF_UP)
+				: new BigDecimal("0.09").setScale(2, RoundingMode.HALF_UP);
+		BigDecimal invoiceTotal = nz(invoiceSummary.getTotalAmount()).setScale(2, RoundingMode.HALF_UP);
 
-			req.setLevelId(invoiceSummary.get().getLevelId());
+		BigDecimal payAmount;
+		if (req.getAmountToPayNow() != null) {
+			payAmount = req.getAmountToPayNow().setScale(2, RoundingMode.HALF_UP);
+		} else {
+			payAmount = invoiceTotal;
 		}
 
-		// Validate totals vs line items
-		/*
-		 * BigDecimal lineSum =
-		 * req.getLineItems().stream().map(TransactionLineItemRequest::getTotalAmount)
-		 * .filter(Objects::nonNull) // ignore nulls .map(bd -> bd.setScale(2,
-		 * RoundingMode.HALF_UP)) // normalize to currency scale
-		 * .reduce(BigDecimal.ZERO, BigDecimal::add).setScale(2, RoundingMode.HALF_UP);
-		 * 
-		 * BigDecimal headerTotal =
-		 * Optional.ofNullable(req.getTotalAmount()).orElse(BigDecimal.ZERO).setScale(2,
-		 * RoundingMode.HALF_UP);
-		 * 
-		 * if (lineSum.compareTo(headerTotal) != 0) { logger.
-		 * error("Invoice total mismatch: header={}, sumOfLines={}, difference={}",
-		 * headerTotal, lineSum, headerTotal.subtract(lineSum));
-		 * 
-		 * }
-		 */
+		if (invoiceTotal.compareTo(BigDecimal.ZERO) > 0 && payAmount.compareTo(BigDecimal.ZERO) <= 0) {
+			logger.warn(
+					"[transactions/v3/finalize] step=amount_validation outcome=reject invoiceId={} reason=non_positive_pay_amount invoiceTotal={} payAmount={}",
+					req.getInvoiceId(), invoiceTotal, payAmount);
+			return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null,
+					"Payment amount must be greater than zero");
+		}
 
-		//commeting below code for razor pay support
-		
-		/*
-		 * // Call your existing /payment/v1 PaymentRequestDTO pay = new
-		 * PaymentRequestDTO(); pay.setClientRoleId(req.getClientRoleId());
-		 * pay.setAmount(req.getTotalAmount());
-		 * pay.setPaymentGatewayCode(req.getPaymentGatewayCode());
-		 * pay.setPaymentMethodCode(req.getPaymentMethodCode());
-		 * pay.setPaymentTypeCode(req.getPaymentTypeCode());
-		 * pay.setPaymentGatewayCurrencyTypeId(req.getPaymentGatewayCurrencyTypeId());
-		 * pay.setCreatedBy(req.getCreatedBy()); UUID clientPaymentTransactionId =null;
-		 * try { clientPaymentTransactionId = paymentService.processManualPayment(pay);
-		 * }catch (Exception e) { // TODO: handle exception }
-		 */
+		if (payAmount.subtract(invoiceTotal).compareTo(tolerance) > 0) {
+			logger.warn(
+					"[transactions/v3/finalize] step=amount_validation outcome=reject invoiceId={} payAmount={} invoiceTotal={} tolerance={} reason=overpayment",
+					req.getInvoiceId(), payAmount, invoiceTotal, tolerance);
+			return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null,
+					"Payment amount exceeds invoice balance");
+		}
+
+		boolean fullPayment = invoiceTotal.compareTo(BigDecimal.ZERO) == 0
+				|| payAmount.add(tolerance).compareTo(invoiceTotal) >= 0;
+		boolean partialPayment = invoiceTotal.compareTo(BigDecimal.ZERO) > 0 && !fullPayment;
+		logger.info(
+				"[transactions/v3/finalize] step=amount_validation outcome=ok invoiceId={} invoiceTotal={} payAmount={} tolerance={} fullPayment={} partialPayment={}",
+				req.getInvoiceId(), invoiceTotal, payAmount, tolerance, fullPayment, partialPayment);
 
 		UUID clientPaymentTransactionId = null;
 
-		final boolean isManual =
-		    req.getPaymentGatewayCode() == null
-		    || req.getPaymentGatewayCode().trim().isEmpty()
-		    || "MANUAL".equalsIgnoreCase(req.getPaymentGatewayCode())
-		    || "CASH".equalsIgnoreCase(req.getPaymentGatewayCode()); // optional if you use CASH gateway code
-
-		if (isManual) {
-		    // ✅ existing behavior
-		    PaymentRequestDTO pay = new PaymentRequestDTO();
-		    pay.setClientRoleId(req.getClientRoleId());
-
-		    // ✅ better: charge pay-now amount if available
-		    BigDecimal payAmount =
-		        (req.getAmountToPayNow() != null) ? req.getAmountToPayNow() : req.getTotalAmount();
-		    pay.setAmount(payAmount);
-
-		    pay.setPaymentGatewayCode(req.getPaymentGatewayCode());
-		    pay.setPaymentMethodCode(req.getPaymentMethodCode());
-		    pay.setPaymentTypeCode(req.getPaymentTypeCode());
-		    pay.setPaymentGatewayCurrencyTypeId(req.getPaymentGatewayCurrencyTypeId());
-		    pay.setCreatedBy(req.getCreatedBy());
-
-		    clientPaymentTransactionId = paymentService.processManualPayment(pay);
-
-		} else {
-		    // ✅ Gateway flow: payment already verified & CPT already created by payment service
-		    clientPaymentTransactionId = req.getClientPaymentTransactionId();
-
-		    if (clientPaymentTransactionId == null) {
-		        return new FinalizeTransactionResponse(
-		            req.getInvoiceId(),
-		            "UNPAID",
-		            null,
-		            null,
-		            "Missing clientPaymentTransactionId for gateway finalize"
-		        );
-		    }
-
-		    // (Optional but recommended) validate CPT belongs to same clientRoleId
-		    // and amount matches req.getAmountToPayNow()
+		if (!isManual) {
+			if (invoiceTotal.compareTo(BigDecimal.ZERO) > 0 && req.getClientPaymentTransactionId() == null) {
+				logger.warn(
+						"[transactions/v3/finalize] step=gateway_payment outcome=reject invoiceId={} reason=missing_client_payment_transaction_id",
+						req.getInvoiceId());
+				return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null,
+						"Missing clientPaymentTransactionId for gateway finalize");
+			}
+			clientPaymentTransactionId = req.getClientPaymentTransactionId();
+			if (clientPaymentTransactionId != null) {
+				/*
+				 * UUID idempotentTxn =
+				 * transactionDAO.findTransactionIdByInvoiceAndClientPaymentTransaction(
+				 * req.getInvoiceId(), clientPaymentTransactionId); if (idempotentTxn != null) {
+				 * String status = transactionDAO.currentInvoiceStatusName(req.getInvoiceId());
+				 * logger.info(
+				 * "[transactions/v3/finalize] step=idempotency outcome=short_circuit invoiceId={} clientPaymentTransactionId={} existingTransactionId={} invoiceStatus={}"
+				 * , req.getInvoiceId(), clientPaymentTransactionId, idempotentTxn, status);
+				 * return new FinalizeTransactionResponse(req.getInvoiceId(), status,
+				 * clientPaymentTransactionId, idempotentTxn, ""); }
+				 */
+			}
+			logger.info(
+					"[transactions/v3/finalize] step=gateway_payment outcome=use_existing_cpt invoiceId={} clientPaymentTransactionId={}",
+					req.getInvoiceId(), clientPaymentTransactionId);
 		}
 
-		
-		
-		// Build TransactionDTO from request
+		if (invoiceTotal.compareTo(BigDecimal.ZERO) <= 0) {
+			clientPaymentTransactionId = isManual ? null : req.getClientPaymentTransactionId();
+			logger.info(
+					"[transactions/v3/finalize] step=collect_payment outcome=zero_balance invoiceId={} clientPaymentTransactionId={}",
+					req.getInvoiceId(), clientPaymentTransactionId);
+		} else if (isManual) {
+			logger.info(
+					"[transactions/v3/finalize] step=collect_payment mode=manual invoiceId={} payAmount={} calling_payment_service=true",
+					req.getInvoiceId(), payAmount);
+			PaymentRequestDTO pay = new PaymentRequestDTO();
+			pay.setClientRoleId(req.getClientRoleId());
+			pay.setInvoiceId(req.getInvoiceId());
+			pay.setAmount(payAmount);
+			pay.setPaymentGatewayCode(req.getPaymentGatewayCode());
+			pay.setPaymentMethodCode(req.getPaymentMethodCode());
+			pay.setPaymentTypeCode(req.getPaymentTypeCode());
+			pay.setPaymentGatewayCurrencyTypeId(req.getPaymentGatewayCurrencyTypeId());
+			pay.setCreatedBy(req.getCreatedBy());
+			clientPaymentTransactionId = paymentService.processManualPayment(pay);
+			logger.info(
+					"[transactions/v3/finalize] step=collect_payment mode=manual outcome=ok invoiceId={} clientPaymentTransactionId={}",
+					req.getInvoiceId(), clientPaymentTransactionId);
+		}
+		// else: gateway — clientPaymentTransactionId already set and idempotency checked above
+
 		TransactionDTO txn = new TransactionDTO();
-		txn.setClientAgreementId(req.getClientAgreementId());
+		txn.setClientAgreementId(effectiveClientAgreementId);
 		txn.setLevelId(req.getLevelId());
 		txn.setInvoiceId(req.getInvoiceId());
 		txn.setClientPaymentTransactionId(clientPaymentTransactionId);
-		txn.setTransactionDate(new Timestamp(System.currentTimeMillis()));
-		txn.setCreatedBy(req.getCreatedBy());
 		txn.setTransactionDate(Timestamp.from(Instant.now()));
+		txn.setCreatedBy(req.getCreatedBy());
 
 		UUID transactionId = transactionDAO.saveTransactionV3(txn);
-		
-		
-		
-		try {
-			if (clientPaymentTransactionId == null) {
-				invoiceNotificationHelper.sendInvoiceEmail(req.getInvoiceId(), "CASH", null, null, null);
+		logger.info(
+				"[transactions/v3/finalize] step=persist_transaction outcome=ok invoiceId={} transactionId={} clientPaymentTransactionId={}",
+				req.getInvoiceId(), transactionId, clientPaymentTransactionId);
+
+		logger.info("[transactions/v3/finalize] step=notification invoiceId={} sending_email=true", req.getInvoiceId());
+		sendFinalizeInvoiceNotification(req, isManual);
+		logger.info("[transactions/v3/finalize] step=notification invoiceId={} completed", req.getInvoiceId());
+
+		String responseStatusName;
+		if (partialPayment) {
+			logger.info("[transactions/v3/finalize] step=invoice_update branch=partial invoiceId={} payAmount={} invoiceTotal={}",
+					req.getInvoiceId(), payAmount, invoiceTotal);
+			UUID partialStatusId = resolvePartialPaymentInvoiceStatusId();
+			transactionDAO.updateInvoiceStatusAndPaidFlag(req.getInvoiceId(), partialStatusId, false,
+					req.getCreatedBy());
+			responseStatusName = transactionDAO.currentInvoiceStatusName(req.getInvoiceId());
+			logger.info(
+					"[transactions/v3/finalize] step=invoice_update branch=partial outcome=ok invoiceId={} status={} paidAmount={} of invoiceTotal={}",
+					req.getInvoiceId(), responseStatusName, payAmount, invoiceTotal);
+		} else {
+			logger.info("[transactions/v3/finalize] step=invoice_update branch=full_payment invoiceId={}",
+					req.getInvoiceId());
+			UUID paidStatusId = transactionDAO.findInvoiceStatusIdByName("PAID");
+			transactionDAO.updateInvoiceStatusAndPaidFlag(req.getInvoiceId(), paidStatusId, true, req.getCreatedBy());
+			responseStatusName = transactionDAO.currentInvoiceStatusName(req.getInvoiceId());
+			logger.info("[transactions/v3/finalize] step=invoice_update outcome=marked_paid invoiceId={} status={}",
+					req.getInvoiceId(), responseStatusName);
+			logger.info("[transactions/v3/finalize] step=activate_agreement invoiceId={} actor={}", req.getInvoiceId(),
+					req.getCreatedBy());
+			transactionDAO.activateAgreementAndClientStatusForInvoice(req.getInvoiceId(), req.getCreatedBy());
+			logger.info("[transactions/v3/finalize] step=activate_agreement outcome=ok invoiceId={}",
+					req.getInvoiceId());
+			if (!CollectionUtils.isEmpty(req.getBillingQuoteFinalizeSpecs())) {
+				try {
+					logger.info(
+							"[transactions/v3/finalize] step=billing_quote_fetch start invoiceId={} specCount={} transactionId={}",
+							req.getInvoiceId(), req.getBillingQuoteFinalizeSpecs().size(), transactionId);
+					List<BillingQuoteLineItemsResponse> quoteLineItems = subscriptionPlanHelper
+							.fetchQuoteLineItems(req.getBillingQuoteFinalizeSpecs());
+					logger.info(
+							"[transactions/v3/finalize] step=billing_quote_fetch outcome=ok invoiceId={} responseCount={}",
+							req.getInvoiceId(), quoteLineItems.size());
+					try {
+						logger.info(
+								"[transactions/v3/finalize] step=billing_quote_persist start invoiceId={} transactionId={} clientAgreementId={}",
+								req.getInvoiceId(), transactionId, effectiveClientAgreementId);
+						billingQuoteSubscriptionPersistenceService.persistFromQuoteResponses(quoteLineItems,
+								transactionId, effectiveClientAgreementId, req.getInvoiceId(),
+								clientPaymentTransactionId, req.getCreatedBy());
+						logger.info("[transactions/v3/finalize] step=billing_quote_persist outcome=ok invoiceId={}",
+								req.getInvoiceId());
+					} catch (Exception persistEx) {
+						logger.error(
+								"[transactions/v3/finalize] step=billing_quote_persist outcome=error invoiceId={} message={}",
+								req.getInvoiceId(), persistEx.getMessage(), persistEx);
+					}
+				} catch (Exception e) {
+					logger.error(
+							"[transactions/v3/finalize] step=billing_quote_fetch outcome=error invoiceId={} message={}",
+							req.getInvoiceId(), e.getMessage(), e);
+				}
 			} else {
-				invoiceNotificationHelper.sendInvoiceEmail(req.getInvoiceId(), "CARD", "VISA", "1111", "AU223312");
+				logger.info(
+						"[transactions/v3/finalize] step=billing_quote skipped=true reason=no_billing_quote_finalize_specs invoiceId={}",
+						req.getInvoiceId());
 			}
-		} catch (Exception e) {
-			System.err.println("Error in sending notification "+e.getMessage());
 		}
-		
-		// Mark invoice as PAID
-		UUID paidStatusId = transactionDAO.findInvoiceStatusIdByName("PAID");
-		
-		System.out.println("paidStatusId " + paidStatusId);
-		transactionDAO.updateInvoiceStatusAndPaidFlag(req.getInvoiceId(), paidStatusId, true, req.getCreatedBy());
-		transactionDAO.activateAgreementAndClientStatusForInvoice(req.getInvoiceId(), req.getCreatedBy());
+
+		logger.info(
+				"[transactions/v3/finalize] step=complete invoiceId={} invoiceStatus={} transactionId={} clientPaymentTransactionId={} partialPayment={}",
+				req.getInvoiceId(), responseStatusName, transactionId, clientPaymentTransactionId, partialPayment);
+		return new FinalizeTransactionResponse(req.getInvoiceId(), responseStatusName, clientPaymentTransactionId,
+				transactionId, partialPayment ? "Partial payment recorded" : "");
+	}
+
+	private boolean isManualPaymentGateway(FinalizeTransactionRequest req) {
+		String code = req.getPaymentGatewayCode();
+		return code == null || code.trim().isEmpty() || "MANUAL".equalsIgnoreCase(code.trim())
+				|| "CASH".equalsIgnoreCase(code.trim());
+	}
+
+	private UUID resolvePartialPaymentInvoiceStatusId() {
+		Optional<UUID> configured = Optional.empty();
+		if (partiallyPaidStatusName != null && !partiallyPaidStatusName.isBlank()) {
+			configured = transactionDAO.tryFindInvoiceStatusIdByName(partiallyPaidStatusName.trim());
+		}
+		return configured.orElseGet(() -> transactionDAO.findInvoiceStatusIdByName(invoiceInitialStatusName));
+	}
+
+	private void sendFinalizeInvoiceNotification(FinalizeTransactionRequest req, boolean isManual) {
+		String methodType = deriveNotificationPaymentMethodType(req, isManual);
+		String brand = blankToNull(req.getPaymentInstrumentBrand());
+		String last4 = blankToNull(req.getPaymentInstrumentLast4());
+		String auth = blankToNull(req.getPaymentAuthorizationReference());
+		logger.info(
+				"[transactions/v3/finalize] step=notification_detail invoiceId={} paymentInstrumentType={} hasBrand={} hasLast4={} hasAuthRef={}",
+				req.getInvoiceId(), methodType, brand != null, last4 != null, auth != null);
 		try {
-			List<SubscriptionPlanCreateRequest> subscriptionRequest = subscriptionPlanHelper
-					.buildRequests(req.getInvoiceId(), transactionId);
-			SubscriptionPlanBatchCreateRequest subscriptionPlanBatchCreateRequest = new SubscriptionPlanBatchCreateRequest();
-			subscriptionPlanBatchCreateRequest.setPlans(subscriptionRequest);
-			ObjectMapper mapper=new ObjectMapper();
-			System.out.println("soize "+subscriptionRequest.size());
-			//System.out.println("Data "+mapper.writeValueAsString(subscriptionRequest));
-			subscriptionPlanService.createPlans(subscriptionPlanBatchCreateRequest, UUID.randomUUID());
+			invoiceNotificationHelper.sendInvoiceEmail(req.getInvoiceId(), methodType, brand, last4, auth);
+			logger.info("[transactions/v3/finalize] step=notification_send outcome=ok invoiceId={}", req.getInvoiceId());
 		} catch (Exception e) {
-			System.out.println("Error is creating subscription " + e.getMessage());
+			logger.warn("[transactions/v3/finalize] step=notification_send outcome=fail invoiceId={} message={}",
+					req.getInvoiceId(), e.getMessage());
 		}
-		/*try {
-		MembershipSalesRequestDTO purchaseAgrRequest=agreementHelper.createPurchaseAgreementRequest(req.getInvoiceId());
-		ObjectMapper mapper=new ObjectMapper();
-		System.out.println("Data "+mapper.writeValueAsString(purchaseAgrRequest));
-		if(Objects.nonNull(purchaseAgrRequest)) {
-			UUID clientAgreementId=agreementHelper.callMembershipSalesApi(purchaseAgrRequest).getBody();
-			System.out.println("ClientAgreementid "+clientAgreementId);
-			if(clientAgreementId!=null) {
-				System.out.println("Updating clientAgreementId in invoice");
-				invoiceDao.updateClientAgreementId(req.getInvoiceId(), clientAgreementId);
+	}
+
+	private static String blankToNull(String s) {
+		return (s == null || s.isBlank()) ? null : s.trim();
+	}
+
+	private String deriveNotificationPaymentMethodType(FinalizeTransactionRequest req, boolean isManual) {
+		if (req.getPaymentInstrumentType() != null && !req.getPaymentInstrumentType().isBlank()) {
+			return req.getPaymentInstrumentType().trim();
+		}
+		if (isManual) {
+			return "CASH";
+		}
+		String method = req.getPaymentMethodCode();
+		if (method != null) {
+			String u = method.toUpperCase();
+			if (u.contains("CASH")) {
+				return "CASH";
+			}
+			if (u.contains("UPI")) {
+				return "UPI";
 			}
 		}
-		}catch (Exception e) {
-			System.err.println("Error in agreement purchase flow "+e.getMessage());
-		}*/
-		return new FinalizeTransactionResponse(req.getInvoiceId(), "PAID", clientPaymentTransactionId, transactionId,
-				"");
+		return "CARD";
 	}
 
 	@Override

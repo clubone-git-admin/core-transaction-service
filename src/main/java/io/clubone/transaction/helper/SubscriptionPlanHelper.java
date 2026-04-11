@@ -1,472 +1,85 @@
 package io.clubone.transaction.helper;
 
-import java.sql.Timestamp;
-import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.UUID;
-import java.util.stream.Collectors;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Repository;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
+import org.springframework.web.client.RestTemplate;
 
-import io.clubone.transaction.dao.InvoiceEntityPromotionDAO;
-import io.clubone.transaction.dao.SubscriptionPlanDao;
-import io.clubone.transaction.request.SubscriptionPlanCreateRequest;
-import io.clubone.transaction.v2.vo.CyclePriceDTO;
-import io.clubone.transaction.v2.vo.DiscountCodeDTO;
-import io.clubone.transaction.v2.vo.EntitlementDTO;
-import io.clubone.transaction.v2.vo.PlanTermDTO;
+import io.clubone.transaction.request.BillingQuoteFinalizeSpec;
+import io.clubone.transaction.response.BillingQuoteLineItemsResponse;
 
-@Repository
+/**
+ * Fetches billing quote line-item details from the billing vendor API using finalize specs.
+ * No DB access; callers use the returned payloads in a later step (e.g. subscription creation).
+ */
+@Service
 public class SubscriptionPlanHelper {
 
-	@Autowired
-	@Qualifier("cluboneJdbcTemplate")
-	private JdbcTemplate cluboneJdbcTemplate;
+	private static final Logger log = LoggerFactory.getLogger(SubscriptionPlanHelper.class);
 
 	@Autowired
-	private SubscriptionPlanDao subscriptionPlanDao;
-	
-	@Autowired
-	private InvoiceEntityPromotionDAO invoiceEntityPromotionDAO;
+	private RestTemplate restTemplate;
 
-	// Projection specific to this helper (includes plan fields)
-	public static class InvoiceEntityPlanRow {
-		UUID invoiceEntityId;
-		UUID entityId;
-		UUID entityTypeId;
-		LocalDate contractStartDate;
-		LocalDate contractEndDate;
-		UUID createdBy;
-
-		UUID subscriptionFrequencyId;
-		String subscriptionFrequency;
-		UUID subscriptionBillingDayRuleId;
-		Integer intervalCount;
-		Integer totalCycles;
-		UUID levelId;
-		UUID clientAgreementId;
-	    UUID agreementTermId;
-	    Integer termDurationValue;
-	    String termDurationUnitCode;
-	    String termDurationUnitName;
-	    Integer remainingCycles;
-	    Integer currentCycle;
-
-	}
+	@Value("${billing.quote.line-items.url}")
+	private String billingQuoteLineItemsUrl;
 
 	/**
-	 * Fetch ONLY those invoice entities whose plan template has a subscription
-	 * frequency
+	 * Calls {@code POST .../quote/line-items} once per spec, in order.
 	 */
-	public List<InvoiceEntityPlanRow> fetchInvoiceEntitiesWithPlan(UUID invoiceId, UUID transactionId) {
-
-	    final String sql = """
-	       WITH base AS (
-    SELECT
-        ie.invoice_entity_id,
-        ie.entity_id,                 -- entity_id == item_id
-        ie.entity_type_id,
-        COALESCE(ie.service_period_start, CAST(ie.created_on AS date)) AS contract_start_date,
-        (COALESCE(ie.service_period_start, CAST(ie.created_on AS date)) + INTERVAL '1 month')::date AS contract_end_date,
-        i.created_by,
-
-        ie.client_agreement_id,
-        a.agreement_term_id,
-
-        ppt_term.subscription_billing_day_rule_id,
-        lpt.billing_period_unit_id AS subscription_frequency_id,
-        COALESCE(ppt_term.interval_count, 1) AS interval_count,
-        ppt_term.total_cycles,
-        COALESCE(sf.code, sf.display_name) AS subscription_frequency_name,
-        i.level_id,
-        at.duration_value        AS term_duration_value,
-        ut.code                  AS term_duration_unit_code,
-        ut.name                  AS term_duration_unit_name,
-
-        -- ✅ count rows in the partition BEFORE filtering rn=1
-        COUNT(*) OVER (
-            PARTITION BY
-                ie.client_agreement_id,
-                ie.entity_id,
-                a.agreement_term_id,
-                ppt_term.subscription_billing_day_rule_id,
-                lpt.billing_period_unit_id
-        ) AS current_cycle,
-
-        -- ✅ remaining = total_cycles - count(rows)
-        CASE
-            WHEN ppt_term.total_cycles IS NULL THEN NULL
-            ELSE GREATEST(
-                ppt_term.total_cycles
-                - COUNT(*) OVER (
-                    PARTITION BY
-                        ie.client_agreement_id,
-                        ie.entity_id,
-                        a.agreement_term_id,
-                        ppt_term.subscription_billing_day_rule_id,
-                        lpt.billing_period_unit_id
-                ),
-                0
-            )
-        END AS remaining_cycle,
-
-        ROW_NUMBER() OVER (
-            PARTITION BY
-                ie.client_agreement_id,
-                ie.entity_id,
-                a.agreement_term_id,
-                ppt_term.subscription_billing_day_rule_id,
-                lpt.billing_period_unit_id
-            ORDER BY
-                (COALESCE(ie.service_period_start, CAST(ie.created_on AS date)) + INTERVAL '1 month')::date ASC,
-                COALESCE(ie.service_period_start, CAST(ie.created_on AS date)) DESC,
-                ie.created_on DESC,
-                ie.invoice_entity_id DESC
-        ) AS rn
-    FROM "transactions".invoice_entity ie
-    JOIN "transactions".invoice i
-      ON i.invoice_id = ie.invoice_id
-    JOIN "transactions"."transaction" t
-      ON t.invoice_id = i.invoice_id
-    JOIN package.package_plan_template ppt
-      ON ppt.package_plan_template_id = ie.price_plan_template_id
-    JOIN package.lu_plan_template lpt
-      ON lpt.lu_plan_template_id = ppt.lu_plan_template_id
-    JOIN billing_config.billing_period_unit sf
-      ON sf.billing_period_unit_id = lpt.billing_period_unit_id
-
-    LEFT JOIN client_agreements.client_agreement ca
-      ON ca.client_agreement_id = ie.client_agreement_id
-    LEFT JOIN agreements.agreement a
-      ON a.agreement_id = ca.agreement_id
-    LEFT JOIN agreements.agreement_term at
-      ON at.agreement_term_id = a.agreement_term_id
-    LEFT JOIN agreements.lu_duration_unit_type ut
-      ON ut.duration_unit_type_id = at.duration_unit_type_id
-    LEFT JOIN LATERAL (
-      SELECT tc.subscription_billing_day_rule_id,
-             tc.interval_count,
-             tc.total_cycles
-      FROM package.package_plan_template_term_config tc
-      WHERE tc.package_plan_template_id = ppt.package_plan_template_id
-        AND COALESCE(tc.is_active, true) = true
-        AND (at.agreement_term_id IS NULL OR tc.agreement_term_id = at.agreement_term_id)
-      ORDER BY tc.created_on DESC NULLS LAST, tc.package_plan_template_term_config_id
-      LIMIT 1
-    ) ppt_term ON TRUE
-
-    JOIN items.item it
-      ON it.item_id = ie.entity_id
-    JOIN items.lu_item_group ig
-      ON ig.item_group_id = it.item_group_id
-     AND ig.application_id = it.application_id
-
-    WHERE i.invoice_id = ?
-      AND t.transaction_id = ?
-      AND COALESCE(ie.is_active, true) = true
-      AND COALESCE(ppt.is_active, true) = true
-      AND COALESCE(sf.is_active, true) = true
-      AND COALESCE(it.is_active, true) = true
-      AND COALESCE(ig.is_active, true) = true
-      AND lpt.billing_period_unit_id IS NOT NULL
-      AND ig.code <> 'FEE'
-)
-SELECT
-    invoice_entity_id,
-    entity_id,
-    entity_type_id,
-    contract_start_date,
-    contract_end_date,
-    created_by,
-    client_agreement_id,
-    agreement_term_id,
-    subscription_billing_day_rule_id,
-    subscription_frequency_id,
-    interval_count,
-    total_cycles,
-    subscription_frequency_name,
-    level_id,
-    term_duration_value,
-    term_duration_unit_code,
-    term_duration_unit_name,
-
-    current_cycle,
-    remaining_cycle
-FROM base
-WHERE rn = 1
-ORDER BY contract_start_date NULLS LAST, invoice_entity_id;
-""";
-
-	    return cluboneJdbcTemplate.query(sql, (rs, rn) -> {
-	        InvoiceEntityPlanRow row = new InvoiceEntityPlanRow();
-	        row.invoiceEntityId = (UUID) rs.getObject("invoice_entity_id");
-	        row.entityId = (UUID) rs.getObject("entity_id");
-	        row.entityTypeId = (UUID) rs.getObject("entity_type_id");
-
-	        Timestamp cs = rs.getTimestamp("contract_start_date");
-	        if (cs != null) row.contractStartDate = cs.toLocalDateTime().toLocalDate();
-
-	        Timestamp ce = rs.getTimestamp("contract_end_date");
-	        if (ce != null) row.contractEndDate = ce.toLocalDateTime().toLocalDate();
-
-	        row.createdBy = (UUID) rs.getObject("created_by");
-	        row.subscriptionBillingDayRuleId = (UUID) rs.getObject("subscription_billing_day_rule_id");
-	        row.subscriptionFrequencyId = (UUID) rs.getObject("subscription_frequency_id");
-	        row.intervalCount = rs.getObject("interval_count") != null ? rs.getInt("interval_count") : 1;
-
-	        row.totalCycles = (Integer) rs.getObject("total_cycles");
-	        row.currentCycle=
-	        	    rs.getObject("current_cycle") == null
-	        	        ? null
-	        	        : ((Number) rs.getObject("current_cycle")).intValue();
-
-	        	row.remainingCycles=
-	        	    rs.getObject("remaining_cycle") == null
-	        	        ? null
-	        	        : ((Number) rs.getObject("remaining_cycle")).intValue();
-	    row.subscriptionFrequency = rs.getString("subscription_frequency_name");
-	        row.levelId = (UUID) rs.getObject("level_id");
-
-	        // ✅ NEW
-	        row.clientAgreementId = (UUID) rs.getObject("client_agreement_id");
-	        row.agreementTermId = (UUID) rs.getObject("agreement_term_id");
-	        row.termDurationValue = (Integer) rs.getObject("term_duration_value");
-	        row.termDurationUnitCode = rs.getString("term_duration_unit_code");
-	        row.termDurationUnitName = rs.getString("term_duration_unit_name");
-
-
-	        return row;
-	    }, invoiceId, transactionId);
-	}
-
-
-	public List<CyclePriceDTO> fetchCyclePrices(UUID invoiceEntityId) {
-		final String sql = """
-				    SELECT
-				        ieb.price_cycle_band_id,
-				        ieb.unit_price,
-				        ieb.is_price_overridden,
-				        bpcb.start_cycle AS cycle_start,
-				        bpcb.end_cycle   AS cycle_end,
-				        bpcb.allow_pos_price_override,
-				        bpcb.down_payment_units
-				    FROM "transactions".invoice_entity_price_band  AS ieb
-				    JOIN package.package_price_cycle_band      AS bpcb
-				      ON bpcb.package_price_cycle_band_id = ieb.price_cycle_band_id
-				    WHERE ieb.invoice_entity_id = ?
-				      AND COALESCE(ieb.is_active, true) = true
-				    ORDER BY ieb.created_on, bpcb.start_cycle
-				""";
-
-		return cluboneJdbcTemplate.query(sql, (rs, rowNum) -> {
-			CyclePriceDTO dto = new CyclePriceDTO();
-			dto.setPriceCycleBandId((UUID) rs.getObject("price_cycle_band_id"));
-			dto.setUnitPrice(rs.getBigDecimal("unit_price"));
-			// if your DTO has this field, keep it:
-			dto.setAllowPosPriceOverride(rs.getBoolean("is_price_overridden"));
-
-			// new fields
-			dto.setCycleStart((Integer) rs.getObject("cycle_start")); // null-safe
-			dto.setCycleEnd((Integer) rs.getObject("cycle_end")); // may be null (open-ended)
-			dto.setAllowPosPriceOverride(rs.getBoolean("allow_pos_price_override"));
-			dto.setDownPaymentUnits((Integer) rs.getObject("down_payment_units"));
-
-			return dto;
-		}, invoiceEntityId);
-	}
-
-	public List<DiscountCodeDTO> fetchDiscounts(UUID invoiceEntityId) {
-		// Discounts are applied on invoice_entity.discount_amount only; no per-line discount table.
-		return List.of();
-	}
-
-	public List<EntitlementDTO> fetchEntitlements(UUID invoiceEntityId) {
-		final String sql = """
-				    SELECT
-				      e.entitlement_mode_id,
-				      e.quantity_per_cycle,
-				      e.total_entitlement,
-				      COALESCE(e.is_unlimited, false) AS is_unlimited,
-				      e.max_redemptions_per_day
-				    FROM package.package_plan_template_entitlement e
-				    JOIN package.package_plan_template_term_config tc
-				      ON tc.package_plan_template_term_config_id = e.package_plan_template_term_config_id
-				    JOIN package.package_plan_template bpt
-				      ON bpt.package_plan_template_id = tc.package_plan_template_id
-				    JOIN "transactions".invoice_entity ie
-				      ON ie.price_plan_template_id = bpt.package_plan_template_id
-				    WHERE ie.invoice_entity_id = ?
-				      AND COALESCE(bpt.is_active, true) = true
-				      AND COALESCE(tc.is_active, true) = true
-				    ORDER BY e.created_on
-				""";
-
-		return cluboneJdbcTemplate.query(sql, (rs, rowNum) -> {
-			EntitlementDTO dto = new EntitlementDTO();
-			dto.setEntitlementModeId((UUID) rs.getObject("entitlement_mode_id"));
-			dto.setQuantityPerCycle((Integer) rs.getObject("quantity_per_cycle")); // may be null
-			dto.setTotalEntitlement((Integer) rs.getObject("total_entitlement")); // may be null
-			dto.setIsUnlimited(rs.getBoolean("is_unlimited")); // defaulted via COALESCE
-			dto.setMaxRedemptionsPerDay((Integer) rs.getObject("max_redemptions_per_day"));
-			return dto;
-		}, invoiceEntityId);
-	}
-
-	/** Build one SubscriptionPlanCreateRequest per qualifying invoice entity */
-	public List<SubscriptionPlanCreateRequest> buildRequests(UUID invoiceId, UUID transactionId) {
-		List<InvoiceEntityPlanRow> rows = fetchInvoiceEntitiesWithPlan(invoiceId, transactionId);
-		UUID cpmId = subscriptionPlanDao.findClientPaymentMethodIdByTransactionId(transactionId).orElse(null);
-		 List<UUID> ieIds = rows.stream().map(r -> r.invoiceEntityId).distinct().toList();
-		    Map<UUID, List<InvoiceEntityPromotionDAO.InvoiceEntityPromotionRow>> promoMap =
-		            invoiceEntityPromotionDAO.fetchActivePromotionsByInvoiceEntityIds(ieIds);
-
-		return rows.stream().map(r -> {
-			SubscriptionPlanCreateRequest req = new SubscriptionPlanCreateRequest();
-
-			// who created the invoice
-			req.setCreatedBy(r.createdBy);
-
-			// entity mapping
-			req.setEntityId(r.entityId);
-			req.setEntityTypeId(r.entityTypeId);
-			req.setClientPaymentMethodId(cpmId);
-			
-			req.setAgreementTermId(r.agreementTermId);
-			req.setClientAgreementId(r.clientAgreementId);
-
-			// plan fields required by your request
-			req.setSubscriptionFrequencyId(r.subscriptionFrequencyId);
-			req.setSubscriptionBillingDayRuleId(r.subscriptionBillingDayRuleId);
-			req.setIntervalCount(r.intervalCount != null ? r.intervalCount : 1);
-			req.setInvoiceId(invoiceId);req.setLevelId(r.levelId);
-
-			// dates (fallback end date if null)
-			LocalDate start = r.contractStartDate != null ? r.contractStartDate : LocalDate.now();
-			//LocalDate end = computeEndDate(start, r.totalCycles, r.intervalCount, r.subscriptionFrequency);
-			LocalDate end =
-				    computeEndDateFromTerm(
-				        start,
-				        r.termDurationValue,
-				        r.termDurationUnitCode
-				    );
-			req.setContractStartDate(start);
-			req.setContractEndDate(end!=null?end:start);
-
-			// optional children
-			List<CyclePriceDTO> cyclePrices=fetchCyclePrices(r.invoiceEntityId);
-			if(!CollectionUtils.isEmpty(cyclePrices) && cyclePrices.size()==1) {
-				req.setCyclePrices(cyclePrices);
-			}else {
-			req.setCyclePrices(cyclePrices.stream()
-					.filter(cp -> cp.getDownPaymentUnits() == null || cp.getDownPaymentUnits() == 0)
-					.collect(Collectors.toList()));
-			}
-			//req.setDiscountCodes(fetchDiscounts(r.invoiceEntityId));
-			req.setEntitlements(fetchEntitlements(r.invoiceEntityId));
-			// req.setPromos(...);
-			PlanTermDTO planterm = new PlanTermDTO();
-			planterm.setIsActive(true);
-			int downPaymentUnits = cyclePrices.stream()
-				    .filter(cp -> cp.getDownPaymentUnits() != null)
-				    .mapToInt(cp -> cp.getDownPaymentUnits())
-				    .findFirst()
-				    .orElse(0);
-			//planterm.setRemainingCycles(r.totalCycles-downPaymentUnits);
-			planterm.setRemainingCycles(r.remainingCycles);
-			planterm.setEndDate(end);
-			planterm.setStartDate(start);
-			//planterm.setSubscriptionPlanId(cpmId);
-			req.setTerm(planterm);
-			req.setCurrentCycle(r.currentCycle);
-			req.setRemainingCycles(r.remainingCycles);
-			req.setTotalCycles(r.totalCycles);
-			List<InvoiceEntityPromotionDAO.InvoiceEntityPromotionRow> promoRows =
-	                promoMap.getOrDefault(r.invoiceEntityId, List.of());
-
-	        // For plan promo: choose your cycle range rule
-	        int cycleStart = (r.currentCycle == null ? 1 : r.currentCycle);   // example
-	        Integer cycleEnd = null; // open-ended OR compute based on your business rule
-
-	        req.setSubscriptionPlanPromos(
-	                invoiceEntityPromotionDAO.toSubscriptionPlanPromos(promoRows, cycleStart, cycleEnd, null)
-	        );
-
-	        req.setSubscriptionBillingPromotions(
-	                invoiceEntityPromotionDAO.toSubscriptionBillingPromotions(promoRows)
-	        );
-			
-			return req;
-		}).toList();
-	}
-
-	private static LocalDate computeEndDate(LocalDate start, Integer totalCycles, Integer intervalCount,
-			String subscriptionFrequencyName) {
-		if (start == null)
-			start = LocalDate.now();
-
-// If you treat null totalCycles as open-ended, return null here instead of 1
-		int cycles = (totalCycles != null && totalCycles > 0) ? totalCycles : 1;
-		int interval = (intervalCount != null && intervalCount > 0) ? intervalCount : 1;
-
-		String f = subscriptionFrequencyName == null ? "" : subscriptionFrequencyName.trim().toUpperCase();
-		System.out.println("subscriptionFrequencyName "+subscriptionFrequencyName);
-		switch (f) {
-		case "DAILY":
-			return start.plusDays((long) cycles * interval);
-		case "WEEKLY":
-			return start.plusWeeks((long) cycles * interval);
-		case "MONTHLY":
-			return start.plusMonths((long) cycles * interval);
-		case "YEARLY":
-			return start.plusYears((long) cycles * interval);
-		case "QUARTERLY": // treat as 3 months per cycle
-			return start.plusMonths((long) cycles * interval * 3);
-		default:
-// Sensible fallback; you can throw instead if you want to force valid values
-			return start.plusMonths((long) cycles * interval);
+	public List<BillingQuoteLineItemsResponse> fetchQuoteLineItems(List<BillingQuoteFinalizeSpec> specs) {
+		if (CollectionUtils.isEmpty(specs)) {
+			log.info("[billing-quote/line-items] step=start outcome=skip reason=empty_specs url={}",
+					billingQuoteLineItemsUrl);
+			return List.of();
 		}
+		log.info("[billing-quote/line-items] step=start url={} specCount={}", billingQuoteLineItemsUrl, specs.size());
+		List<BillingQuoteLineItemsResponse> results = new ArrayList<>(specs.size());
+		int index = 0;
+		for (BillingQuoteFinalizeSpec spec : specs) {
+			index++;
+			log.info(
+					"[billing-quote/line-items] step=request index={}/{} entityTypeCode={} entityId={} planTemplateId={} startDate={} levelId={}",
+					index, specs.size(), spec.getEntityTypeCode(), spec.getEntityId(), spec.getPlanTemplateId(),
+					spec.getStartDate(), spec.getLevelId());
+			long t0 = System.nanoTime();
+			HttpHeaders headers = new HttpHeaders();
+			headers.setContentType(MediaType.APPLICATION_JSON);
+			HttpEntity<BillingQuoteFinalizeSpec> entity = new HttpEntity<>(spec, headers);
+			ResponseEntity<BillingQuoteLineItemsResponse> response = restTemplate.exchange(
+					billingQuoteLineItemsUrl,
+					HttpMethod.POST,
+					entity,
+					BillingQuoteLineItemsResponse.class);
+			long elapsedMs = (System.nanoTime() - t0) / 1_000_000L;
+			if (!response.getStatusCode().is2xxSuccessful() || response.getBody() == null) {
+				log.error(
+						"[billing-quote/line-items] step=response index={} outcome=error httpStatus={} elapsedMs={}",
+						index, response.getStatusCode(), elapsedMs);
+				throw new IllegalStateException(
+						"Billing quote line-items call failed: status=" + response.getStatusCode());
+			}
+			BillingQuoteLineItemsResponse body = response.getBody();
+			results.add(body);
+			log.info(
+					"[billing-quote/line-items] step=response index={}/{} outcome=ok httpStatus={} elapsedMs={} responsePlanTemplateId={} responseStartDate={} hasLineItems={} hasRecurring={}",
+					index, specs.size(), response.getStatusCode(), elapsedMs,
+					body != null ? body.getPlanTemplateId() : null,
+					body != null ? body.getStartDate() : null,
+					body != null && body.getLineItems() != null && body.getLineItems().isArray(),
+					body != null && body.getRecurring() != null && body.getRecurring().isArray());
+		}
+		log.info("[billing-quote/line-items] step=complete outcome=ok totalResponses={}", results.size());
+		return results;
 	}
-	
-	private LocalDate computeEndDateFromTerm(
-	        LocalDate startDate,
-	        Integer durationValue,
-	        String durationUnitCode
-	) {
-	    if (startDate == null || durationValue == null || durationUnitCode == null) {
-	        return null;
-	    }
-
-	    switch (durationUnitCode.toUpperCase()) {
-	        case "DAY":
-	        case "DAYS":
-	        case "D":
-	            return startDate.plusDays(durationValue);
-
-	        case "WEEK":
-	        case "WEEKS":
-	        case "W":
-	            return startDate.plusWeeks(durationValue);
-
-	        case "MONTH":
-	        case "MONTHS":
-	        case "M":
-	            return startDate.plusMonths(durationValue);
-
-	        case "YEAR":
-	        case "YEARS":
-	        case "Y":
-	            return startDate.plusYears(durationValue);
-
-	        default:
-	            throw new IllegalArgumentException(
-	                "Unsupported duration unit: " + durationUnitCode
-	            );
-	    }
-	}
-
 }
