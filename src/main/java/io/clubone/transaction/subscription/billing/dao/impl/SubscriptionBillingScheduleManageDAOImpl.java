@@ -4,6 +4,10 @@ import io.clubone.transaction.subscription.billing.dao.SubscriptionBillingSchedu
 import io.clubone.transaction.subscription.billing.dto.*;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+
+import java.math.BigDecimal;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Types;
 import java.util.List;
 import java.util.UUID;
@@ -26,62 +30,111 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 s.subscription_plan_id,
                 s.subscription_instance_id,
                 s.cycle_number,
+                s.label,
+                s.period_label,
                 s.billing_period_start,
                 s.billing_period_end,
                 s.billing_date,
+                s.quantity,
+                s.unit_price,
+                s.unit_price_before_discount,
                 s.base_amount,
                 s.override_amount,
-                s.system_adjustment_amount,
-                s.manual_adjustment_amount,
                 s.discount_amount,
                 s.tax_amount,
+                s.tax_pct,
+                s.subtotal_before_tax,
                 s.final_amount,
+                s.is_prorated,
+                s.is_one_time,
+                s.is_final_cycle,
+                s.billing_schedule_status_id,
                 st.status_code,
                 st.display_name as status_display_name,
-                s.is_freeze_cycle,
-                s.is_cancellation_cycle,
-                s.is_prorated,
-                s.is_generated,
-                s.is_locked,
-                s.invoice_id,
-                s.notes
+                coalesce(adj.total_adjustment_amount, 0) as total_adjustment_amount
             from client_subscription_billing.subscription_billing_schedule s
-            join client_subscription_billing.lu_billing_schedule_status st
-              on st.billing_schedule_status_id = s.billing_schedule_status_id
+            left join billing_config.billing_schedule_status st
+                   on st.billing_schedule_status_id = s.billing_schedule_status_id
+            left join (
+                select
+                    billing_schedule_id,
+                    sum(amount) as total_adjustment_amount
+                from client_subscription_billing.subscription_billing_schedule_adjustment
+                where is_active = true
+                group by billing_schedule_id
+            ) adj on adj.billing_schedule_id = s.billing_schedule_id
             where s.client_agreement_id = ?::uuid
             order by s.billing_date asc, s.cycle_number asc
             """;
 
-        return cluboneJdbcTemplate.query(sql, (rs, rowNum) -> {
+        System.out.println("===== getScheduleByClientAgreementId START =====");
+        System.out.println("ClientAgreementId: " + clientAgreementId);
+        System.out.println("Executing SQL for updated subscription_billing_schedule structure");
+
+        List<SubscriptionBillingScheduleItemDTO> result = cluboneJdbcTemplate.query(sql, (rs, rowNum) -> {
             SubscriptionBillingScheduleItemDTO dto = new SubscriptionBillingScheduleItemDTO();
-            dto.setBillingScheduleId(UUID.fromString(rs.getString("billing_schedule_id")));
-            dto.setClientAgreementId(UUID.fromString(rs.getString("client_agreement_id")));
-            dto.setSubscriptionPlanId(UUID.fromString(rs.getString("subscription_plan_id")));
-            dto.setSubscriptionInstanceId(UUID.fromString(rs.getString("subscription_instance_id")));
+
+            dto.setBillingScheduleId(getUuid(rs, "billing_schedule_id"));
+            dto.setClientAgreementId(getUuid(rs, "client_agreement_id"));
+            dto.setSubscriptionPlanId(getUuid(rs, "subscription_plan_id"));
+            dto.setSubscriptionInstanceId(getUuid(rs, "subscription_instance_id"));
+
             dto.setCycleNumber(rs.getInt("cycle_number"));
             dto.setBillingPeriodStart(rs.getDate("billing_period_start").toLocalDate());
             dto.setBillingPeriodEnd(rs.getDate("billing_period_end").toLocalDate());
             dto.setBillingDate(rs.getDate("billing_date").toLocalDate());
+
             dto.setBaseAmount(rs.getBigDecimal("base_amount"));
             dto.setOverrideAmount(rs.getBigDecimal("override_amount"));
-            dto.setSystemAdjustmentAmount(rs.getBigDecimal("system_adjustment_amount"));
-            dto.setManualAdjustmentAmount(rs.getBigDecimal("manual_adjustment_amount"));
+            dto.setSystemAdjustmentAmount(rs.getBigDecimal("total_adjustment_amount"));
+            dto.setManualAdjustmentAmount(BigDecimal.ZERO);
+
             dto.setDiscountAmount(rs.getBigDecimal("discount_amount"));
             dto.setTaxAmount(rs.getBigDecimal("tax_amount"));
             dto.setFinalAmount(rs.getBigDecimal("final_amount"));
+
             dto.setStatusCode(rs.getString("status_code"));
             dto.setStatusDisplayName(rs.getString("status_display_name"));
-            dto.setIsFreezeCycle(rs.getBoolean("is_freeze_cycle"));
-            dto.setIsCancellationCycle(rs.getBoolean("is_cancellation_cycle"));
-            dto.setIsProrated(rs.getBoolean("is_prorated"));
-            dto.setIsGenerated(rs.getBoolean("is_generated"));
-            dto.setIsLocked(rs.getBoolean("is_locked"));
 
-            String invoiceId = rs.getString("invoice_id");
-            dto.setInvoiceId(invoiceId == null ? null : UUID.fromString(invoiceId));
-            dto.setNotes(rs.getString("notes"));
+            dto.setIsFreezeCycle(false);
+            dto.setIsCancellationCycle(false);
+            dto.setIsProrated(rs.getObject("is_prorated", Boolean.class));
+            dto.setIsGenerated(true);
+            dto.setIsLocked(false);
+
+            dto.setInvoiceId(null);
+            dto.setNotes(buildNotes(rs));
+
+            System.out.println("Mapped row #" + rowNum
+                    + " | cycle=" + dto.getCycleNumber()
+                    + " | billingDate=" + dto.getBillingDate()
+                    + " | baseAmount=" + dto.getBaseAmount()
+                    + " | finalAmount=" + dto.getFinalAmount()
+                    + " | adjustmentAmount=" + dto.getSystemAdjustmentAmount());
+
             return dto;
         }, clientAgreementId);
+
+        System.out.println("Total rows fetched: " + result.size());
+        System.out.println("===== getScheduleByClientAgreementId END =====");
+
+        return result;
+    }
+    private UUID getUuid(ResultSet rs, String column) throws SQLException {
+        String value = rs.getString(column);
+        return value == null ? null : UUID.fromString(value);
+    }
+
+    private String buildNotes(ResultSet rs) throws SQLException {
+        String label = rs.getString("label");
+        String periodLabel = rs.getString("period_label");
+        Integer quantity = (Integer) rs.getObject("quantity");
+        BigDecimal unitPrice = rs.getBigDecimal("unit_price");
+
+        return "label=" + label
+                + ", periodLabel=" + periodLabel
+                + ", quantity=" + quantity
+                + ", unitPrice=" + unitPrice;
     }
 
     @Override
