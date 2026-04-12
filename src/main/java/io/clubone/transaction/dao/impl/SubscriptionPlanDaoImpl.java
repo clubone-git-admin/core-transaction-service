@@ -164,14 +164,14 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 	public UUID insertSubscriptionPlan(SubscriptionPlanCreateRequest req, UUID createdBy) {
 		final String sql = """
 				    INSERT INTO client_subscription_billing.subscription_plan
-				      ( client_payment_method_id, subscription_frequency_id, interval_count,
+				      ( client_payment_method_id, interval_count,
 				       subscription_billing_day_rule_id, is_active, created_on, created_by,
 				        contract_start_date, contract_end_date,client_agreement_id,agreement_term_id)
-				    VALUES (?,?,?,?, TRUE, now(), ?, ?, ?,?,?)
+				    VALUES (?,?,?, TRUE, now(), ?, ?, ?,?,?)
 				    RETURNING subscription_plan_id
 				""";
 		return DaoUtils.queryForUuid(cluboneJdbcTemplate, sql,  req.getClientPaymentMethodId(),
-				req.getSubscriptionFrequencyId(), req.getIntervalCount(), req.getSubscriptionBillingDayRuleId(),
+				req.getIntervalCount(), req.getSubscriptionBillingDayRuleId(),
 				createdBy,  req.getContractStartDate(), req.getContractEndDate(),req.getClientAgreementId(),req.getAgreementTermId());
 	}
 
@@ -577,7 +577,7 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 
 				  -- plan
 				  sp.interval_count,
-				  sp.subscription_frequency_id,
+				  sbcs.billing_period_unit_id AS subscription_frequency_id,
 				  sp.contract_start_date,
 				  sp.contract_end_date,
 				  sp.entity_id,
@@ -628,8 +628,17 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 				  ON si.subscription_instance_id = sbh.subscription_instance_id
 				LEFT JOIN client_subscription_billing.subscription_plan sp
 				  ON sp.subscription_plan_id = si.subscription_plan_id
+				LEFT JOIN LATERAL (
+				  SELECT sps0.*
+				  FROM client_subscription_billing.subscription_purchase_snapshot sps0
+				  WHERE sps0.subscription_plan_id = sp.subscription_plan_id
+				  ORDER BY sps0.created_on DESC NULLS LAST
+				  LIMIT 1
+				) sps ON TRUE
+				LEFT JOIN client_subscription_billing.subscription_billing_config_snapshot sbcs
+				  ON sbcs.subscription_billing_config_snapshot_id = sps.subscription_billing_config_snapshot_id
 				LEFT JOIN billing_config.billing_period_unit lf
-				  ON lf.billing_period_unit_id = sp.subscription_frequency_id
+				  ON lf.billing_period_unit_id = sbcs.billing_period_unit_id
 
 				-- latest plan term (if any)
 				LEFT JOIN LATERAL (

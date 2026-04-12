@@ -5,10 +5,23 @@ import java.math.RoundingMode;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.Locale;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,11 +34,9 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.CollectionUtils;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import io.clubone.transaction.billing.quote.BillingQuoteDeserializeModels.AppliedPricingRow;
 import io.clubone.transaction.billing.quote.BillingQuoteDeserializeModels.BillingSection;
@@ -45,6 +56,29 @@ import io.clubone.transaction.response.BillingQuoteLineItemsResponse;
 public class BillingQuoteSubscriptionPersistenceService {
 
 	private static final Logger log = LoggerFactory.getLogger(BillingQuoteSubscriptionPersistenceService.class);
+
+	private static final Pattern CYCLE_LABEL_NUMBER = Pattern.compile("(?i)cycle\\s*#?\\s*(\\d+)");
+
+	/** First two ISO dates in {@code period_label} (e.g. human text with embedded yyyy-MM-dd). */
+	private static final Pattern PERIOD_LABEL_ISO_DATES = Pattern.compile("(\\d{4}-\\d{2}-\\d{2})");
+
+	/** Text inside parentheses, e.g. {@code Cycle 2 (May 23-Jun 22)} → {@code May 23-Jun 22}. */
+	private static final Pattern PERIOD_LABEL_PAREN_CONTENT = Pattern.compile("\\(([^)]+)\\)");
+
+	private static final DateTimeFormatter MONTH_DAY_EN = DateTimeFormatter.ofPattern("MMM d uuuu", Locale.ENGLISH);
+
+	private record PendingSchedule(boolean fromAgg, RecurringForecastRow recRow, int recurringIndex, int cycleNumber) {
+	}
+
+	private record ForecastBounds(LocalDate periodStart, LocalDate periodEnd) {
+	}
+
+	private record InvoiceHeaderAmounts(BigDecimal totalAmount, BigDecimal subTotal, BigDecimal taxAmount,
+			BigDecimal discountAmount) {
+		static InvoiceHeaderAmounts empty() {
+			return new InvoiceHeaderAmounts(null, null, null, null);
+		}
+	}
 
 	private final JdbcTemplate jdbc;
 	private final ObjectMapper objectMapper;
@@ -76,11 +110,12 @@ public class BillingQuoteSubscriptionPersistenceService {
 	 */
 	@Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
 	public void persistFromQuoteResponses(List<BillingQuoteLineItemsResponse> quotes, UUID transactionId,
-			UUID clientAgreementId, UUID invoiceId, UUID clientPaymentTransactionId, UUID createdBy) {
+			UUID clientAgreementId, UUID invoiceId, UUID clientPaymentTransactionId, UUID createdBy,
+			boolean invoicePaid) {
 		log.info(
-				"[billing-quote/persist] step=start transactionId={} invoiceId={} clientAgreementId={} clientPaymentTransactionId={} quoteCount={} createdBy={}",
+				"[billing-quote/persist] step=start transactionId={} invoiceId={} clientAgreementId={} clientPaymentTransactionId={} quoteCount={} invoicePaid={} createdBy={}",
 				transactionId, invoiceId, clientAgreementId, clientPaymentTransactionId,
-				quotes == null ? 0 : quotes.size(), createdBy);
+				quotes == null ? 0 : quotes.size(), invoicePaid, createdBy);
 		if (CollectionUtils.isEmpty(quotes)) {
 			log.info("[billing-quote/persist] step=validation outcome=skip reason=no_quotes");
 			return;
@@ -118,10 +153,11 @@ public class BillingQuoteSubscriptionPersistenceService {
 				billingHistorySuccessStatusCode, initialBillingScheduleStatusCode, pifBillingPeriodFallbackCode);
 		UUID billingStatusId = billingLookup.requireBillingStatusId(billingHistorySuccessStatusCode);
 		UUID instanceStatusId = billingLookup.requireSubscriptionInstanceStatusIdByName("ACTIVE");
-		UUID scheduleStatusId = billingLookup.requireBillingScheduleStatusId(initialBillingScheduleStatusCode);
+		UUID plannedScheduleStatusId = billingLookup.requireBillingScheduleStatusId(initialBillingScheduleStatusCode);
+		UUID paidScheduleStatusId = billingLookup.requireBillingScheduleStatusId("PAID");
 		log.info(
-				"[billing-quote/persist] step=resolve_status_ids outcome=ok billingStatusId={} instanceStatusId={} scheduleStatusId={}",
-				billingStatusId, instanceStatusId, scheduleStatusId);
+				"[billing-quote/persist] step=resolve_status_ids outcome=ok billingStatusId={} instanceStatusId={} plannedScheduleStatusId={} paidScheduleStatusId={}",
+				billingStatusId, instanceStatusId, plannedScheduleStatusId, paidScheduleStatusId);
 
 		int q = 0;
 		for (BillingQuoteLineItemsResponse quote : quotes) {
@@ -130,7 +166,8 @@ public class BillingQuoteSubscriptionPersistenceService {
 					"[billing-quote/persist] step=quote_iteration start quoteIndex={}/{} planTemplateId={} entityId={} startDate={}",
 					q, quotes.size(), quote.getPlanTemplateId(), quote.getEntityId(), quote.getStartDate());
 			persistOneQuote(quote, clientPaymentMethodId, clientAgreementId, invoiceId, clientPaymentTransactionId,
-					createdBy, billingStatusId, instanceStatusId, scheduleStatusId);
+					createdBy, billingStatusId, instanceStatusId, plannedScheduleStatusId, paidScheduleStatusId,
+					invoicePaid);
 			log.info("[billing-quote/persist] step=quote_iteration complete quoteIndex={}/{}", q, quotes.size());
 		}
 		log.info("[billing-quote/persist] step=complete outcome=ok transactionId={} invoiceId={} quotesProcessed={}",
@@ -139,7 +176,8 @@ public class BillingQuoteSubscriptionPersistenceService {
 
 	private void persistOneQuote(BillingQuoteLineItemsResponse quote, UUID clientPaymentMethodId,
 			UUID clientAgreementId, UUID invoiceId, UUID clientPaymentTransactionId, UUID createdBy,
-			UUID billingStatusId, UUID instanceStatusId, UUID scheduleStatusId) {
+			UUID billingStatusId, UUID instanceStatusId, UUID plannedScheduleStatusId, UUID paidScheduleStatusId,
+			boolean invoicePaid) {
 
 		BillingSection billing = readSection(quote.getBilling(), BillingSection.class);
 		PlanPosDetailSection pos = readSection(quote.getPlanPosDetail(), PlanPosDetailSection.class);
@@ -148,11 +186,24 @@ public class BillingQuoteSubscriptionPersistenceService {
 		}
 
 		List<QuoteLineItemRow> lines = readLineItems(quote);
+		List<QuoteLineItemRow> subscriptionLines = nonFeeLineItems(lines);
+		int feeLineCount = lines.size() - subscriptionLines.size();
 		log.info(
-				"[billing-quote/persist] step=parse_quote planTemplateId={} frequencyCode={} lineItemCount={} packagePriceCount={} entitlementCount={}",
-				pos.getPackagePlanTemplateId(), billing.getFrequencyCode(), lines.size(),
-				pos.getPackagePrices() == null ? 0 : pos.getPackagePrices().size(),
+				"[billing-quote/persist] step=parse_quote planTemplateId={} frequencyCode={} lineItemCount={} subscriptionLineItemCount={} feeLineItemsSkipped={} packagePriceCount={} entitlementCount={}",
+				pos.getPackagePlanTemplateId(), billing.getFrequencyCode(), lines.size(), subscriptionLines.size(),
+				feeLineCount, pos.getPackagePrices() == null ? 0 : pos.getPackagePrices().size(),
 				pos.getEntitlements() == null ? 0 : pos.getEntitlements().size());
+
+		/*
+		 * Fee-only quotes (e.g. PIF upfront fee line with itemGroupCode FEE) must not create subscription_* rows.
+		 * Previously we only omitted FEE lines from line-item inserts but still inserted plan/snapshot/instance/schedule.
+		 */
+		if (!lines.isEmpty() && subscriptionLines.isEmpty()) {
+			log.info(
+					"[billing-quote/persist] step=validation outcome=skip reason=only_fee_line_items planTemplateId={} packagePlanTemplateId={}",
+					quote.getPlanTemplateId(), pos.getPackagePlanTemplateId());
+			return;
+		}
 
 		log.info(
 				"[billing-quote/persist] step=billing_lookups codes frequency={} chargeTrigger={} chargeEnd={} timing={} alignment={} proration={} termConfigId={}",
@@ -183,33 +234,21 @@ public class BillingQuoteSubscriptionPersistenceService {
 				INSERT INTO client_subscription_billing.subscription_plan (
 				    subscription_plan_id,
 				    client_payment_method_id,
-				    subscription_frequency_id,
-				    interval_count,
-				    subscription_billing_day_rule_id,
-				    contract_start_date,
-				    contract_end_date,
 				    client_agreement_id,
 				    package_item_id,
 				    package_plan_template_id,
-				    term_interval_count,
 				    term_total_cycles,
 				    is_active,
 				    created_on,
 				    created_by
 				) VALUES (
-				    gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, true, now(), ?
+				    gen_random_uuid(), ?, ?, ?, ?, ?, true, now(), ?
 				) RETURNING subscription_plan_id
 				""", UUID.class,
 				clientPaymentMethodId,
-				billingPeriodUnitId,
-				nz(billing.getIntervalCount(), 1),
-				dayRuleId,
-				contractStart,
-				contractEnd,
 				clientAgreementId,
 				pos.getPackageItemId(),
 				pos.getPackagePlanTemplateId(),
-				pos.getTermIntervalCount(),
 				pos.getTermTotalCycles(),
 				createdBy);
 		log.info("[billing-quote/persist] step=insert_subscription_plan outcome=ok subscriptionPlanId={}",
@@ -224,7 +263,6 @@ public class BillingQuoteSubscriptionPersistenceService {
 				INSERT INTO client_subscription_billing.subscription_billing_config_snapshot (
 				    subscription_billing_config_snapshot_id,
 				    subscription_plan_id,
-				    client_agreement_id,
 				    charge_trigger_type_id,
 				    charge_end_condition_id,
 				    billing_period_unit_id,
@@ -240,11 +278,10 @@ public class BillingQuoteSubscriptionPersistenceService {
 				    end_specific_date,
 				    created_by
 				) VALUES (
-				    gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+				    gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 				) RETURNING subscription_billing_config_snapshot_id
 				""", UUID.class,
 				subscriptionPlanId,
-				clientAgreementId,
 				chargeTriggerId,
 				chargeEndId,
 				billingPeriodUnitId,
@@ -262,13 +299,11 @@ public class BillingQuoteSubscriptionPersistenceService {
 		log.info("[billing-quote/persist] step=insert_config_snapshot outcome=ok subscriptionBillingConfigSnapshotId={}",
 				configSnapshotId);
 
-		log.info("[billing-quote/persist] step=insert_purchase_snapshot planCode={} quoteMode={}", pos.getLuPlanCode(),
-				billing.getQuoteMode());
+		log.info("[billing-quote/persist] step=insert_purchase_snapshot planCode={}", pos.getLuPlanCode());
 		UUID purchaseSnapshotId = jdbc.queryForObject("""
 				INSERT INTO client_subscription_billing.subscription_purchase_snapshot (
 				    subscription_purchase_snapshot_id,
 				    subscription_plan_id,
-				    client_agreement_id,
 				    subscription_billing_config_snapshot_id,
 				    package_item_id,
 				    package_version_id,
@@ -278,16 +313,12 @@ public class BillingQuoteSubscriptionPersistenceService {
 				    plan_description,
 				    term_interval_count,
 				    term_total_cycles,
-				    quote_mode,
-				    disclosure_auto_renewal,
-				    disclosure_min_term,
 				    captured_by
 				) VALUES (
-				    gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+				    gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 				) RETURNING subscription_purchase_snapshot_id
 				""", UUID.class,
 				subscriptionPlanId,
-				clientAgreementId,
 				configSnapshotId,
 				pos.getPackageItemId(),
 				pos.getPackageVersionId(),
@@ -297,34 +328,28 @@ public class BillingQuoteSubscriptionPersistenceService {
 				pos.getLuPlanDescription(),
 				pos.getTermIntervalCount(),
 				pos.getTermTotalCycles(),
-				trunc(billing.getQuoteMode(), 20),
-				firstNonBlankLineField(lines, QuoteLineItemRow::getDisclosureAutoRenewal),
-				firstNonBlankLineField(lines, QuoteLineItemRow::getDisclosureMinTerm),
 				createdBy);
 		log.info("[billing-quote/persist] step=insert_purchase_snapshot outcome=ok subscriptionPurchaseSnapshotId={}",
 				purchaseSnapshotId);
 
-		jdbc.update("""
-				UPDATE client_subscription_billing.subscription_plan
-				   SET purchase_snapshot_id = ?
-				 WHERE subscription_plan_id = ?
-				""", purchaseSnapshotId, subscriptionPlanId);
-		log.info("[billing-quote/persist] step=update_subscription_plan_purchase_snapshot subscriptionPlanId={}",
-				subscriptionPlanId);
-
 		insertPurchaseSnapshotPrices(purchaseSnapshotId, pos.getPackagePrices());
 		insertPurchaseSnapshotEntitlements(purchaseSnapshotId, pos.getEntitlements());
-		insertPurchaseSnapshotLegalRows(purchaseSnapshotId, lines);
+		insertPurchaseSnapshotLegalRows(purchaseSnapshotId, subscriptionLines);
+		insertPurchaseSnapshotTaxRows(purchaseSnapshotId, subscriptionLines);
 
-		LocalDate instanceEnd = contractEnd;
+		ZoneId quoteZone = parseZone(quote.getTimezone());
+		LocalDate todayInQuoteTz = LocalDate.now(quoteZone);
+		LocalDate nextBillingDate = resolveFirstCycleBillingDate(quote, subscriptionLines, contractStart);
+		LocalDate lastBilledOn = resolveLastBilledOn(subscriptionLines, invoicePaid, todayInQuoteTz);
+		log.info(
+				"[billing-quote/persist] step=subscription_instance_dates nextBillingDate={} lastBilledOn={} invoicePaid={} todayInQuoteTz={}",
+				nextBillingDate, lastBilledOn, invoicePaid, todayInQuoteTz);
+
 		log.info("[billing-quote/persist] step=insert_subscription_instance");
 		UUID subscriptionInstanceId = jdbc.queryForObject("""
 				INSERT INTO client_subscription_billing.subscription_instance (
 				    subscription_instance_id,
 				    subscription_plan_id,
-				    client_agreement_id,
-				    start_date,
-				    end_date,
 				    billing_start_date,
 				    billing_end_date,
 				    timezone,
@@ -332,46 +357,484 @@ public class BillingQuoteSubscriptionPersistenceService {
 				    last_billed_on,
 				    current_cycle_number,
 				    subscription_instance_status_id,
-				    account_cycle_day,
 				    created_on,
 				    created_by
 				) VALUES (
-				    gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), ?
+				    gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, now(), ?
 				) RETURNING subscription_instance_id
 				""", UUID.class,
 				subscriptionPlanId,
-				clientAgreementId,
-				contractStart,
-				instanceEnd,
 				contractStart,
 				contractEnd,
 				nzStr(quote.getTimezone(), "UTC"),
-				contractStart,
-				LocalDate.now(),
+				nextBillingDate,
+				lastBilledOn,
 				1,
 				instanceStatusId,
-				billing.getBillingDayOfMonth(),
 				createdBy);
 		log.info("[billing-quote/persist] step=insert_subscription_instance outcome=ok subscriptionInstanceId={}",
 				subscriptionInstanceId);
 
-		insertBillingForecastsFromRecurring(quote, subscriptionInstanceId, contractStart, contractEnd);
+		List<RecurringForecastRow> recurringRows = readRecurringForecastRows(quote);
 
 		List<AppliedPricingRow> applied = readAppliedPricing(quote);
-		log.info("[billing-quote/persist] step=read_applied_pricing count={}", applied.size());
+		log.info("[billing-quote/persist] step=read_applied_pricing_for_snapshot_cycle_prices count={}",
+				applied.size());
 
-		ScheduleAgg agg = aggregateSchedule(lines);
+		ScheduleAgg agg = aggregateSchedule(subscriptionLines, contractStart, contractEnd);
+		boolean anyLineProrated = subscriptionLines.stream()
+				.anyMatch(li -> li != null && Boolean.TRUE.equals(li.getIsProrated()));
+		boolean aggregateChargeBelowFullCycle = aggregateChargeLessThanFullCycleUnitTotal(subscriptionLines);
+		boolean firstCycleProrated = anyLineProrated || aggregateChargeBelowFullCycle;
 		log.info(
-				"[billing-quote/persist] step=aggregate_schedule cycle=1 label={} periodStart={} periodEnd={} billingDate={} baseAmount={} taxAmount={}",
-				agg.label(), agg.periodStart(), agg.periodEnd(), agg.billingDate(), agg.baseAmount(), agg.taxAmount());
+				"[billing-quote/persist] step=aggregate_schedule cycle=1 label={} periodStart={} periodEnd={} billingDate={} baseAmount={} taxAmount={} anyLineProrated={} aggregateChargeBelowFullCycle={}",
+				agg.label(), agg.periodStart(), agg.periodEnd(), agg.billingDate(), agg.baseAmount(), agg.taxAmount(),
+				anyLineProrated, aggregateChargeBelowFullCycle);
 
-		log.info("[billing-quote/persist] step=insert_billing_schedule cycleNumber=1");
-		UUID billingScheduleId = jdbc.queryForObject("""
+		boolean paidFirstCycle = invoicePaid && invoiceId != null;
+		UUID firstCycleScheduleStatusId = paidFirstCycle ? paidScheduleStatusId : plannedScheduleStatusId;
+		Timestamp billedOnPaidCycle = paidFirstCycle ? Timestamp.valueOf(LocalDateTime.now(quoteZone)) : null;
+		UUID invoiceIdForPaidCycle = paidFirstCycle ? invoiceId : null;
+
+		List<PendingSchedule> pending = buildPendingSchedules(subscriptionLines, recurringRows);
+		log.info("[billing-quote/persist] step=billing_schedules_to_insert count={}", pending.size());
+
+		UUID primaryBillingScheduleId = null;
+		for (int i = 0; i < pending.size(); i++) {
+			PendingSchedule ps = pending.get(i);
+			boolean isLast = i == pending.size() - 1;
+			UUID schStatus;
+			UUID invId;
+			Timestamp billedOn;
+			UUID billingRunId = null;
+			if (ps.fromAgg()) {
+				schStatus = firstCycleScheduleStatusId;
+				invId = invoiceIdForPaidCycle;
+				billedOn = billedOnPaidCycle;
+			} else {
+				schStatus = plannedScheduleStatusId;
+				invId = null;
+				billedOn = null;
+			}
+			ForecastBounds bounds;
+			if (ps.fromAgg()) {
+				bounds = new ForecastBounds(agg.periodStart(), agg.periodEnd());
+			} else {
+				bounds = computeForecastPeriodBounds(recurringRows, ps.recurringIndex(), contractStart, contractEnd);
+				bounds = resolveBillingPeriodBounds(bounds, ps.recRow().resolvedPeriodLabel(), contractStart, contractEnd);
+			}
+			LocalDate billDate = ps.fromAgg() ? agg.billingDate()
+					: nzDate(ps.recRow().resolvedBillingDate(), bounds.periodStart());
+			boolean rowProrated = ps.fromAgg() ? firstCycleProrated : recurringRowIndicatesProration(ps.recRow());
+			String prCase = rowProrated ? billing.getProrationCase() : null;
+			String prStrat = rowProrated ? billing.getProrationStrategyCode() : null;
+			String prSource = rowProrated ? trunc(billing.getProrationSource(), 50) : null;
+			UUID sid = insertSubscriptionBillingSchedule(subscriptionInstanceId, subscriptionPlanId,
+					ps.cycleNumber(),
+					ps.fromAgg() ? agg.label() : trunc(ps.recRow().resolvedScheduleLabel(), 100),
+					ps.fromAgg() ? agg.periodLabel()
+							: ensurePeriodLabelForBounds(bounds, ps.recRow().resolvedPeriodLabel()),
+					bounds.periodStart(), bounds.periodEnd(), billDate,
+					ps.fromAgg() ? agg.quantity() : 1,
+					ps.fromAgg() ? agg.unitPrice() : nzBd(ps.recRow().resolvedUnitPrice(), BigDecimal.ZERO),
+					ps.fromAgg() ? agg.unitPriceBeforeDiscount()
+							: nzBd(ps.recRow().resolvedUnitPriceBeforeDiscount(), ps.recRow().resolvedUnitPrice()),
+					ps.fromAgg() ? agg.baseAmount() : recurringRowProratedChargeAmount(ps.recRow()),
+					BigDecimal.ZERO,
+					ps.fromAgg() ? agg.taxAmount() : nzBd(ps.recRow().resolvedTaxAmount(), BigDecimal.ZERO),
+					ps.fromAgg() ? agg.taxPct() : nzBd(ps.recRow().resolvedTaxPct(), BigDecimal.ZERO),
+					ps.fromAgg() ? agg.subtotalBeforeTax() : recurringRowNetAmount(ps.recRow()),
+					rowProrated,
+					ps.fromAgg() && isPaidInFull(billing.getFrequencyCode()),
+					isLast,
+					schStatus,
+					prCase,
+					prStrat,
+					prSource,
+					invId,
+					billedOn,
+					billingRunId);
+			if (primaryBillingScheduleId == null) {
+				primaryBillingScheduleId = sid;
+			}
+			if (ps.fromAgg()) {
+				log.info("[billing-quote/persist] step=insert_billing_schedule outcome=ok billingScheduleId={} cycle={} fromAgg=true",
+						sid, ps.cycleNumber());
+				for (QuoteLineItemRow li : subscriptionLines) {
+					insertBillingScheduleTaxLinesForQuoteLine(sid, li);
+				}
+				log.info("[billing-quote/persist] step=insert_schedule_tax_lines outcome=ok lineItemTaxPassCount={}",
+						subscriptionLines.size());
+				insertSnapshotCyclePricesFromApplied(purchaseSnapshotId, applied);
+			} else {
+				log.info("[billing-quote/persist] step=insert_billing_schedule outcome=ok billingScheduleId={} cycle={} fromAgg=false",
+						sid, ps.cycleNumber());
+				insertBillingScheduleTaxLinesForRecurringRow(sid, ps.recRow());
+			}
+		}
+
+		if (invoiceId != null) {
+			InvoiceHeaderAmounts invHdr = loadInvoiceHeaderAmounts(invoiceId);
+			log.info(
+					"[billing-quote/persist] step=insert_billing_history invoiceId={} invoiceTotalAmount={} invoiceSubTotal={} invoiceTaxAmount={} invoiceDiscountAmount={} billingStatusId={} billingScheduleId={}",
+					invoiceId, invHdr.totalAmount(), invHdr.subTotal(), invHdr.taxAmount(), invHdr.discountAmount(),
+					billingStatusId, primaryBillingScheduleId);
+			jdbc.update("""
+					INSERT INTO client_subscription_billing.subscription_billing_history (
+					    subscription_billing_history_id,
+					    subscription_instance_id,
+					    billing_attempt_on,
+					    client_payment_transaction_id,
+					    billing_status_id,
+					    invoice_id,
+					    is_mock,
+					    invoice_total_amount,
+					    billing_schedule_id,
+					    invoice_sub_total,
+					    invoice_tax_amount,
+					    invoice_discount_amount,
+					    created_on
+					) VALUES (
+					    gen_random_uuid(), ?, now(), ?, ?, ?, false, ?, ?, ?, ?, ?, now()
+					)
+					""",
+					subscriptionInstanceId,
+					clientPaymentTransactionId,
+					billingStatusId,
+					invoiceId,
+					invHdr.totalAmount(),
+					primaryBillingScheduleId,
+					invHdr.subTotal(),
+					invHdr.taxAmount(),
+					invHdr.discountAmount());
+			log.info("[billing-quote/persist] step=insert_billing_history outcome=ok");
+		} else {
+			log.info("[billing-quote/persist] step=insert_billing_history skipped=true reason=null_invoice_id");
+		}
+
+		log.info(
+				"[billing-quote/persist] step=stack_complete subscriptionPlanId={} subscriptionInstanceId={} primaryBillingScheduleId={} purchaseSnapshotId={} configSnapshotId={}",
+				subscriptionPlanId, subscriptionInstanceId, primaryBillingScheduleId, purchaseSnapshotId, configSnapshotId);
+	}
+
+	private List<RecurringForecastRow> readRecurringForecastRows(BillingQuoteLineItemsResponse quote) {
+		JsonNode recurring = quote.getRecurring();
+		if (recurring == null || !recurring.isArray() || recurring.isEmpty()) {
+			return List.of();
+		}
+		List<RecurringForecastRow> out = new ArrayList<>();
+		for (JsonNode n : recurring) {
+			if (n != null && !n.isNull()) {
+				out.add(objectMapper.convertValue(n, RecurringForecastRow.class));
+			}
+		}
+		return out;
+	}
+
+	private List<PendingSchedule> buildPendingSchedules(List<QuoteLineItemRow> subscriptionLines,
+			List<RecurringForecastRow> recurringRows) {
+		List<PendingSchedule> out = new ArrayList<>();
+		if (recurringRows == null) {
+			recurringRows = List.of();
+		}
+		if (subscriptionLines == null || subscriptionLines.isEmpty()) {
+			int ridx = 0;
+			for (RecurringForecastRow r : recurringRows) {
+				int cn = resolveForecastCycleNumber(r, ridx);
+				out.add(new PendingSchedule(false, r, ridx, cn));
+				ridx++;
+			}
+			return out;
+		}
+		out.add(new PendingSchedule(true, null, -1, 1));
+		int ridx = 0;
+		for (RecurringForecastRow r : recurringRows) {
+			int cn = resolveForecastCycleNumber(r, ridx);
+			/*
+			 * Legacy quotes repeated "cycle 1" in recurring[] alongside line-item cycle 1; skip that duplicate. New API
+			 * sends billingCycle starting at 2 for the first full billing period, so this rarely triggers.
+			 */
+			if (cn == 1 && r.getBillingCycle() == null && r.getBillingCycleSnake() == null) {
+				log.info(
+						"[billing-quote/persist] step=skip_recurring_row reason=duplicate_cycle_1 recurringIndex={}",
+						ridx);
+				ridx++;
+				continue;
+			}
+			out.add(new PendingSchedule(false, r, ridx, cn));
+			ridx++;
+		}
+		return out;
+	}
+
+	private int resolveForecastCycleNumber(RecurringForecastRow r, int index) {
+		if (r.getBillingCycle() != null) {
+			return r.getBillingCycle();
+		}
+		if (r.getBillingCycleSnake() != null) {
+			return r.getBillingCycleSnake();
+		}
+		if (r.getCycleNumber() != null) {
+			return r.getCycleNumber();
+		}
+		if (r.getCycleNumberSnake() != null) {
+			return r.getCycleNumberSnake();
+		}
+		String pl = r.resolvedPeriodLabel();
+		if (pl != null) {
+			Matcher m = CYCLE_LABEL_NUMBER.matcher(pl);
+			if (m.find()) {
+				return Integer.parseInt(m.group(1));
+			}
+		}
+		return index + 1;
+	}
+
+	/**
+	 * Derives service-period start/end arrays from recurring quote rows. Per row, {@code nextPeriodStart} is the
+	 * anchor for <em>that</em> cycle (same as {@code billingDate} in the API), not the previous row's next anchor.
+	 */
+	private void fillForecastPeriodArrays(List<RecurringForecastRow> rows, LocalDate contractStart,
+			LocalDate contractEnd, LocalDate[] starts, LocalDate[] ends) {
+		int n = rows.size();
+		for (int i = 0; i < n; i++) {
+			RecurringForecastRow r = rows.get(i);
+			/* API sends periodStart / period_end explicitly; resolvedPeriodStart falls back to nextPeriodStart. */
+			LocalDate exS = r.resolvedPeriodStart();
+			if (exS == null) {
+				Optional<ForecastBounds> iso = tryParsePeriodBoundsFromLabel(r.resolvedPeriodLabel());
+				if (iso.isPresent()) {
+					exS = iso.get().periodStart();
+				}
+			}
+			if (exS == null) {
+				LocalDate anchor = anchorDateForRecurringRow(r, contractStart);
+				Optional<ForecastBounds> mmm = tryParseMonthDayRangeFromPeriodLabel(r.resolvedPeriodLabel(), anchor);
+				if (mmm.isPresent()) {
+					exS = mmm.get().periodStart();
+				}
+			}
+			if (exS != null) {
+				starts[i] = exS;
+			} else if (i == 0) {
+				starts[i] = contractStart;
+			} else {
+				RecurringForecastRow prev = rows.get(i - 1);
+				LocalDate pEnd = prev.getPeriodEnd() != null ? prev.getPeriodEnd() : prev.getPeriodEndSnake();
+				if (pEnd != null) {
+					starts[i] = pEnd.plusDays(1);
+				} else if (starts[i - 1] != null) {
+					starts[i] = starts[i - 1];
+				} else {
+					starts[i] = contractStart;
+				}
+			}
+		}
+		for (int i = 0; i < n; i++) {
+			if (starts[i] == null) {
+				starts[i] = contractStart;
+			}
+		}
+		for (int i = 0; i < n; i++) {
+			RecurringForecastRow r = rows.get(i);
+			LocalDate exE = r.resolvedPeriodEnd();
+			if (exE != null) {
+				ends[i] = exE;
+				continue;
+			}
+			LocalDate anchor = anchorDateForRecurringRow(r, contractStart);
+			Optional<ForecastBounds> mmm = tryParseMonthDayRangeFromPeriodLabel(r.resolvedPeriodLabel(), anchor);
+			if (mmm.isPresent()) {
+				ends[i] = mmm.get().periodEnd();
+				continue;
+			}
+			Optional<ForecastBounds> iso = tryParsePeriodBoundsFromLabel(r.resolvedPeriodLabel());
+			if (iso.isPresent()) {
+				ends[i] = iso.get().periodEnd();
+				continue;
+			}
+			if (i + 1 < n && starts[i + 1] != null) {
+				ends[i] = starts[i + 1].minusDays(1);
+			} else {
+				ends[i] = contractEnd;
+			}
+		}
+	}
+
+	private static LocalDate anchorDateForRecurringRow(RecurringForecastRow r, LocalDate contractStart) {
+		if (r.getNextPeriodStart() != null) {
+			return r.getNextPeriodStart();
+		}
+		if (r.getBillingDate() != null) {
+			return r.getBillingDate();
+		}
+		if (r.getBillingDateSnake() != null) {
+			return r.getBillingDateSnake();
+		}
+		return contractStart;
+	}
+
+	private ForecastBounds computeForecastPeriodBounds(List<RecurringForecastRow> rows, int i, LocalDate contractStart,
+			LocalDate contractEnd) {
+		if (rows == null || rows.isEmpty() || i < 0 || i >= rows.size()) {
+			return new ForecastBounds(contractStart, contractEnd);
+		}
+		LocalDate[] starts = new LocalDate[rows.size()];
+		LocalDate[] ends = new LocalDate[rows.size()];
+		fillForecastPeriodArrays(rows, contractStart, contractEnd, starts, ends);
+		return new ForecastBounds(starts[i], ends[i]);
+	}
+
+	/**
+	 * Align stored bounds with {@code period_label}: ISO dates, else {@code MMM d-MMM d} inside parentheses (English).
+	 */
+	private ForecastBounds resolveBillingPeriodBounds(ForecastBounds computed, String periodLabel,
+			LocalDate contractStart, LocalDate contractEnd) {
+		ForecastBounds computedSafe = orderAndNormalizeBounds(computed, contractStart, contractEnd);
+		if (periodLabel == null || periodLabel.isBlank()) {
+			return computedSafe;
+		}
+		String pl = periodLabel.trim();
+		Optional<ForecastBounds> parsedIso = tryParsePeriodBoundsFromLabel(pl);
+		if (parsedIso.isPresent()) {
+			LocalDate ps = clampDateStartToContract(parsedIso.get().periodStart(), contractStart);
+			LocalDate pe = parsedIso.get().periodEnd();
+			if (ps != null && pe != null && !pe.isBefore(ps)) {
+				return new ForecastBounds(ps, pe);
+			}
+		}
+		LocalDate anchor = computedSafe.periodStart() != null ? computedSafe.periodStart() : contractStart;
+		Optional<ForecastBounds> parsedMmm = tryParseMonthDayRangeFromPeriodLabel(pl, anchor);
+		if (parsedMmm.isPresent()) {
+			LocalDate ps = clampDateStartToContract(parsedMmm.get().periodStart(), contractStart);
+			LocalDate pe = parsedMmm.get().periodEnd();
+			if (ps != null && pe != null && !pe.isBefore(ps)) {
+				return new ForecastBounds(ps, pe);
+			}
+		}
+		return computedSafe;
+	}
+
+	private static Optional<ForecastBounds> tryParsePeriodBoundsFromLabel(String label) {
+		if (label == null || label.isBlank()) {
+			return Optional.empty();
+		}
+		Matcher m = PERIOD_LABEL_ISO_DATES.matcher(label);
+		List<LocalDate> found = new ArrayList<>(4);
+		while (m.find()) {
+			found.add(LocalDate.parse(m.group(1)));
+			if (found.size() >= 2) {
+				break;
+			}
+		}
+		if (found.size() < 2) {
+			return Optional.empty();
+		}
+		LocalDate a = found.get(0);
+		LocalDate b = found.get(1);
+		LocalDate start = a.isBefore(b) ? a : b;
+		LocalDate end = a.isBefore(b) ? b : a;
+		return Optional.of(new ForecastBounds(start, end));
+	}
+
+	/**
+	 * Parses {@code (May 23-Jun 22)} / {@code (Mar 23-Apr 9)} style ranges; year from {@code anchorHint} (e.g.
+	 * {@code nextPeriodStart}).
+	 */
+	private static Optional<ForecastBounds> tryParseMonthDayRangeFromPeriodLabel(String label, LocalDate anchorHint) {
+		if (label == null || label.isBlank()) {
+			return Optional.empty();
+		}
+		Matcher paren = PERIOD_LABEL_PAREN_CONTENT.matcher(label);
+		if (!paren.find()) {
+			return Optional.empty();
+		}
+		String inner = paren.group(1).trim();
+		inner = inner.replaceFirst("(?i)^cycle\\s*\\d+\\s*", "").trim();
+		int dash = inner.indexOf('-');
+		if (dash <= 0 || dash >= inner.length() - 1) {
+			return Optional.empty();
+		}
+		String left = inner.substring(0, dash).trim();
+		String right = inner.substring(dash + 1).trim();
+		int y = anchorHint != null ? anchorHint.getYear() : LocalDate.now().getYear();
+		LocalDate s = parseEnglishMonthDayWithYear(left, y);
+		LocalDate e = parseEnglishMonthDayWithYear(right, y);
+		if (s == null || e == null) {
+			return Optional.empty();
+		}
+		if (e.isBefore(s)) {
+			e = e.plusYears(1);
+		}
+		return Optional.of(new ForecastBounds(s, e));
+	}
+
+	private static LocalDate parseEnglishMonthDayWithYear(String token, int year) {
+		try {
+			return LocalDate.parse(token.trim() + " " + year, MONTH_DAY_EN);
+		} catch (DateTimeParseException ex) {
+			return null;
+		}
+	}
+
+	private static ForecastBounds orderAndNormalizeBounds(ForecastBounds b, LocalDate contractStart,
+			LocalDate contractEnd) {
+		LocalDate s = b.periodStart();
+		LocalDate e = b.periodEnd();
+		if (s != null && e != null && e.isBefore(s)) {
+			LocalDate t = s;
+			s = e;
+			e = t;
+		}
+		if (s == null) {
+			s = contractStart;
+		}
+		if (e == null) {
+			e = contractEnd;
+		}
+		if (s != null && e != null && e.isBefore(s)) {
+			e = s;
+		}
+		return new ForecastBounds(s, e);
+	}
+
+	private static LocalDate clampDateStartToContract(LocalDate d, LocalDate contractStart) {
+		if (d == null) {
+			return null;
+		}
+		if (contractStart != null && d.isBefore(contractStart)) {
+			return contractStart;
+		}
+		return d;
+	}
+
+	private static String formatIsoPeriodLabel(LocalDate start, LocalDate end) {
+		if (start == null || end == null) {
+			return null;
+		}
+		return start + " – " + end;
+	}
+
+	/** Persisted {@code period_label}: quote text, or a compact ISO range aligned with resolved bounds. */
+	private static String ensurePeriodLabelForBounds(ForecastBounds bounds, String resolvedPeriodLabel) {
+		if (resolvedPeriodLabel != null && !resolvedPeriodLabel.isBlank()) {
+			return trunc(resolvedPeriodLabel.trim(), 100);
+		}
+		return trunc(formatIsoPeriodLabel(bounds.periodStart(), bounds.periodEnd()), 100);
+	}
+
+	private UUID insertSubscriptionBillingSchedule(UUID subscriptionInstanceId, UUID subscriptionPlanId,
+			int cycleNumber, String label, String periodLabel, LocalDate billingPeriodStart,
+			LocalDate billingPeriodEnd, LocalDate billingDate, int quantity, BigDecimal unitPrice,
+			BigDecimal unitPriceBeforeDiscount, BigDecimal baseAmount, BigDecimal discountAmount, BigDecimal taxAmount,
+			BigDecimal taxPct, BigDecimal subtotalBeforeTax, boolean isProrated, boolean isOneTime, boolean isFinalCycle,
+			UUID billingScheduleStatusId, String prorationCaseCode, String prorationStrategyCode, String prorationSource,
+			UUID invoiceId, Timestamp billedOn, UUID billingRunId) {
+		return jdbc.queryForObject("""
 				INSERT INTO client_subscription_billing.subscription_billing_schedule (
 				    billing_schedule_id,
 				    subscription_instance_id,
 				    subscription_plan_id,
-				    client_agreement_id,
 				    cycle_number,
 				    label,
 				    period_label,
@@ -392,174 +855,114 @@ public class BillingQuoteSubscriptionPersistenceService {
 				    billing_schedule_status_id,
 				    proration_case_code,
 				    proration_strategy_code,
+				    proration_source,
+				    invoice_id,
+				    billed_on,
+				    billing_run_id,
 				    created_on
 				) VALUES (
-				    gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now()
+				    gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now()
 				) RETURNING billing_schedule_id
 				""", UUID.class,
 				subscriptionInstanceId,
 				subscriptionPlanId,
-				clientAgreementId,
-				1,
-				agg.label(),
-				agg.periodLabel(),
-				agg.periodStart(),
-				agg.periodEnd(),
-				agg.billingDate(),
-				agg.quantity(),
-				agg.unitPrice(),
-				agg.unitPriceBeforeDiscount(),
-				agg.baseAmount(),
-				BigDecimal.ZERO,
-				agg.taxAmount(),
-				agg.taxPct(),
-				agg.subtotalBeforeTax(),
-				Boolean.FALSE,
-				isPaidInFull(billing.getFrequencyCode()),
-				Boolean.TRUE,
-				scheduleStatusId,
-				billing.getProrationCase(),
-				billing.getProrationStrategyCode());
-		log.info("[billing-quote/persist] step=insert_billing_schedule outcome=ok billingScheduleId={}",
-				billingScheduleId);
-
-		log.info("[billing-quote/persist] step=insert_schedule_line_items count={}", lines.size());
-		for (QuoteLineItemRow li : lines) {
-			jdbc.update("""
-					INSERT INTO client_subscription_billing.subscription_billing_schedule_line_item (
-					    billing_schedule_line_item_id,
-					    billing_schedule_id,
-					    label,
-					    start_date,
-					    end_date,
-					    quantity,
-					    unit_price,
-					    price,
-					    tax_pct,
-					    tax_amount,
-					    prorated_amount,
-					    is_prorated,
-					    prorated_from_date,
-					    prorated_to_date,
-					    proration_type
-					) VALUES (
-					    gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-					)
-					""",
-					billingScheduleId,
-					trunc(li.getLabel(), 100),
-					nzDate(li.getStartDate(), contractStart),
-					nzDate(li.getEndDate(), contractEnd),
-					nz(li.getQuantity(), 1),
-					li.getUnitPrice(),
-					li.getPrice(),
-					li.getTaxPct(),
-					li.getTax(),
-					BigDecimal.ZERO,
-					Boolean.TRUE.equals(li.getIsProrated()),
-					null,
-					null,
-					li.getProratedChargeTiming());
-		}
-		log.info("[billing-quote/persist] step=insert_schedule_line_items outcome=ok");
-
-		log.info("[billing-quote/persist] step=insert_applied_pricing count={}", applied.size());
-		for (AppliedPricingRow ap : applied) {
-			jdbc.update("""
-					INSERT INTO client_subscription_billing.subscription_billing_applied_pricing (
-					    applied_pricing_id,
-					    billing_schedule_id,
-					    unit_price_source,
-					    price_cycle_band_id,
-					    cycle_number,
-					    unit_price,
-					    discounted_unit_price,
-					    entitlement_quantity_used,
-					    pos_min_price,
-					    pos_max_price,
-					    created_on
-					) VALUES (
-					    gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, now()
-					)
-					""",
-					billingScheduleId,
-					trunc(ap.getUnitPriceSource(), 50),
-					ap.getPriceCycleBandId(),
-					ap.getCycleNumber(),
-					ap.getUnitPrice(),
-					ap.getDiscountedUnitPrice(),
-					ap.getEntitlementQuantityUsed(),
-					ap.getPosPriceMin(),
-					ap.getPosPriceMax());
-		}
-		log.info("[billing-quote/persist] step=insert_applied_pricing outcome=ok");
-
-		insertSnapshotCyclePricesFromApplied(purchaseSnapshotId, applied);
-		log.info("[billing-quote/persist] step=insert_snapshot_cycle_prices_from_applied done");
-
-		insertScheduleAudit(billingScheduleId, createdBy);
-		log.info("[billing-quote/persist] step=insert_schedule_audit outcome=ok billingScheduleId={}",
-				billingScheduleId);
-
-		if (invoiceId != null) {
-			BigDecimal invoiceTotal = null;
-			try {
-				invoiceTotal = jdbc.queryForObject(
-						"SELECT total_amount FROM transactions.invoice WHERE invoice_id = ?",
-						BigDecimal.class, invoiceId);
-			} catch (EmptyResultDataAccessException ignored) {
-				// leave null
-			}
-			log.info(
-					"[billing-quote/persist] step=insert_billing_history invoiceId={} invoiceTotalAmount={} billingStatusId={}",
-					invoiceId, invoiceTotal, billingStatusId);
-			jdbc.update("""
-					INSERT INTO client_subscription_billing.subscription_billing_history (
-					    subscription_billing_history_id,
-					    subscription_instance_id,
-					    billing_attempt_on,
-					    client_payment_transaction_id,
-					    billing_status_id,
-					    invoice_id,
-					    is_mock,
-					    invoice_total_amount,
-					    created_on
-					) VALUES (
-					    gen_random_uuid(), ?, now(), ?, ?, ?, false, ?, now()
-					)
-					""",
-					subscriptionInstanceId,
-					clientPaymentTransactionId,
-					billingStatusId,
-					invoiceId,
-					invoiceTotal);
-			log.info("[billing-quote/persist] step=insert_billing_history outcome=ok");
-		} else {
-			log.info("[billing-quote/persist] step=insert_billing_history skipped=true reason=null_invoice_id");
-		}
-
-		log.info(
-				"[billing-quote/persist] step=stack_complete subscriptionPlanId={} subscriptionInstanceId={} billingScheduleId={} purchaseSnapshotId={} configSnapshotId={}",
-				subscriptionPlanId, subscriptionInstanceId, billingScheduleId, purchaseSnapshotId, configSnapshotId);
+				cycleNumber,
+				trunc(label, 100),
+				trunc(periodLabel, 100),
+				billingPeriodStart,
+				billingPeriodEnd,
+				billingDate,
+				quantity,
+				unitPrice,
+				unitPriceBeforeDiscount,
+				baseAmount,
+				discountAmount,
+				taxAmount,
+				taxPct,
+				subtotalBeforeTax,
+				isProrated,
+				isOneTime,
+				isFinalCycle,
+				billingScheduleStatusId,
+				trunc(prorationCaseCode, 50),
+				trunc(prorationStrategyCode, 50),
+				trunc(prorationSource, 50),
+				invoiceId,
+				billedOn,
+				billingRunId);
 	}
 
-	private void insertScheduleAudit(UUID billingScheduleId, UUID createdBy) {
+	private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
+		BigDecimal amt = r.getAmount();
+		BigDecimal tax = r.resolvedTaxAmount();
+		if (amt != null && tax != null) {
+			return amt.subtract(tax).max(BigDecimal.ZERO).setScale(2, RoundingMode.HALF_UP);
+		}
+		if (amt != null) {
+			return amt.setScale(2, RoundingMode.HALF_UP);
+		}
+		return BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
+	}
+
+	/** Schedule {@code base_amount}: prorated line charge from quote {@code amount}. */
+	private static BigDecimal recurringRowProratedChargeAmount(RecurringForecastRow r) {
+		BigDecimal amt = r.getAmount();
+		if (amt != null) {
+			return amt.setScale(2, RoundingMode.HALF_UP);
+		}
+		return recurringRowNetAmount(r);
+	}
+
+	private static boolean recurringRowIndicatesProration(RecurringForecastRow r) {
+		if (r == null) {
+			return false;
+		}
+		BigDecimal amt = r.getAmount();
+		BigDecimal up = r.resolvedUnitPrice();
+		if (amt == null || up == null) {
+			return false;
+		}
+		return amt.compareTo(up) < 0;
+	}
+
+	private static boolean aggregateChargeLessThanFullCycleUnitTotal(List<QuoteLineItemRow> lines) {
+		if (lines == null || lines.isEmpty()) {
+			return false;
+		}
+		BigDecimal full = BigDecimal.ZERO;
+		BigDecimal charge = BigDecimal.ZERO;
+		for (QuoteLineItemRow li : lines) {
+			if (li == null) {
+				continue;
+			}
+			int q = nzInt(li.getQuantity(), 1);
+			if (li.getUnitPrice() != null) {
+				full = full.add(li.getUnitPrice().multiply(BigDecimal.valueOf(q)));
+			}
+			if (li.getAmount() != null) {
+				charge = charge.add(li.getAmount());
+			} else if (li.getPrice() != null) {
+				charge = charge.add(li.getPrice());
+			}
+		}
+		if (full.compareTo(BigDecimal.ZERO) <= 0) {
+			return false;
+		}
+		return charge.compareTo(full) < 0;
+	}
+
+	private InvoiceHeaderAmounts loadInvoiceHeaderAmounts(UUID invoiceId) {
 		try {
-			ObjectNode node = objectMapper.createObjectNode();
-			node.put("billingScheduleId", billingScheduleId.toString());
-			String json = objectMapper.writeValueAsString(node);
-			jdbc.update("""
-					INSERT INTO client_subscription_billing.subscription_billing_schedule_audit (
-					    billing_schedule_audit_id,
-					    billing_schedule_id,
-					    action_code,
-					    old_data,
-					    new_data,
-					    created_by
-					) VALUES (gen_random_uuid(), ?, 'INSERT', NULL, ?::jsonb, ?)
-					""", billingScheduleId, json, createdBy);
-		} catch (JsonProcessingException e) {
-			throw new IllegalStateException(e);
+			return jdbc.queryForObject("""
+					SELECT total_amount, sub_total, tax_amount, discount_amount
+					FROM transactions.invoice
+					WHERE invoice_id = ?
+					""",
+					(rs, rn) -> new InvoiceHeaderAmounts(rs.getBigDecimal("total_amount"), rs.getBigDecimal("sub_total"),
+							rs.getBigDecimal("tax_amount"), rs.getBigDecimal("discount_amount")),
+					invoiceId);
+		} catch (EmptyResultDataAccessException e) {
+			return InvoiceHeaderAmounts.empty();
 		}
 	}
 
@@ -583,18 +986,14 @@ public class BillingQuoteSubscriptionPersistenceService {
 					    package_location_id,
 					    location_level_id,
 					    price,
-					    min_price,
-					    max_price,
 					    created_on
-					) VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, now())
+					) VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, now())
 					""",
 					purchaseSnapshotId,
 					r.getPackagePriceId(),
 					r.getPackageLocationId(),
 					r.getLocationLevelId(),
-					r.getPrice(),
-					r.getMinPrice(),
-					r.getMaxPrice());
+					r.getPrice());
 			inserted++;
 		}
 		log.info("[billing-quote/persist] step=insert_purchase_snapshot_prices outcome=ok rowsInserted={}", inserted);
@@ -647,61 +1046,6 @@ public class BillingQuoteSubscriptionPersistenceService {
 				legalRows);
 	}
 
-	private void insertBillingForecastsFromRecurring(BillingQuoteLineItemsResponse quote, UUID subscriptionInstanceId,
-			LocalDate contractStart, LocalDate contractEnd) {
-		JsonNode recurring = quote.getRecurring();
-		if (recurring == null || recurring.isNull() || !recurring.isArray() || recurring.isEmpty()) {
-			log.info(
-					"[billing-quote/persist] step=insert_billing_forecast skipped=true reason=no_recurring_array subscriptionInstanceId={}",
-					subscriptionInstanceId);
-			return;
-		}
-		int fc = 0;
-		log.info(
-				"[billing-quote/persist] step=insert_billing_forecast start subscriptionInstanceId={} recurringElementCount={}",
-				subscriptionInstanceId, recurring.size());
-		for (JsonNode n : recurring) {
-			if (n == null || n.isNull()) {
-				continue;
-			}
-			RecurringForecastRow r = objectMapper.convertValue(n, RecurringForecastRow.class);
-			LocalDate pStart = r.resolvedPeriodStart() != null ? r.resolvedPeriodStart() : contractStart;
-			LocalDate pEnd = r.resolvedPeriodEnd() != null ? r.resolvedPeriodEnd() : contractEnd;
-			LocalDate bDate = r.resolvedBillingDate() != null ? r.resolvedBillingDate() : pStart;
-			jdbc.update("""
-					INSERT INTO client_subscription_billing.subscription_billing_forecast (
-					    billing_forecast_id,
-					    subscription_instance_id,
-					    cycle_number,
-					    period_start,
-					    period_end,
-					    billing_date,
-					    unit_price,
-					    tax_pct,
-					    tax_amount,
-					    amount,
-					    discounted_amount,
-					    period_label,
-					    created_on
-					) VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
-					""",
-					subscriptionInstanceId,
-					r.resolvedCycleNumber(),
-					pStart,
-					pEnd,
-					bDate,
-					r.resolvedUnitPrice(),
-					r.resolvedTaxPct(),
-					r.resolvedTaxAmount(),
-					r.getAmount(),
-					r.resolvedDiscountedAmount(),
-					trunc(r.resolvedPeriodLabel(), 100));
-			fc++;
-		}
-		log.info("[billing-quote/persist] step=insert_billing_forecast outcome=ok subscriptionInstanceId={} rowsInserted={}",
-				subscriptionInstanceId, fc);
-	}
-
 	private void insertPurchaseSnapshotEntitlements(UUID purchaseSnapshotId, List<EntitlementRow> rows) {
 		if (rows == null) {
 			log.info("[billing-quote/persist] step=insert_purchase_snapshot_entitlements skipped=true reason=null_rows");
@@ -747,6 +1091,9 @@ public class BillingQuoteSubscriptionPersistenceService {
 			if (ap == null || ap.getUnitPrice() == null) {
 				continue;
 			}
+			int cycleStart = ap.getStartCycle() != null ? ap.getStartCycle()
+					: (ap.getCycleNumber() != null ? ap.getCycleNumber() : 1);
+			Integer cycleEnd = ap.getEndCycle();
 			jdbc.update("""
 					INSERT INTO client_subscription_billing.subscription_purchase_snapshot_cycle_price (
 					    purchase_snapshot_cycle_price_id,
@@ -755,18 +1102,415 @@ public class BillingQuoteSubscriptionPersistenceService {
 					    cycle_end,
 					    unit_price,
 					    price_cycle_band_id,
-					    allow_pos_price_override,
 					    created_on
-					) VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, false, now())
+					) VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, now())
 					""",
 					purchaseSnapshotId,
-					ap.getCycleNumber() != null ? ap.getCycleNumber() : 1,
-					null,
+					cycleStart,
+					cycleEnd,
 					ap.getUnitPrice(),
 					ap.getPriceCycleBandId());
 			c++;
 		}
 		log.info("[billing-quote/persist] step=insert_snapshot_cycle_prices outcome=ok rowsInserted={}", c);
+	}
+
+	private List<QuoteLineItemRow> nonFeeLineItems(List<QuoteLineItemRow> lines) {
+		if (lines == null || lines.isEmpty()) {
+			return List.of();
+		}
+		return lines.stream().filter(li -> li != null && !isFeeItemGroupLine(li)).toList();
+	}
+
+	/**
+	 * Fee lines are excluded from subscription line-item inserts. Treat {@code isFeeItem == true} like FEE when
+	 * {@code itemGroupCode} is absent.
+	 */
+	private static boolean isFeeItemGroupLine(QuoteLineItemRow li) {
+		if (li == null) {
+			return false;
+		}
+		if (Boolean.TRUE.equals(li.getIsFeeItem())) {
+			return true;
+		}
+		String code = li.getItemGroupCode();
+		if (code == null || code.isBlank()) {
+			return false;
+		}
+		return "FEE".equalsIgnoreCase(code.trim());
+	}
+
+	/**
+	 * Resolves {@code tax_name} for snapshot/tax-line inserts (NOT NULL in DB). Prefers tax authority name when
+	 * allocation is present, else tax group name from {@code finance.tax_rate}.
+	 */
+	private String resolveTaxNameForPersist(UUID taxRateId, UUID taxRateAllocationId) {
+		if (taxRateAllocationId != null) {
+			try {
+				String n = jdbc.queryForObject("""
+						SELECT ta.name
+						FROM finance.tax_rate_allocation tra
+						JOIN finance.tax_authority ta ON ta.tax_authority_id = tra.tax_authority_id
+						WHERE tra.tax_rate_allocation_id = ?
+						LIMIT 1
+						""", String.class, taxRateAllocationId);
+				if (n != null && !n.isBlank()) {
+					return trunc(n, 100);
+				}
+			} catch (EmptyResultDataAccessException ignored) {
+				// fall through to rate-level name
+			}
+		}
+		if (taxRateId != null) {
+			try {
+				String n = jdbc.queryForObject("""
+						SELECT tg.name
+						FROM finance.tax_rate tr
+						JOIN finance.tax_group tg ON tg.tax_group_id = tr.tax_group_id
+						WHERE tr.tax_rate_id = ?
+						LIMIT 1
+						""", String.class, taxRateId);
+				if (n != null && !n.isBlank()) {
+					return trunc(n, 100);
+				}
+			} catch (EmptyResultDataAccessException ignored) {
+				// fall through
+			}
+		}
+		log.warn(
+				"[billing-quote/persist] step=resolve_tax_name outcome=fallback_default taxRateId={} taxRateAllocationId={}",
+				taxRateId, taxRateAllocationId);
+		return "Tax";
+	}
+
+	/**
+	 * Resolves {@code tax_percentage} (NOT NULL in DB): allocation row when id present, else sum of active
+	 * allocations for the rate, else {@code fallbackFromQuote} (e.g. line item or recurring {@code taxPct}).
+	 */
+	private BigDecimal resolveTaxPercentageForPersist(UUID taxRateId, UUID taxRateAllocationId,
+			BigDecimal fallbackFromQuote) {
+		try {
+			if (taxRateAllocationId != null) {
+				BigDecimal p = jdbc.queryForObject("""
+						SELECT tra.tax_rate_percentage
+						FROM finance.tax_rate_allocation tra
+						WHERE tra.tax_rate_allocation_id = ?
+						LIMIT 1
+						""", BigDecimal.class, taxRateAllocationId);
+				if (p != null) {
+					return p.setScale(2, RoundingMode.HALF_UP);
+				}
+			}
+			if (taxRateId != null) {
+				BigDecimal sum = jdbc.queryForObject("""
+						SELECT COALESCE(SUM(tra.tax_rate_percentage), 0)
+						FROM finance.tax_rate_allocation tra
+						WHERE tra.tax_rate_id = ?
+						  AND COALESCE(tra.is_active, TRUE) = TRUE
+						""", BigDecimal.class, taxRateId);
+				if (sum != null && sum.compareTo(BigDecimal.ZERO) > 0) {
+					return sum.setScale(2, RoundingMode.HALF_UP);
+				}
+			}
+		} catch (EmptyResultDataAccessException ignored) {
+			// fall through
+		}
+		if (fallbackFromQuote != null) {
+			return fallbackFromQuote.setScale(2, RoundingMode.HALF_UP);
+		}
+		log.warn(
+				"[billing-quote/persist] step=resolve_tax_percentage outcome=fallback_zero taxRateId={} taxRateAllocationId={}",
+				taxRateId, taxRateAllocationId);
+		return BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
+	}
+
+	/**
+	 * Deduped snapshot-level tax rows from non-FEE line items (expects
+	 * {@code subscription_purchase_snapshot_tax} in DB, including NOT NULL {@code tax_name}).
+	 */
+	private void insertPurchaseSnapshotTaxRows(UUID purchaseSnapshotId, List<QuoteLineItemRow> subscriptionLines) {
+		if (purchaseSnapshotId == null || subscriptionLines == null || subscriptionLines.isEmpty()) {
+			log.info(
+					"[billing-quote/persist] step=insert_purchase_snapshot_tax skipped=true reason=no_rows purchaseSnapshotId={}",
+					purchaseSnapshotId);
+			return;
+		}
+		Set<String> seen = new HashSet<>();
+		int n = 0;
+		for (QuoteLineItemRow li : subscriptionLines) {
+			UUID rateId = li.resolvedTaxRateId();
+			if (rateId == null) {
+				continue;
+			}
+			List<UUID> allocs = li.resolvedTaxRateAllocationIds();
+			if (allocs.isEmpty()) {
+				String k = rateId + ":null";
+				if (seen.add(k)) {
+					String taxName = resolveTaxNameForPersist(rateId, null);
+					BigDecimal taxPct = resolveTaxPercentageForPersist(rateId, null, li.getTaxPct());
+					jdbc.update("""
+							INSERT INTO client_subscription_billing.subscription_purchase_snapshot_tax (
+							    purchase_snapshot_tax_id,
+							    subscription_purchase_snapshot_id,
+							    tax_rate_id,
+							    tax_rate_allocation_id,
+							    tax_name,
+							    tax_percentage,
+							    created_on
+							) VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, now())
+							""",
+							purchaseSnapshotId, rateId, null, taxName, taxPct);
+					n++;
+				}
+				continue;
+			}
+			for (UUID allocId : allocs) {
+				if (allocId == null) {
+					continue;
+				}
+				String k = rateId + ":" + allocId;
+				if (seen.add(k)) {
+					String taxName = resolveTaxNameForPersist(rateId, allocId);
+					BigDecimal taxPct = resolveTaxPercentageForPersist(rateId, allocId, li.getTaxPct());
+					jdbc.update("""
+							INSERT INTO client_subscription_billing.subscription_purchase_snapshot_tax (
+							    purchase_snapshot_tax_id,
+							    subscription_purchase_snapshot_id,
+							    tax_rate_id,
+							    tax_rate_allocation_id,
+							    tax_name,
+							    tax_percentage,
+							    created_on
+							) VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, now())
+							""",
+							purchaseSnapshotId, rateId, allocId, taxName, taxPct);
+					n++;
+				}
+			}
+		}
+		log.info("[billing-quote/persist] step=insert_purchase_snapshot_tax outcome=ok rowsInserted={}", n);
+	}
+
+	/** One row per allocation (or one row with null allocation when none listed). No schedule line-item row. */
+	private void insertBillingScheduleTaxLinesForQuoteLine(UUID billingScheduleId, QuoteLineItemRow li) {
+		if (billingScheduleId == null || li == null) {
+			return;
+		}
+		UUID rateId = li.resolvedTaxRateId();
+		if (rateId == null) {
+			return;
+		}
+		BigDecimal taxableBase = lineItemTaxableBase(li);
+		BigDecimal totalLineTax = nzBd(li.getTax(), BigDecimal.ZERO);
+		List<UUID> allocs = li.resolvedTaxRateAllocationIds();
+		if (allocs.isEmpty()) {
+			String taxName = resolveTaxNameForPersist(rateId, null);
+			BigDecimal taxPct = resolveTaxPercentageForPersist(rateId, null, li.getTaxPct());
+			jdbc.update("""
+					INSERT INTO client_subscription_billing.subscription_billing_schedule_tax_line (
+					    billing_schedule_id,
+					    tax_rate_id,
+					    tax_rate_allocation_id,
+					    tax_name,
+					    tax_percentage,
+					    taxable_amount,
+					    tax_amount,
+					    created_on
+					) VALUES (?, ?, NULL, ?, ?, ?, ?, now())
+					""",
+					billingScheduleId, rateId, taxName, taxPct, taxableBase, totalLineTax);
+			return;
+		}
+		Map<UUID, BigDecimal> pctByAlloc = new HashMap<>();
+		BigDecimal sumPct = BigDecimal.ZERO;
+		int validAllocCount = 0;
+		for (UUID aid : allocs) {
+			if (aid == null) {
+				continue;
+			}
+			validAllocCount++;
+			BigDecimal p = resolveTaxPercentageForPersist(rateId, aid, li.getTaxPct());
+			pctByAlloc.put(aid, p);
+			sumPct = sumPct.add(p != null ? p : BigDecimal.ZERO);
+		}
+		for (UUID allocId : allocs) {
+			if (allocId == null) {
+				continue;
+			}
+			String taxName = resolveTaxNameForPersist(rateId, allocId);
+			BigDecimal taxPct = resolveTaxPercentageForPersist(rateId, allocId, li.getTaxPct());
+			BigDecimal taxAmtPart = splitLineTaxForAllocation(totalLineTax, pctByAlloc.get(allocId), sumPct,
+					validAllocCount);
+			jdbc.update("""
+					INSERT INTO client_subscription_billing.subscription_billing_schedule_tax_line (
+					    billing_schedule_id,
+					    tax_rate_id,
+					    tax_rate_allocation_id,
+					    tax_name,
+					    tax_percentage,
+					    taxable_amount,
+					    tax_amount,
+					    created_on
+					) VALUES (?, ?, ?, ?, ?, ?, ?, now())
+					""",
+					billingScheduleId, rateId, allocId, taxName, taxPct, taxableBase, taxAmtPart);
+		}
+	}
+
+	private void insertBillingScheduleTaxLinesForRecurringRow(UUID billingScheduleId, RecurringForecastRow r) {
+		if (billingScheduleId == null || r == null) {
+			return;
+		}
+		UUID rateId = r.resolvedTaxRateId();
+		if (rateId == null) {
+			return;
+		}
+		BigDecimal taxableBase = recurringRowNetAmount(r);
+		BigDecimal totalLineTax = nzBd(r.resolvedTaxAmount(), BigDecimal.ZERO);
+		List<UUID> allocs = r.resolvedTaxRateAllocationIds();
+		if (allocs.isEmpty()) {
+			String taxName = resolveTaxNameForPersist(rateId, null);
+			BigDecimal taxPct = resolveTaxPercentageForPersist(rateId, null, r.resolvedTaxPct());
+			jdbc.update("""
+					INSERT INTO client_subscription_billing.subscription_billing_schedule_tax_line (
+					    billing_schedule_id,
+					    tax_rate_id,
+					    tax_rate_allocation_id,
+					    tax_name,
+					    tax_percentage,
+					    taxable_amount,
+					    tax_amount,
+					    created_on
+					) VALUES (?, ?, NULL, ?, ?, ?, ?, now())
+					""",
+					billingScheduleId, rateId, taxName, taxPct, taxableBase, totalLineTax);
+			return;
+		}
+		Map<UUID, BigDecimal> pctByAlloc = new HashMap<>();
+		BigDecimal sumPct = BigDecimal.ZERO;
+		int validAllocCount = 0;
+		for (UUID aid : allocs) {
+			if (aid == null) {
+				continue;
+			}
+			validAllocCount++;
+			BigDecimal p = resolveTaxPercentageForPersist(rateId, aid, r.resolvedTaxPct());
+			pctByAlloc.put(aid, p);
+			sumPct = sumPct.add(p != null ? p : BigDecimal.ZERO);
+		}
+		for (UUID allocId : allocs) {
+			if (allocId == null) {
+				continue;
+			}
+			String taxName = resolveTaxNameForPersist(rateId, allocId);
+			BigDecimal taxPct = resolveTaxPercentageForPersist(rateId, allocId, r.resolvedTaxPct());
+			BigDecimal taxAmtPart = splitLineTaxForAllocation(totalLineTax, pctByAlloc.get(allocId), sumPct,
+					validAllocCount);
+			jdbc.update("""
+					INSERT INTO client_subscription_billing.subscription_billing_schedule_tax_line (
+					    billing_schedule_id,
+					    tax_rate_id,
+					    tax_rate_allocation_id,
+					    tax_name,
+					    tax_percentage,
+					    taxable_amount,
+					    tax_amount,
+					    created_on
+					) VALUES (?, ?, ?, ?, ?, ?, ?, now())
+					""",
+					billingScheduleId, rateId, allocId, taxName, taxPct, taxableBase, taxAmtPart);
+		}
+	}
+
+	/** Subtotal / amount the tax applies to (quote line {@code price}, then {@code amount}). */
+	private static BigDecimal lineItemTaxableBase(QuoteLineItemRow li) {
+		if (li.getPrice() != null) {
+			return li.getPrice().setScale(2, RoundingMode.HALF_UP);
+		}
+		if (li.getAmount() != null) {
+			return li.getAmount().setScale(2, RoundingMode.HALF_UP);
+		}
+		return BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
+	}
+
+	private static BigDecimal nzBd(BigDecimal v, BigDecimal d) {
+		return v != null ? v : d;
+	}
+
+	/**
+	 * First cycle billing date: {@code recurring[0].billingDate} when present, else earliest
+	 * {@code lineItems[].billingDate} (by {@code sequence}), else contract start.
+	 */
+	private LocalDate resolveFirstCycleBillingDate(BillingQuoteLineItemsResponse quote,
+			List<QuoteLineItemRow> subscriptionLines, LocalDate contractStart) {
+		JsonNode recurring = quote.getRecurring();
+		if (recurring != null && recurring.isArray() && !recurring.isEmpty()) {
+			JsonNode n = recurring.get(0);
+			if (n != null && !n.isNull()) {
+				try {
+					RecurringForecastRow r = objectMapper.convertValue(n, RecurringForecastRow.class);
+					LocalDate bd = r.resolvedBillingDate();
+					if (bd != null) {
+						return bd;
+					}
+				} catch (IllegalArgumentException ignored) {
+					// fall through
+				}
+			}
+		}
+		LocalDate lineBd = firstLineItemBillingDateOrdered(subscriptionLines);
+		if (lineBd != null) {
+			return lineBd;
+		}
+		return contractStart;
+	}
+
+	/**
+	 * When invoice is paid: first line item's {@code billingDate} (by {@code sequence}), else "today" in quote
+	 * timezone. When not paid: {@code null}.
+	 */
+	private static LocalDate resolveLastBilledOn(List<QuoteLineItemRow> subscriptionLines, boolean invoicePaid,
+			LocalDate todayInQuoteTimezone) {
+		if (!invoicePaid) {
+			return null;
+		}
+		LocalDate first = firstLineItemBillingDateOrdered(subscriptionLines);
+		return first != null ? first : todayInQuoteTimezone;
+	}
+
+	private static LocalDate firstLineItemBillingDateOrdered(List<QuoteLineItemRow> lines) {
+		if (lines == null || lines.isEmpty()) {
+			return null;
+		}
+		return lines.stream()
+				.filter(Objects::nonNull)
+				.filter(li -> li.getBillingDate() != null)
+				.min(Comparator.comparing((QuoteLineItemRow li) -> nzInt(li.getSequence(), Integer.MAX_VALUE))
+						.thenComparing(QuoteLineItemRow::getBillingDate))
+				.map(QuoteLineItemRow::getBillingDate)
+				.orElse(null);
+	}
+
+	private static int nzInt(Integer v, int defaultVal) {
+		return v != null ? v : defaultVal;
+	}
+
+	/**
+	 * When multiple {@code tax_rate_allocation} rows exist for one line, split {@code totalLineTax} by each
+	 * allocation's rate share; otherwise equal split; single row gets full tax.
+	 */
+	private static BigDecimal splitLineTaxForAllocation(BigDecimal totalLineTax, BigDecimal thisAllocPct,
+			BigDecimal sumAllocPct, int validAllocCount) {
+		if (totalLineTax == null || totalLineTax.compareTo(BigDecimal.ZERO) == 0) {
+			return BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
+		}
+		if (sumAllocPct != null && sumAllocPct.compareTo(BigDecimal.ZERO) > 0 && thisAllocPct != null) {
+			return totalLineTax.multiply(thisAllocPct).divide(sumAllocPct, 2, RoundingMode.HALF_UP);
+		}
+		if (validAllocCount > 0) {
+			return totalLineTax.divide(BigDecimal.valueOf(validAllocCount), 2, RoundingMode.HALF_UP);
+		}
+		return totalLineTax.setScale(2, RoundingMode.HALF_UP);
 	}
 
 	private <T> T readSection(com.fasterxml.jackson.databind.JsonNode node, Class<T> type) {
@@ -814,26 +1558,48 @@ public class BillingQuoteSubscriptionPersistenceService {
 			BigDecimal baseAmount, BigDecimal taxAmount, BigDecimal taxPct, BigDecimal subtotalBeforeTax) {
 	}
 
-	private ScheduleAgg aggregateSchedule(List<QuoteLineItemRow> lines) {
+	private ScheduleAgg aggregateSchedule(List<QuoteLineItemRow> lines, LocalDate contractStart, LocalDate contractEnd) {
 		if (lines.isEmpty()) {
 			LocalDate today = LocalDate.now();
-			return new ScheduleAgg("Billing", null, today, today, today, 1, BigDecimal.ZERO, BigDecimal.ZERO,
-					BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO);
+			LocalDate cs = nzDate(contractStart, today);
+			LocalDate ce = nzDate(contractEnd, cs);
+			String pl = trunc(formatIsoPeriodLabel(cs, ce), 100);
+			return new ScheduleAgg("Billing", pl, cs, ce, today, 1, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
+					BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO);
 		}
-		BigDecimal subtotal = BigDecimal.ZERO;
+		BigDecimal sumPricePreTax = BigDecimal.ZERO;
+		BigDecimal sumChargeAmount = BigDecimal.ZERO;
+		BigDecimal fullCycleUnitNumerator = BigDecimal.ZERO;
+		BigDecimal fullCycleBefDiscNumerator = BigDecimal.ZERO;
 		BigDecimal tax = BigDecimal.ZERO;
 		int qty = 0;
 		LocalDate pStart = null;
 		LocalDate pEnd = null;
 		LocalDate billDate = null;
 		for (QuoteLineItemRow li : lines) {
+			if (li == null) {
+				continue;
+			}
+			int q = nz(li.getQuantity(), 1);
+			qty += q;
+			if (li.getUnitPrice() != null) {
+				fullCycleUnitNumerator = fullCycleUnitNumerator.add(li.getUnitPrice().multiply(BigDecimal.valueOf(q)));
+			}
+			if (li.getUnitPriceBeforeDiscount() != null) {
+				fullCycleBefDiscNumerator = fullCycleBefDiscNumerator
+						.add(li.getUnitPriceBeforeDiscount().multiply(BigDecimal.valueOf(q)));
+			}
 			if (li.getPrice() != null) {
-				subtotal = subtotal.add(li.getPrice());
+				sumPricePreTax = sumPricePreTax.add(li.getPrice());
+			}
+			if (li.getAmount() != null) {
+				sumChargeAmount = sumChargeAmount.add(li.getAmount());
+			} else if (li.getPrice() != null) {
+				sumChargeAmount = sumChargeAmount.add(li.getPrice());
 			}
 			if (li.getTax() != null) {
 				tax = tax.add(li.getTax());
 			}
-			qty += nz(li.getQuantity(), 1);
 			if (li.getStartDate() != null) {
 				pStart = pStart == null ? li.getStartDate() : li.getStartDate().isBefore(pStart) ? li.getStartDate() : pStart;
 			}
@@ -854,13 +1620,32 @@ public class BillingQuoteSubscriptionPersistenceService {
 		if (billDate == null) {
 			billDate = nzDate(first.getBillingDate(), pStart);
 		}
-		BigDecimal avgUnit = qty > 0
-				? subtotal.divide(BigDecimal.valueOf(qty), 2, RoundingMode.HALF_UP)
-				: subtotal;
+		BigDecimal avgFullCycleUnit = qty > 0
+				? fullCycleUnitNumerator.divide(BigDecimal.valueOf(qty), 2, RoundingMode.HALF_UP)
+				: BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
+		BigDecimal avgBefDisc = qty > 0 && fullCycleBefDiscNumerator.compareTo(BigDecimal.ZERO) > 0
+				? fullCycleBefDiscNumerator.divide(BigDecimal.valueOf(qty), 2, RoundingMode.HALF_UP)
+				: nzBd(first.getUnitPriceBeforeDiscount(), avgFullCycleUnit);
+		BigDecimal subtotalBeforeTax = sumPricePreTax;
+		if (subtotalBeforeTax.compareTo(BigDecimal.ZERO) == 0 && sumChargeAmount.compareTo(BigDecimal.ZERO) > 0) {
+			subtotalBeforeTax = sumChargeAmount.subtract(tax).max(BigDecimal.ZERO).setScale(2, RoundingMode.HALF_UP);
+		} else {
+			subtotalBeforeTax = subtotalBeforeTax.setScale(2, RoundingMode.HALF_UP);
+		}
 		BigDecimal taxPct = first.getTaxPct();
 		String label = first.getLabel() != null ? first.getLabel() : "Billing";
-		return new ScheduleAgg(label, null, pStart, pEnd, billDate, qty, avgUnit, first.getUnitPriceBeforeDiscount(),
-				subtotal, tax, taxPct, subtotal);
+		String plFromLine = firstNonBlankLineField(lines, QuoteLineItemRow::resolvedPeriodLabel);
+		String periodLabelCandidate = plFromLine != null ? plFromLine : formatIsoPeriodLabel(pStart, pEnd);
+		ForecastBounds merged = resolveBillingPeriodBounds(new ForecastBounds(pStart, pEnd), periodLabelCandidate,
+				contractStart, contractEnd);
+		pStart = merged.periodStart();
+		pEnd = merged.periodEnd();
+		String periodLabelOut = plFromLine != null ? plFromLine : formatIsoPeriodLabel(pStart, pEnd);
+		if (periodLabelOut == null) {
+			periodLabelOut = formatIsoPeriodLabel(pStart, pEnd);
+		}
+		return new ScheduleAgg(label, trunc(periodLabelOut, 100), pStart, pEnd, billDate, qty, avgFullCycleUnit,
+				avgBefDisc, sumChargeAmount.setScale(2, RoundingMode.HALF_UP), tax, taxPct, subtotalBeforeTax);
 	}
 
 	private static boolean isPaidInFull(String frequencyCode) {

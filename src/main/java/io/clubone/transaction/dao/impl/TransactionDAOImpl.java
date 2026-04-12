@@ -1163,7 +1163,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 				  -- plan
 				  sp.interval_count,
-				  sp.subscription_frequency_id,
+				  sbcs.billing_period_unit_id                 AS subscription_frequency_id,
 				  sp.contract_start_date,
 				  sp.contract_end_date,
 				  sp.entity_id,
@@ -1201,8 +1201,17 @@ public class TransactionDAOImpl implements TransactionDAO {
 				  on si.subscription_instance_id = sbh.subscription_instance_id
 				join client_subscription_billing.subscription_plan sp
 				  on sp.subscription_plan_id = si.subscription_plan_id
-				join billing_config.billing_period_unit lf
-				  on lf.billing_period_unit_id = sp.subscription_frequency_id
+				left join lateral (
+				  select sps0.*
+				  from client_subscription_billing.subscription_purchase_snapshot sps0
+				  where sps0.subscription_plan_id = sp.subscription_plan_id
+				  order by sps0.created_on desc nulls last
+				  limit 1
+				) sps on true
+				left join client_subscription_billing.subscription_billing_config_snapshot sbcs
+				  on sbcs.subscription_billing_config_snapshot_id = sps.subscription_billing_config_snapshot_id
+				left join billing_config.billing_period_unit lf
+				  on lf.billing_period_unit_id = sbcs.billing_period_unit_id
 
 				-- latest plan term (if any)
 				left join lateral (

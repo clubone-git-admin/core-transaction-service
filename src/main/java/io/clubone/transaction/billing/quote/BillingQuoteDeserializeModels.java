@@ -2,9 +2,11 @@ package io.clubone.transaction.billing.quote;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
@@ -32,6 +34,9 @@ public final class BillingQuoteDeserializeModels {
 		private String billingTimingCode;
 		private String billingAlignmentCode;
 		private String prorationStrategyCode;
+		@JsonProperty("proration_source")
+		@JsonAlias("prorationSource")
+		private String prorationSource;
 	}
 
 	@Data
@@ -98,10 +103,49 @@ public final class BillingQuoteDeserializeModels {
 		private BigDecimal taxPct;
 		private BigDecimal tax;
 		private BigDecimal amount;
+		private BigDecimal proratedAmount;
+		@JsonProperty("prorated_amount")
+		private BigDecimal proratedAmountSnake;
 		private Boolean isProrated;
 		private String proratedChargeTiming;
 		private String disclosureAutoRenewal;
 		private String disclosureMinTerm;
+		/** Optional billing-period description; may contain parseable dates for schedule bounds. */
+		private String periodLabel;
+		@JsonProperty("period_label")
+		private String periodLabelSnake;
+		/** When {@code FEE}, this line is excluded from subscription schedule / snapshot / tax persistence. */
+		private String itemGroupCode;
+		private Boolean isFeeItem;
+		private UUID taxRateId;
+		@JsonProperty("tax_rate_id")
+		private UUID taxRateIdSnake;
+		private List<UUID> taxRateAllocationIds;
+		@JsonProperty("tax_rate_allocation_ids")
+		private List<UUID> taxRateAllocationIdsSnake;
+
+		public UUID resolvedTaxRateId() {
+			return taxRateId != null ? taxRateId : taxRateIdSnake;
+		}
+
+		public List<UUID> resolvedTaxRateAllocationIds() {
+			List<UUID> a = taxRateAllocationIds != null ? taxRateAllocationIds : taxRateAllocationIdsSnake;
+			return a != null ? a : Collections.emptyList();
+		}
+
+		public BigDecimal resolvedProratedAmount() {
+			if (proratedAmount != null) {
+				return proratedAmount;
+			}
+			return proratedAmountSnake;
+		}
+
+		public String resolvedPeriodLabel() {
+			if (periodLabel != null && !periodLabel.isBlank()) {
+				return periodLabel.trim();
+			}
+			return periodLabelSnake != null ? periodLabelSnake.trim() : null;
+		}
 	}
 
 	/**
@@ -110,10 +154,19 @@ public final class BillingQuoteDeserializeModels {
 	@Data
 	@JsonIgnoreProperties(ignoreUnknown = true)
 	public static class RecurringForecastRow {
+		/**
+		 * Authoritative billing cycle index from the quote API (e.g. 2–13 when cycle 1 is the prorated line-item
+		 * period). Prefer over {@link #cycleNumber}.
+		 */
+		private Integer billingCycle;
+		@JsonProperty("billing_cycle")
+		private Integer billingCycleSnake;
 		@JsonProperty("cycleNumber")
 		private Integer cycleNumber;
 		@JsonProperty("cycle_number")
 		private Integer cycleNumberSnake;
+		/** Short display, e.g. {@code Cycle 2}. */
+		private String label;
 		@JsonProperty("periodStart")
 		private LocalDate periodStart;
 		@JsonProperty("period_start")
@@ -129,12 +182,17 @@ public final class BillingQuoteDeserializeModels {
 		private BigDecimal unitPrice;
 		@JsonProperty("unit_price")
 		private BigDecimal unitPriceSnake;
+		private BigDecimal unitPriceBeforeDiscount;
+		@JsonProperty("unit_price_before_discount")
+		private BigDecimal unitPriceBeforeDiscountSnake;
 		private BigDecimal taxPct;
 		@JsonProperty("tax_pct")
 		private BigDecimal taxPctSnake;
 		private BigDecimal taxAmount;
 		@JsonProperty("tax_amount")
 		private BigDecimal taxAmountSnake;
+		@JsonProperty("tax")
+		private BigDecimal taxCompact;
 		private BigDecimal amount;
 		private BigDecimal discountedAmount;
 		@JsonProperty("discounted_amount")
@@ -142,8 +200,22 @@ public final class BillingQuoteDeserializeModels {
 		private String periodLabel;
 		@JsonProperty("period_label")
 		private String periodLabelSnake;
+		@JsonProperty("nextPeriodStart")
+		private LocalDate nextPeriodStart;
+		private UUID taxRateId;
+		@JsonProperty("tax_rate_id")
+		private UUID taxRateIdSnake;
+		private List<UUID> taxRateAllocationIds;
+		@JsonProperty("tax_rate_allocation_ids")
+		private List<UUID> taxRateAllocationIdsSnake;
 
 		public int resolvedCycleNumber() {
+			if (billingCycle != null) {
+				return billingCycle;
+			}
+			if (billingCycleSnake != null) {
+				return billingCycleSnake;
+			}
 			if (cycleNumber != null) {
 				return cycleNumber;
 			}
@@ -153,8 +225,22 @@ public final class BillingQuoteDeserializeModels {
 			return 1;
 		}
 
+		/** Schedule row label: short {@code label} when present, else {@code periodLabel}. */
+		public String resolvedScheduleLabel() {
+			if (label != null && !label.isBlank()) {
+				return label.trim();
+			}
+			return resolvedPeriodLabel();
+		}
+
 		public LocalDate resolvedPeriodStart() {
-			return periodStart != null ? periodStart : periodStartSnake;
+			if (periodStart != null) {
+				return periodStart;
+			}
+			if (periodStartSnake != null) {
+				return periodStartSnake;
+			}
+			return nextPeriodStart;
 		}
 
 		public LocalDate resolvedPeriodEnd() {
@@ -169,12 +255,23 @@ public final class BillingQuoteDeserializeModels {
 			return unitPrice != null ? unitPrice : unitPriceSnake;
 		}
 
+		public BigDecimal resolvedUnitPriceBeforeDiscount() {
+			BigDecimal v = unitPriceBeforeDiscount != null ? unitPriceBeforeDiscount : unitPriceBeforeDiscountSnake;
+			return v != null ? v : resolvedUnitPrice();
+		}
+
 		public BigDecimal resolvedTaxPct() {
 			return taxPct != null ? taxPct : taxPctSnake;
 		}
 
 		public BigDecimal resolvedTaxAmount() {
-			return taxAmount != null ? taxAmount : taxAmountSnake;
+			if (taxAmount != null) {
+				return taxAmount;
+			}
+			if (taxAmountSnake != null) {
+				return taxAmountSnake;
+			}
+			return taxCompact;
 		}
 
 		public BigDecimal resolvedDiscountedAmount() {
@@ -182,7 +279,17 @@ public final class BillingQuoteDeserializeModels {
 		}
 
 		public String resolvedPeriodLabel() {
-			return periodLabel != null ? periodLabel : periodLabelSnake;
+			String a = periodLabel != null ? periodLabel : periodLabelSnake;
+			return a != null ? a.trim() : null;
+		}
+
+		public UUID resolvedTaxRateId() {
+			return taxRateId != null ? taxRateId : taxRateIdSnake;
+		}
+
+		public List<UUID> resolvedTaxRateAllocationIds() {
+			List<UUID> a = taxRateAllocationIds != null ? taxRateAllocationIds : taxRateAllocationIdsSnake;
+			return a != null ? a : Collections.emptyList();
 		}
 	}
 
@@ -193,6 +300,11 @@ public final class BillingQuoteDeserializeModels {
 		private UUID packagePriceId;
 		private UUID priceCycleBandId;
 		private Integer cycleNumber;
+		/** Band bounds from quote API; persisted to {@code cycle_start} / {@code cycle_end} on snapshot cycle price. */
+		@JsonAlias({ "startCycle", "start_cycle" })
+		private Integer startCycle;
+		@JsonAlias({ "endCycle", "end_cycle" })
+		private Integer endCycle;
 		private BigDecimal unitPrice;
 		private BigDecimal discountedUnitPrice;
 		private Integer entitlementQuantityUsed;

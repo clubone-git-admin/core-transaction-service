@@ -30,9 +30,9 @@ public class SubscriptionBillingDAOImpl implements SubscriptionBillingDAO {
 	private static final String SQL_INSERT_SUBSCRIPTION_PLAN = """
 			INSERT INTO client_subscription_billing.subscription_plan (
 			    subscription_plan_id, entity_id, client_payment_method_id, amount,
-			    subscription_frequency_id, interval_count, subscription_billing_day_rule_id,
+			    interval_count, subscription_billing_day_rule_id,
 			    is_active, created_on, created_by, entity_type_id
-			) VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, ?, true, CURRENT_TIMESTAMP, ?, ?)
+			) VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, true, CURRENT_TIMESTAMP, ?, ?)
 			RETURNING subscription_plan_id
 			""";
 
@@ -80,7 +80,7 @@ public class SubscriptionBillingDAOImpl implements SubscriptionBillingDAO {
 	@Override
 	public UUID insertSubscriptionPlan(SubscriptionPlanDTO dto) {
 		return cluboneJdbcTemplate.queryForObject(SQL_INSERT_SUBSCRIPTION_PLAN, UUID.class, dto.getEntityId(),
-				dto.getClientPaymentMethodId(), dto.getAmount(), dto.getSubscriptionFrequencyId(),
+				dto.getClientPaymentMethodId(), dto.getAmount(),
 				dto.getIntervalCount(), dto.getSubscriptionBillingDayRuleId(), dto.getCreatedBy(),
 				dto.getEntityTypeId());
 	}

@@ -705,7 +705,7 @@ public class TransactionServiceImpl implements TransactionService {
 								req.getInvoiceId(), transactionId, effectiveClientAgreementId);
 						billingQuoteSubscriptionPersistenceService.persistFromQuoteResponses(quoteLineItems,
 								transactionId, effectiveClientAgreementId, req.getInvoiceId(),
-								clientPaymentTransactionId, req.getCreatedBy());
+								clientPaymentTransactionId, req.getCreatedBy(), true);
 						logger.info("[transactions/v3/finalize] step=billing_quote_persist outcome=ok invoiceId={}",
 								req.getInvoiceId());
 					} catch (Exception persistEx) {
