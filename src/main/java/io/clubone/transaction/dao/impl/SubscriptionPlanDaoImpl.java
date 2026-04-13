@@ -632,11 +632,19 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 				  SELECT sps0.*
 				  FROM client_subscription_billing.subscription_purchase_snapshot sps0
 				  WHERE sps0.subscription_plan_id = sp.subscription_plan_id
-				  ORDER BY sps0.created_on DESC NULLS LAST
+				  ORDER BY sps0.captured_on DESC NULLS LAST
 				  LIMIT 1
 				) sps ON TRUE
+				LEFT JOIN LATERAL (
+				  SELECT l.subscription_billing_config_snapshot_id AS sbcs_id
+				  FROM client_subscription_billing.subscription_purchase_snapshot_line l
+				  WHERE l.subscription_purchase_snapshot_id = sps.subscription_purchase_snapshot_id
+				    AND l.subscription_billing_config_snapshot_id IS NOT NULL
+				  ORDER BY l.line_sequence
+				  LIMIT 1
+				) spsl_sbcs ON TRUE
 				LEFT JOIN client_subscription_billing.subscription_billing_config_snapshot sbcs
-				  ON sbcs.subscription_billing_config_snapshot_id = sps.subscription_billing_config_snapshot_id
+				  ON sbcs.subscription_billing_config_snapshot_id = spsl_sbcs.sbcs_id
 				LEFT JOIN billing_config.billing_period_unit lf
 				  ON lf.billing_period_unit_id = sbcs.billing_period_unit_id
 

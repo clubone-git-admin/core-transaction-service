@@ -42,6 +42,10 @@ public final class BillingQuoteDeserializeModels {
 	@Data
 	@JsonIgnoreProperties(ignoreUnknown = true)
 	public static class PlanPosDetailSection {
+		/** POS catalog {@code agreementId}; use when quote root {@code entityId} is absent. */
+		@JsonProperty("agreementId")
+		@JsonAlias({ "agreement_id" })
+		private UUID agreementId;
 		private UUID packagePlanTemplateId;
 		private UUID packageItemId;
 		private UUID levelId;

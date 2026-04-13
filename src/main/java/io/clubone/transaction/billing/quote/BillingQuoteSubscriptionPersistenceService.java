@@ -11,6 +11,7 @@ import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.Locale;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -38,6 +39,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import io.clubone.transaction.billing.quote.BillingQuoteDeserializeModels.AppliedPricingRow;
 import io.clubone.transaction.billing.quote.BillingQuoteDeserializeModels.BillingSection;
@@ -50,6 +53,9 @@ import io.clubone.transaction.billing.quote.BillingQuoteDeserializeModels.QuoteP
 import io.clubone.transaction.dao.SubscriptionPlanDao;
 import io.clubone.transaction.dao.billing.BillingEnterpriseLookupDao;
 import io.clubone.transaction.dao.billing.PurchaseSnapshotLookupDao;
+import io.clubone.transaction.pos.catalog.VendorPosAgreementCatalogClient;
+import io.clubone.transaction.pos.catalog.VendorPosCatalogSlice.VendorAgreementBundleSlice;
+import io.clubone.transaction.pos.catalog.VendorPosCatalogSlice.VendorCatalogItemRow;
 import io.clubone.transaction.response.BillingQuoteLineItemsResponse;
 
 /**
@@ -73,6 +79,11 @@ public class BillingQuoteSubscriptionPersistenceService {
 	private record PendingSchedule(boolean fromAgg, RecurringForecastRow recRow, int recurringIndex, int cycleNumber) {
 	}
 
+	/** Per-quote persistence summary; used to build one merged purchase snapshot for the same agreement cart. */
+	private record MergedQuoteRunOutcome(UUID subscriptionPlanId, UUID subscriptionInstanceId, UUID configSnapshotId,
+			UUID purchaseSnapshotId, boolean feeOnly, PlanPosDetailSection pos, BillingQuoteLineItemsResponse quote) {
+	}
+
 	private record ForecastBounds(LocalDate periodStart, LocalDate periodEnd) {
 	}
 
@@ -88,6 +99,7 @@ public class BillingQuoteSubscriptionPersistenceService {
 	private final BillingEnterpriseLookupDao billingLookup;
 	private final PurchaseSnapshotLookupDao purchaseSnapshotLookupDao;
 	private final SubscriptionPlanDao subscriptionPlanDao;
+	private final VendorPosAgreementCatalogClient vendorPosAgreementCatalogClient;
 
 	@Value("${clubone.billing.quote.schedule-status-code:PLANNED}")
 	private String initialBillingScheduleStatusCode;
@@ -126,16 +138,150 @@ public class BillingQuoteSubscriptionPersistenceService {
 	@Value("${clubone.billing.quote.purchase-snapshot-promo-default-cycle-start:1}")
 	private int purchaseSnapshotPromoDefaultCycleStart;
 
+	@Value("${clubone.billing.quote.merge-agreement-purchase-snapshot:true}")
+	private boolean mergeAgreementPurchaseSnapshot;
+
+	@Value("${clubone.billing.quote.purchase-snapshot-line-type-root-code:ROOT}")
+	private String purchaseSnapshotLineTypeRootCode;
+
+	@Value("${clubone.billing.quote.purchase-snapshot-line-type-bundle-code:BUNDLE}")
+	private String purchaseSnapshotLineTypeBundleCode;
+
+	@Value("${clubone.billing.quote.snapshot-entity-type-agreement-id:d2dae39c-9cb7-49e2-8143-8104ba48031b}")
+	private UUID snapshotEntityTypeAgreementId;
+
+	@Value("${clubone.billing.quote.snapshot-entity-type-bundle-id:be4dfb47-1280-40cf-95c1-84e3cf8caa05}")
+	private UUID snapshotEntityTypeBundleId;
+
+	@Value("${clubone.billing.quote.snapshot-entity-type-item-id:b1c9b95c-5fe0-4062-af85-12ad47908948}")
+	private UUID snapshotEntityTypeItemId;
+
 	public BillingQuoteSubscriptionPersistenceService(@Qualifier("cluboneJdbcTemplate") JdbcTemplate jdbc,
 			ObjectMapper objectMapper,
 			BillingEnterpriseLookupDao billingLookup,
 			PurchaseSnapshotLookupDao purchaseSnapshotLookupDao,
-			SubscriptionPlanDao subscriptionPlanDao) {
+			SubscriptionPlanDao subscriptionPlanDao,
+			VendorPosAgreementCatalogClient vendorPosAgreementCatalogClient) {
 		this.jdbc = jdbc;
 		this.objectMapper = objectMapper;
 		this.billingLookup = billingLookup;
 		this.purchaseSnapshotLookupDao = purchaseSnapshotLookupDao;
 		this.subscriptionPlanDao = subscriptionPlanDao;
+		this.vendorPosAgreementCatalogClient = vendorPosAgreementCatalogClient;
+	}
+
+	private static UUID agreementIdForPosCatalog(BillingQuoteLineItemsResponse quote, PlanPosDetailSection pos) {
+		if (quote != null && quote.getEntityId() != null) {
+			return quote.getEntityId();
+		}
+		if (pos != null && pos.getAgreementId() != null) {
+			return pos.getAgreementId();
+		}
+		return null;
+	}
+
+	private Optional<VendorAgreementBundleSlice> resolveCatalogAgreementBundle(PlanPosDetailSection pos,
+			BillingQuoteLineItemsResponse quote, LocalDate asOf) {
+		if (pos == null) {
+			return Optional.empty();
+		}
+		UUID levelId = pos.getLevelId();
+		UUID bundleId = pos.getPackageItemId();
+		UUID agreementId = agreementIdForPosCatalog(quote, pos);
+		if (levelId == null || agreementId == null || bundleId == null) {
+			return Optional.empty();
+		}
+		Optional<VendorAgreementBundleSlice> slice = vendorPosAgreementCatalogClient.fetchAgreementBundle(levelId,
+				asOf, agreementId, bundleId);
+		if (slice.isEmpty()) {
+			log.warn(
+					"[billing-quote/persist] step=vendor_pos_catalog outcome=miss agreementId={} bundleId={} levelId={}",
+					agreementId, bundleId, levelId);
+		}
+		return slice;
+	}
+
+	private VendorCatalogItemRow pickCatalogItemForLine(QuoteLineItemRow li, List<VendorCatalogItemRow> items,
+			Set<UUID> consumedItemEntityIds) {
+		if (items == null || items.isEmpty()) {
+			return null;
+		}
+		boolean feeLine = isFeeItemGroupLine(li);
+		String label = li != null && li.getLabel() != null ? li.getLabel().trim() : "";
+		String labelLower = label.toLowerCase(Locale.ROOT);
+		for (VendorCatalogItemRow it : items) {
+			if (it == null || it.itemEntityId() == null || it.itemVersionId() == null) {
+				continue;
+			}
+			if (consumedItemEntityIds.contains(it.itemEntityId())) {
+				continue;
+			}
+			if (it.itemDisplayName() != null && !it.itemDisplayName().isBlank()
+					&& it.itemDisplayName().trim().equalsIgnoreCase(label)) {
+				return it;
+			}
+		}
+		if (feeLine) {
+			for (VendorCatalogItemRow it : items) {
+				if (it == null || it.itemEntityId() == null || it.itemVersionId() == null) {
+					continue;
+				}
+				if (consumedItemEntityIds.contains(it.itemEntityId())) {
+					continue;
+				}
+				if (!it.feeLikeCatalogItem()) {
+					continue;
+				}
+				String n = it.itemDisplayName() != null ? it.itemDisplayName().toLowerCase(Locale.ROOT) : "";
+				if (!label.isEmpty() && (labelLower.contains("upfront") || labelLower.contains("initiation"))) {
+					if (n.contains("initiation") || n.contains("fee")) {
+						return it;
+					}
+				}
+				return it;
+			}
+		} else {
+			for (VendorCatalogItemRow it : items) {
+				if (it == null || it.itemEntityId() == null || it.itemVersionId() == null) {
+					continue;
+				}
+				if (consumedItemEntityIds.contains(it.itemEntityId())) {
+					continue;
+				}
+				if (it.feeLikeCatalogItem()) {
+					continue;
+				}
+				return it;
+			}
+		}
+		List<VendorCatalogItemRow> free = new ArrayList<>();
+		for (VendorCatalogItemRow it : items) {
+			if (it == null || it.itemEntityId() == null || it.itemVersionId() == null) {
+				continue;
+			}
+			if (!consumedItemEntityIds.contains(it.itemEntityId())) {
+				free.add(it);
+			}
+		}
+		if (free.size() == 1) {
+			return free.get(0);
+		}
+		for (VendorCatalogItemRow it : items) {
+			if (it == null || it.itemEntityId() == null || it.itemVersionId() == null) {
+				continue;
+			}
+			if (consumedItemEntityIds.contains(it.itemEntityId())) {
+				continue;
+			}
+			String n = it.itemDisplayName() != null ? it.itemDisplayName().trim() : "";
+			if (!label.isEmpty() && !n.isEmpty()) {
+				String nLower = n.toLowerCase(Locale.ROOT);
+				if (labelLower.contains(nLower) || nLower.contains(labelLower)) {
+					return it;
+				}
+			}
+		}
+		return null;
 	}
 
 	/**
@@ -149,6 +295,10 @@ public class BillingQuoteSubscriptionPersistenceService {
 				"[billing-quote/persist] step=start transactionId={} invoiceId={} clientAgreementId={} clientPaymentTransactionId={} quoteCount={} invoicePaid={} createdBy={}",
 				transactionId, invoiceId, clientAgreementId, clientPaymentTransactionId,
 				quotes == null ? 0 : quotes.size(), invoicePaid, createdBy);
+		if (quotes == null) {
+			log.info("[billing-quote/persist] step=validation outcome=skip reason=null_quotes");
+			return;
+		}
 		if (CollectionUtils.isEmpty(quotes)) {
 			log.info("[billing-quote/persist] step=validation outcome=skip reason=no_quotes");
 			return;
@@ -192,25 +342,429 @@ public class BillingQuoteSubscriptionPersistenceService {
 				"[billing-quote/persist] step=resolve_status_ids outcome=ok billingStatusId={} instanceStatusId={} plannedScheduleStatusId={} paidScheduleStatusId={}",
 				billingStatusId, instanceStatusId, plannedScheduleStatusId, paidScheduleStatusId);
 
+		boolean mergeSnapshots = mergeAgreementPurchaseSnapshot
+				&& shouldMergeAgreementPurchaseSnapshots(quotes, clientAgreementId);
+		if (mergeSnapshots) {
+			log.info(
+					"[billing-quote/persist] step=merge_policy outcome=merge_agreement_snapshot quoteCount={} entityId={}",
+					quotes.size(), quotes.get(0).getEntityId());
+		}
 		int q = 0;
+		List<MergedQuoteRunOutcome> mergeOutcomes = new ArrayList<>();
 		for (BillingQuoteLineItemsResponse quote : quotes) {
 			q++;
 			log.info(
 					"[billing-quote/persist] step=quote_iteration start quoteIndex={}/{} planTemplateId={} entityId={} startDate={}",
 					q, quotes.size(), quote.getPlanTemplateId(), quote.getEntityId(), quote.getStartDate());
-			persistOneQuote(quote, clientPaymentMethodId, clientAgreementId, invoiceId, clientPaymentTransactionId,
-					transactionId, createdBy, billingStatusId, instanceStatusId, plannedScheduleStatusId,
-					paidScheduleStatusId, invoicePaid);
+			MergedQuoteRunOutcome run = persistOneQuote(quote, clientPaymentMethodId, clientAgreementId, invoiceId,
+					clientPaymentTransactionId, transactionId, createdBy, billingStatusId, instanceStatusId,
+					plannedScheduleStatusId, paidScheduleStatusId, invoicePaid, mergeSnapshots);
+			if (mergeSnapshots) {
+				mergeOutcomes.add(run);
+			}
 			log.info("[billing-quote/persist] step=quote_iteration complete quoteIndex={}/{}", q, quotes.size());
+		}
+		if (mergeSnapshots) {
+			insertMergedAgreementPurchaseSnapshot(quotes, mergeOutcomes, transactionId, clientAgreementId, invoiceId,
+					clientPaymentTransactionId, createdBy);
 		}
 		log.info("[billing-quote/persist] step=complete outcome=ok transactionId={} invoiceId={} quotesProcessed={}",
 				transactionId, invoiceId, quotes.size());
 	}
 
-	private void persistOneQuote(BillingQuoteLineItemsResponse quote, UUID clientPaymentMethodId,
+	/**
+	 * Resolves the agreement-scoped entity id for merge checks. Uses {@link BillingQuoteLineItemsResponse#getEntityId()}
+	 * when present; if the billing API omits it but {@code entityTypeCode} is AGREEMENT, falls back to
+	 * {@code clientAgreementId} from finalize/invoice context.
+	 */
+	private static UUID agreementEntityIdForMerge(BillingQuoteLineItemsResponse q, UUID clientAgreementId) {
+		if (q == null) {
+			return null;
+		}
+		if (q.getEntityId() != null) {
+			return q.getEntityId();
+		}
+		String t = q.getEntityTypeCode();
+		if (t != null && !t.isBlank() && "AGREEMENT".equalsIgnoreCase(t.trim()) && clientAgreementId != null) {
+			return clientAgreementId;
+		}
+		return null;
+	}
+
+	private boolean shouldMergeAgreementPurchaseSnapshots(List<BillingQuoteLineItemsResponse> quotes,
+			UUID clientAgreementId) {
+		if (quotes.size() < 2) {
+			return false;
+		}
+		BillingQuoteLineItemsResponse head = quotes.get(0);
+		if (head == null) {
+			return false;
+		}
+		String headType = head.getEntityTypeCode();
+		if (headType == null || headType.isBlank() || !"AGREEMENT".equalsIgnoreCase(headType.trim())) {
+			return false;
+		}
+		UUID entityId = agreementEntityIdForMerge(head, clientAgreementId);
+		if (entityId == null) {
+			return false;
+		}
+		for (BillingQuoteLineItemsResponse q : quotes) {
+			if (q == null) {
+				return false;
+			}
+			UUID qEid = agreementEntityIdForMerge(q, clientAgreementId);
+			if (qEid == null || !entityId.equals(qEid)) {
+				return false;
+			}
+			String t = q.getEntityTypeCode();
+			if (t == null || t.isBlank() || !"AGREEMENT".equalsIgnoreCase(t.trim())) {
+				return false;
+			}
+		}
+		for (BillingQuoteLineItemsResponse q : quotes) {
+			if (!nonFeeLineItems(readLineItems(q)).isEmpty()) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private String mergedAgreementPresentationJson(List<BillingQuoteLineItemsResponse> quotes) {
+		try {
+			ObjectNode root = objectMapper.createObjectNode();
+			root.put("mergedAgreementPurchaseSnapshot", true);
+			ArrayNode arr = root.putArray("quotes");
+			for (BillingQuoteLineItemsResponse q : quotes) {
+				arr.add(objectMapper.valueToTree(q));
+			}
+			return objectMapper.writeValueAsString(root);
+		} catch (JsonProcessingException e) {
+			log.warn("[billing-quote/persist] step=merged_presentation_json outcome=skip reason=serialize_failed", e);
+			return "{\"mergedAgreementPurchaseSnapshot\":true}";
+		}
+	}
+
+	/**
+	 * Snapshot header label: agreement display name from POS catalog when resolvable, else plan display name.
+	 */
+	private String purchaseSnapshotHeaderDisplayName(PlanPosDetailSection pos, BillingQuoteLineItemsResponse quote) {
+		if (pos != null && quote != null) {
+			LocalDate asOf = nzDate(pos.getBillingStartDate(), quote.getStartDate());
+			Optional<VendorAgreementBundleSlice> slice = resolveCatalogAgreementBundle(pos, quote, asOf);
+			String agreementName = slice.map(VendorAgreementBundleSlice::agreementDisplayName).orElse(null);
+			if (agreementName != null && !agreementName.isBlank()) {
+				return agreementName.trim();
+			}
+		}
+		if (pos != null && pos.getLuPlanName() != null && !pos.getLuPlanName().isBlank()) {
+			return pos.getLuPlanName().trim();
+		}
+		return "Purchase";
+	}
+
+	private static String mergedSnapshotHeaderDisplayName(PlanPosDetailSection primaryPos) {
+		if (primaryPos != null && primaryPos.getLuPlanName() != null && !primaryPos.getLuPlanName().isBlank()) {
+			return primaryPos.getLuPlanName().trim();
+		}
+		return "Agreement purchase";
+	}
+
+	/** Line block after persisting merged snapshot leaf rows (for attaching prices / entitlements / cycle bands). */
+	private record MergedQuoteLinePersist(MergedQuoteRunOutcome outcome, int startSeq, Map<Integer, UUID> seqToLineId,
+			List<QuoteLineItemRow> orderedLines) {
+	}
+
+	private MergedQuoteLinePersist findMergedLineBlock(List<MergedQuoteLinePersist> blocks,
+			MergedQuoteRunOutcome outcome) {
+		if (blocks == null || outcome == null) {
+			return null;
+		}
+		for (MergedQuoteLinePersist p : blocks) {
+			if (p.outcome() == outcome) {
+				return p;
+			}
+		}
+		return null;
+	}
+
+	private UUID insertPurchaseSnapshotHeader(UUID subscriptionPlanId, UUID clientAgreementId,
+			UUID clientPaymentTransactionId, UUID transactionId, String displayName, UUID purchaseSnapshotKindId,
+			String presentationJson, UUID invoiceId, UUID createdBy) {
+		InvoiceHeaderAmounts inv = invoiceId != null ? loadInvoiceHeaderAmounts(invoiceId) : InvoiceHeaderAmounts.empty();
+		return jdbc.queryForObject("""
+				INSERT INTO client_subscription_billing.subscription_purchase_snapshot (
+				    subscription_purchase_snapshot_id,
+				    subscription_plan_id,
+				    client_agreement_id,
+				    client_payment_transaction_id,
+				    transaction_id,
+				    display_name,
+				    purchase_snapshot_kind_id,
+				    idempotency_key,
+				    currency_code,
+				    subtotal_amount,
+				    tax_total_amount,
+				    discount_total_amount,
+				    grand_total_amount,
+				    presentation_json,
+				    captured_by
+				) VALUES (
+				    gen_random_uuid(), ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, CAST(? AS jsonb), ?
+				) RETURNING subscription_purchase_snapshot_id
+				""",
+				UUID.class,
+				subscriptionPlanId,
+				clientAgreementId,
+				clientPaymentTransactionId,
+				transactionId,
+				trunc(displayName, 500),
+				purchaseSnapshotKindId,
+				inv.subTotal(),
+				inv.taxAmount(),
+				inv.discountAmount(),
+				inv.totalAmount(),
+				presentationJson,
+				createdBy);
+	}
+
+	private String lineItemAttributesJson(UUID subscriptionInstanceId, UUID packageItemId, String itemGroupCode) {
+		try {
+			ObjectNode n = objectMapper.createObjectNode();
+			if (subscriptionInstanceId != null) {
+				n.put("subscriptionInstanceId", subscriptionInstanceId.toString());
+			}
+			if (packageItemId != null) {
+				n.put("packageItemId", packageItemId.toString());
+			}
+			if (itemGroupCode != null && !itemGroupCode.isBlank()) {
+				n.put("itemGroupCode", trunc(itemGroupCode, 64));
+			}
+			if (n.isEmpty()) {
+				return null;
+			}
+			return objectMapper.writeValueAsString(n);
+		} catch (JsonProcessingException e) {
+			log.warn("[billing-quote/persist] line_attributes_json outcome=skip reason=serialize_failed", e);
+			return null;
+		}
+	}
+
+	private UUID insertPurchaseSnapshotLineRow(UUID purchaseSnapshotId, UUID configSnapshotId, UUID parentLineId,
+			int lineSequence, UUID lineTypeId, String displayName, UUID entityTypeId, UUID entityVersionId,
+			UUID planTemplateId, String planCode, String planName, String planDescription, Integer termIntervalCount,
+			Integer termTotalCycles, BigDecimal quantity, BigDecimal unitPrice, BigDecimal lineSubtotal,
+			BigDecimal taxAmount, BigDecimal discountAmount, BigDecimal lineTotal, LocalDate billingDate,
+			String periodLabel, boolean isRecurring, boolean isProrated, boolean isFee, UUID subscriptionPlanId,
+			UUID invoiceId, String attributesJson) {
+		String attrs = attributesJson;
+		return jdbc.queryForObject("""
+				INSERT INTO client_subscription_billing.subscription_purchase_snapshot_line (
+				    purchase_snapshot_line_id,
+				    subscription_purchase_snapshot_id,
+				    subscription_billing_config_snapshot_id,
+				    parent_purchase_snapshot_line_id,
+				    line_sequence,
+				    purchase_snapshot_line_type_id,
+				    display_name,
+				    entity_type_id,
+				    entity_version_id,
+				    plan_template_id,
+				    plan_code,
+				    plan_name,
+				    plan_description,
+				    term_interval_count,
+				    term_total_cycles,
+				    quantity,
+				    unit_price,
+				    line_subtotal,
+				    tax_amount,
+				    discount_amount,
+				    line_total,
+				    billing_date,
+				    period_label,
+				    is_recurring,
+				    is_prorated,
+				    is_fee,
+				    subscription_plan_id,
+				    invoice_id,
+				    attributes_json,
+				    created_on
+				) VALUES (
+				    gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), now()
+				)
+				RETURNING purchase_snapshot_line_id
+				""",
+				UUID.class,
+				purchaseSnapshotId,
+				configSnapshotId,
+				parentLineId,
+				lineSequence,
+				lineTypeId,
+				trunc(displayName, 500),
+				entityTypeId,
+				entityVersionId,
+				planTemplateId,
+				planCode != null ? trunc(planCode, 50) : null,
+				planName != null ? trunc(planName, 100) : null,
+				trunc(planDescription, 4000),
+				termIntervalCount,
+				termTotalCycles,
+				quantity,
+				unitPrice,
+				lineSubtotal,
+				taxAmount,
+				discountAmount,
+				lineTotal,
+				billingDate,
+				periodLabel != null ? trunc(periodLabel, 200) : null,
+				isRecurring,
+				isProrated,
+				isFee,
+				subscriptionPlanId,
+				invoiceId,
+				attrs != null ? attrs : "{}");
+	}
+
+	private UUID insertStructuralPurchaseSnapshotLine(UUID purchaseSnapshotId, UUID parentLineId, int lineSequence,
+			UUID lineTypeId, String displayName, UUID subscriptionPlanId, UUID subscriptionInstanceId,
+			UUID configSnapshotId, UUID entityTypeId, UUID entityVersionId, UUID planTemplateId, String planCode,
+			String planName, String planDescription, Integer termIntervalCount, Integer termTotalCycles, UUID invoiceId,
+			String attributesJson) {
+		BigDecimal zero = BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP);
+		return insertPurchaseSnapshotLineRow(purchaseSnapshotId, configSnapshotId, parentLineId, lineSequence,
+				lineTypeId, displayName, entityTypeId, entityVersionId, planTemplateId, planCode, planName,
+				planDescription, termIntervalCount, termTotalCycles, BigDecimal.ONE, zero, zero, null, zero, zero, null,
+				null, false, false, false, subscriptionPlanId, invoiceId, attributesJson);
+	}
+
+	private void insertMergedAgreementPurchaseSnapshot(List<BillingQuoteLineItemsResponse> quotes,
+			List<MergedQuoteRunOutcome> mergeOutcomes, UUID transactionId, UUID clientAgreementId, UUID invoiceId,
+			UUID clientPaymentTransactionId, UUID createdBy) {
+		if (CollectionUtils.isEmpty(mergeOutcomes)) {
+			log.warn("[billing-quote/persist] step=merged_purchase_snapshot outcome=skip reason=no_outcomes");
+			return;
+		}
+		MergedQuoteRunOutcome primary = mergeOutcomes.stream()
+				.filter(o -> !o.feeOnly() && o.subscriptionPlanId() != null)
+				.findFirst()
+				.orElse(null);
+		if (primary == null) {
+			log.warn("[billing-quote/persist] step=merged_purchase_snapshot outcome=skip reason=no_primary_non_fee_quote");
+			return;
+		}
+		PlanPosDetailSection pos = primary.pos();
+		UUID subscriptionPlanId = primary.subscriptionPlanId();
+		UUID purchaseSnapshotKindId = purchaseSnapshotLookupDao
+				.requirePurchaseSnapshotKindId(purchaseSnapshotKindFinalizeCode);
+		String presentationJson = mergedAgreementPresentationJson(quotes);
+		LocalDate mergeCatalogAsOf = nzDate(pos.getBillingStartDate(), primary.quote().getStartDate());
+		Optional<VendorAgreementBundleSlice> primaryCatalog = resolveCatalogAgreementBundle(pos, primary.quote(),
+				mergeCatalogAsOf);
+		String headerDisplayName = primaryCatalog.map(VendorAgreementBundleSlice::agreementDisplayName)
+				.filter(s -> !s.isBlank())
+				.map(String::trim)
+				.orElseGet(() -> mergedSnapshotHeaderDisplayName(pos));
+		UUID mergedPurchaseSnapshotId = insertPurchaseSnapshotHeader(subscriptionPlanId, clientAgreementId,
+				clientPaymentTransactionId, transactionId, headerDisplayName, purchaseSnapshotKindId, presentationJson,
+				invoiceId, createdBy);
+
+		List<QuoteLineItemRow> snapshotLegalTaxLines = new ArrayList<>();
+		for (MergedQuoteRunOutcome o : mergeOutcomes) {
+			List<QuoteLineItemRow> allLines = readLineItems(o.quote());
+			if (o.feeOnly()) {
+				snapshotLegalTaxLines.addAll(allLines);
+			} else {
+				snapshotLegalTaxLines.addAll(nonFeeLineItems(allLines));
+			}
+		}
+		insertPurchaseSnapshotLegalRows(mergedPurchaseSnapshotId, snapshotLegalTaxLines);
+		insertPurchaseSnapshotTaxRows(mergedPurchaseSnapshotId, snapshotLegalTaxLines);
+
+		UUID rootLineTypeId = purchaseSnapshotLookupDao.requirePurchaseSnapshotLineTypeId(purchaseSnapshotLineTypeRootCode);
+		UUID bundleLineTypeId = purchaseSnapshotLookupDao
+				.requirePurchaseSnapshotLineTypeId(purchaseSnapshotLineTypeBundleCode);
+		String rootDisplayName = primaryCatalog.map(VendorAgreementBundleSlice::agreementDisplayName)
+				.filter(s -> !s.isBlank())
+				.orElse("Agreement");
+		UUID rootEntityVersionId = primaryCatalog.map(VendorAgreementBundleSlice::agreementVersionId).orElse(null);
+		String bundleTitleText = primaryCatalog.map(VendorAgreementBundleSlice::bundleDisplayName)
+				.filter(s -> !s.isBlank())
+				.orElse(pos.getLuPlanName() != null && !pos.getLuPlanName().isBlank() ? pos.getLuPlanName().trim()
+						: "Bundle");
+		UUID bundleEntityVersionId = primaryCatalog.map(VendorAgreementBundleSlice::bundleVersionId)
+				.orElse(pos.getPackageVersionId());
+		UUID primaryInstanceId = primary.subscriptionInstanceId();
+		UUID rootLineId = insertStructuralPurchaseSnapshotLine(mergedPurchaseSnapshotId, null, 1, rootLineTypeId,
+				rootDisplayName, null, null, null, snapshotEntityTypeAgreementId, rootEntityVersionId, null, null, null,
+				null, null, null, invoiceId, null);
+		String bundleAttrs = lineItemAttributesJson(primaryInstanceId, pos.getPackageItemId(), null);
+		/* BUNDLE row is structural only: bundle entity + display; plan/terms/subscription_plan live on item lines. */
+		UUID bundleLineId = insertStructuralPurchaseSnapshotLine(mergedPurchaseSnapshotId, rootLineId, 2,
+				bundleLineTypeId, bundleTitleText, null, primaryInstanceId, null,
+				snapshotEntityTypeBundleId, bundleEntityVersionId, null,
+				null, null, null,
+				null, null, invoiceId, bundleAttrs);
+
+		int nextLeafSeq = 3;
+		List<MergedQuoteLinePersist> mergedLineBlocks = new ArrayList<>();
+		for (MergedQuoteRunOutcome o : mergeOutcomes) {
+			List<QuoteLineItemRow> lines = readLineItems(o.quote());
+			if (lines.isEmpty()) {
+				continue;
+			}
+			int startSeq = nextLeafSeq;
+			LocalDate lineCatalogAsOf = nzDate(o.pos() != null ? o.pos().getBillingStartDate() : null,
+					o.quote() != null ? o.quote().getStartDate() : null);
+			Optional<VendorAgreementBundleSlice> lineCatalog = resolveCatalogAgreementBundle(o.pos(), o.quote(),
+					lineCatalogAsOf);
+			Map<Integer, UUID> idByPersistedSeq = insertPurchaseSnapshotLines(mergedPurchaseSnapshotId, bundleLineId,
+					lines, o.subscriptionPlanId(), o.subscriptionInstanceId(), o.pos(), o.configSnapshotId(), invoiceId,
+					startSeq, lineCatalog);
+			int maxSeq = idByPersistedSeq.keySet().stream().mapToInt(Integer::intValue).max().orElse(startSeq - 1);
+			nextLeafSeq = maxSeq + 1;
+			Map<Integer, UUID> promoLineMap = new HashMap<>();
+			for (Map.Entry<Integer, UUID> e : idByPersistedSeq.entrySet()) {
+				int relative = e.getKey() - startSeq + 1;
+				promoLineMap.put(relative, e.getValue());
+			}
+			insertPurchaseSnapshotPromosFromQuoteRoot(mergedPurchaseSnapshotId, o.quote(), promoLineMap);
+			List<QuoteLineItemRow> ordered = new ArrayList<>(lines);
+			ordered.sort(Comparator.comparing(li -> nzInt(li != null ? li.getSequence() : null, Integer.MAX_VALUE)));
+			mergedLineBlocks.add(new MergedQuoteLinePersist(o, startSeq, new HashMap<>(idByPersistedSeq), ordered));
+		}
+
+		for (MergedQuoteRunOutcome o : mergeOutcomes) {
+			if (o.pos() == null) {
+				continue;
+			}
+			MergedQuoteLinePersist block = findMergedLineBlock(mergedLineBlocks, o);
+			if (block != null) {
+				insertPurchaseSnapshotPricesWithLineResolution(mergedPurchaseSnapshotId, o.pos().getPackagePrices(),
+						block.orderedLines(), block.startSeq(), block.seqToLineId(), readAppliedPricing(o.quote()));
+				UUID entLineId = lineIdForFirstNonFeeLine(block.orderedLines(), block.startSeq(), block.seqToLineId());
+				insertPurchaseSnapshotEntitlements(mergedPurchaseSnapshotId, o.pos().getEntitlements(), entLineId);
+			} else {
+				insertPurchaseSnapshotPrices(mergedPurchaseSnapshotId, o.pos().getPackagePrices(), null);
+				insertPurchaseSnapshotEntitlements(mergedPurchaseSnapshotId, o.pos().getEntitlements(), null);
+			}
+		}
+		for (MergedQuoteLinePersist block : mergedLineBlocks) {
+			if (!block.outcome().feeOnly() && block.outcome().quote() != null) {
+				UUID cycleLineId = lineIdForFirstNonFeeLine(block.orderedLines(), block.startSeq(), block.seqToLineId());
+				insertSnapshotCyclePricesFromApplied(mergedPurchaseSnapshotId, readAppliedPricing(block.outcome().quote()),
+						cycleLineId);
+			}
+		}
+
+		log.info(
+				"[billing-quote/persist] step=merged_purchase_snapshot_complete subscriptionPurchaseSnapshotId={} primarySubscriptionPlanId={} rootLineId={} bundleLineId={}",
+				mergedPurchaseSnapshotId, subscriptionPlanId, rootLineId, bundleLineId);
+	}
+
+	private MergedQuoteRunOutcome persistOneQuote(BillingQuoteLineItemsResponse quote, UUID clientPaymentMethodId,
 			UUID clientAgreementId, UUID invoiceId, UUID clientPaymentTransactionId, UUID transactionId, UUID createdBy,
 			UUID billingStatusId, UUID instanceStatusId, UUID plannedScheduleStatusId, UUID paidScheduleStatusId,
-			boolean invoicePaid) {
+			boolean invoicePaid, boolean mergeAgreementSnapshots) {
 
 		BillingSection billing = readSection(quote.getBilling(), BillingSection.class);
 		PlanPosDetailSection pos = readSection(quote.getPlanPosDetail(), PlanPosDetailSection.class);
@@ -235,9 +789,10 @@ public class BillingQuoteSubscriptionPersistenceService {
 			log.info(
 					"[billing-quote/persist] step=fee_only_snapshot planTemplateId={} packagePlanTemplateId={} lineCount={}",
 					quote.getPlanTemplateId(), pos.getPackagePlanTemplateId(), lines.size());
-			persistFeeOnlyQuoteSnapshot(quote, billing, pos, lines, clientPaymentMethodId, clientAgreementId, invoiceId,
-					clientPaymentTransactionId, transactionId, createdBy);
-			return;
+			UUID feeSnapshotId = persistFeeOnlyQuoteSnapshot(quote, billing, pos, lines, clientPaymentMethodId,
+					clientAgreementId, invoiceId, clientPaymentTransactionId, transactionId, createdBy,
+					mergeAgreementSnapshots);
+			return new MergedQuoteRunOutcome(null, null, null, feeSnapshotId, true, pos, quote);
 		}
 
 		log.info(
@@ -334,58 +889,31 @@ public class BillingQuoteSubscriptionPersistenceService {
 		log.info("[billing-quote/persist] step=insert_config_snapshot outcome=ok subscriptionBillingConfigSnapshotId={}",
 				configSnapshotId);
 
-		log.info("[billing-quote/persist] step=insert_purchase_snapshot planCode={}", pos.getLuPlanCode());
-		UUID purchaseSnapshotKindId = purchaseSnapshotLookupDao
-				.requirePurchaseSnapshotKindId(purchaseSnapshotKindFinalizeCode);
-		String presentationJson = quotePresentationJson(quote);
-		UUID purchaseSnapshotId = jdbc.queryForObject("""
-				INSERT INTO client_subscription_billing.subscription_purchase_snapshot (
-				    subscription_purchase_snapshot_id,
-				    subscription_plan_id,
-				    client_agreement_id,
-				    subscription_billing_config_snapshot_id,
-				    package_item_id,
-				    package_version_id,
-				    package_plan_template_id,
-				    plan_code,
-				    plan_name,
-				    plan_description,
-				    term_interval_count,
-				    term_total_cycles,
-				    invoice_id,
-				    client_payment_transaction_id,
-				    transaction_id,
-				    purchase_snapshot_kind_id,
-				    presentation_json,
-				    captured_by
-				) VALUES (
-				    gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?
-				) RETURNING subscription_purchase_snapshot_id
-				""", UUID.class,
-				subscriptionPlanId,
-				clientAgreementId,
-				configSnapshotId,
-				pos.getPackageItemId(),
-				pos.getPackageVersionId(),
-				pos.getPackagePlanTemplateId(),
-				trunc(pos.getLuPlanCode(), 50),
-				trunc(pos.getLuPlanName(), 100),
-				pos.getLuPlanDescription(),
-				pos.getTermIntervalCount(),
-				pos.getTermTotalCycles(),
-				invoiceId,
-				clientPaymentTransactionId,
-				transactionId,
-				purchaseSnapshotKindId,
-				presentationJson,
-				createdBy);
-		log.info("[billing-quote/persist] step=insert_purchase_snapshot outcome=ok subscriptionPurchaseSnapshotId={}",
-				purchaseSnapshotId);
+		UUID purchaseSnapshotId = null;
+		Map<Integer, UUID> purchaseSnapshotLineIdsBySequence = Collections.emptyMap();
+		List<QuoteLineItemRow> orderedLinesForPurchaseSnapshot = List.of();
+		List<AppliedPricingRow> applied = readAppliedPricing(quote);
+		log.info("[billing-quote/persist] step=read_applied_pricing_for_snapshot_cycle_prices count={}",
+				applied.size());
+		if (!mergeAgreementSnapshots) {
+			log.info("[billing-quote/persist] step=insert_purchase_snapshot planCode={}", pos.getLuPlanCode());
+			UUID purchaseSnapshotKindId = purchaseSnapshotLookupDao
+					.requirePurchaseSnapshotKindId(purchaseSnapshotKindFinalizeCode);
+			String presentationJson = quotePresentationJson(quote);
+			String headerDisplayName = purchaseSnapshotHeaderDisplayName(pos, quote);
+			purchaseSnapshotId = insertPurchaseSnapshotHeader(subscriptionPlanId, clientAgreementId,
+					clientPaymentTransactionId, transactionId, headerDisplayName, purchaseSnapshotKindId,
+					presentationJson, invoiceId, createdBy);
+			log.info("[billing-quote/persist] step=insert_purchase_snapshot outcome=ok subscriptionPurchaseSnapshotId={}",
+					purchaseSnapshotId);
 
-		insertPurchaseSnapshotPrices(purchaseSnapshotId, pos.getPackagePrices());
-		insertPurchaseSnapshotEntitlements(purchaseSnapshotId, pos.getEntitlements());
-		insertPurchaseSnapshotLegalRows(purchaseSnapshotId, subscriptionLines);
-		insertPurchaseSnapshotTaxRows(purchaseSnapshotId, subscriptionLines);
+			insertPurchaseSnapshotLegalRows(purchaseSnapshotId, subscriptionLines);
+			insertPurchaseSnapshotTaxRows(purchaseSnapshotId, subscriptionLines);
+		} else {
+			log.info(
+					"[billing-quote/persist] step=insert_purchase_snapshot outcome=skip reason=merged_agreement_cart planCode={}",
+					pos.getLuPlanCode());
+		}
 
 		ZoneId quoteZone = parseZone(quote.getTimezone());
 		LocalDate todayInQuoteTz = LocalDate.now(quoteZone);
@@ -425,15 +953,23 @@ public class BillingQuoteSubscriptionPersistenceService {
 		log.info("[billing-quote/persist] step=insert_subscription_instance outcome=ok subscriptionInstanceId={}",
 				subscriptionInstanceId);
 
-		Map<Integer, UUID> snapshotLineIdsBySequence = insertPurchaseSnapshotLines(purchaseSnapshotId, lines,
-				subscriptionPlanId, subscriptionInstanceId, pos);
-		insertPurchaseSnapshotPromosFromQuoteRoot(purchaseSnapshotId, quote, snapshotLineIdsBySequence);
+		if (!mergeAgreementSnapshots) {
+			LocalDate catalogAsOf = nzDate(pos.getBillingStartDate(), quote.getStartDate());
+			Optional<VendorAgreementBundleSlice> catalogSlice = resolveCatalogAgreementBundle(pos, quote, catalogAsOf);
+			purchaseSnapshotLineIdsBySequence = insertPurchaseSnapshotLines(purchaseSnapshotId, null, lines,
+					subscriptionPlanId, subscriptionInstanceId, pos, configSnapshotId, invoiceId, catalogSlice);
+			insertPurchaseSnapshotPromosFromQuoteRoot(purchaseSnapshotId, quote, purchaseSnapshotLineIdsBySequence);
+			orderedLinesForPurchaseSnapshot = new ArrayList<>(lines);
+			orderedLinesForPurchaseSnapshot.sort(Comparator.comparing(li -> nzInt(li != null ? li.getSequence() : null,
+					Integer.MAX_VALUE)));
+			insertPurchaseSnapshotPricesWithLineResolution(purchaseSnapshotId, pos.getPackagePrices(),
+					orderedLinesForPurchaseSnapshot, 1, purchaseSnapshotLineIdsBySequence, applied);
+			UUID entitlementLineId = lineIdForFirstNonFeeLine(orderedLinesForPurchaseSnapshot, 1,
+					purchaseSnapshotLineIdsBySequence);
+			insertPurchaseSnapshotEntitlements(purchaseSnapshotId, pos.getEntitlements(), entitlementLineId);
+		}
 
 		List<RecurringForecastRow> recurringRows = readRecurringForecastRows(quote);
-
-		List<AppliedPricingRow> applied = readAppliedPricing(quote);
-		log.info("[billing-quote/persist] step=read_applied_pricing_for_snapshot_cycle_prices count={}",
-				applied.size());
 
 		ScheduleAgg agg = aggregateSchedule(subscriptionLines, contractStart, contractEnd);
 		boolean anyLineProrated = subscriptionLines.stream()
@@ -519,7 +1055,11 @@ public class BillingQuoteSubscriptionPersistenceService {
 				}
 				log.info("[billing-quote/persist] step=insert_schedule_tax_lines outcome=ok lineItemTaxPassCount={}",
 						subscriptionLines.size());
-				insertSnapshotCyclePricesFromApplied(purchaseSnapshotId, applied);
+				if (purchaseSnapshotId != null) {
+					UUID cycleLineId = lineIdForFirstNonFeeLine(orderedLinesForPurchaseSnapshot, 1,
+							purchaseSnapshotLineIdsBySequence);
+					insertSnapshotCyclePricesFromApplied(purchaseSnapshotId, applied, cycleLineId);
+				}
 			} else {
 				log.info("[billing-quote/persist] step=insert_billing_schedule outcome=ok billingScheduleId={} cycle={} fromAgg=false",
 						sid, ps.cycleNumber());
@@ -569,6 +1109,8 @@ public class BillingQuoteSubscriptionPersistenceService {
 		log.info(
 				"[billing-quote/persist] step=stack_complete subscriptionPlanId={} subscriptionInstanceId={} primaryBillingScheduleId={} purchaseSnapshotId={} configSnapshotId={}",
 				subscriptionPlanId, subscriptionInstanceId, primaryBillingScheduleId, purchaseSnapshotId, configSnapshotId);
+		return new MergedQuoteRunOutcome(subscriptionPlanId, subscriptionInstanceId, configSnapshotId, purchaseSnapshotId,
+				false, pos, quote);
 	}
 
 	private List<RecurringForecastRow> readRecurringForecastRows(BillingQuoteLineItemsResponse quote) {
@@ -1020,7 +1562,9 @@ public class BillingQuoteSubscriptionPersistenceService {
 		}
 	}
 
-	private void insertPurchaseSnapshotPrices(UUID purchaseSnapshotId, List<PackagePriceRow> rows) {
+	/** @param purchaseSnapshotLineId optional FK to {@code subscription_purchase_snapshot_line} (same for every row). */
+	private void insertPurchaseSnapshotPrices(UUID purchaseSnapshotId, List<PackagePriceRow> rows,
+			UUID purchaseSnapshotLineId) {
 		if (rows == null) {
 			log.info("[billing-quote/persist] step=insert_purchase_snapshot_prices skipped=true reason=null_rows");
 			return;
@@ -1036,14 +1580,16 @@ public class BillingQuoteSubscriptionPersistenceService {
 					INSERT INTO client_subscription_billing.subscription_purchase_snapshot_price (
 					    purchase_snapshot_price_id,
 					    subscription_purchase_snapshot_id,
+					    purchase_snapshot_line_id,
 					    package_price_id,
 					    package_location_id,
 					    location_level_id,
 					    price,
 					    created_on
-					) VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, now())
+					) VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, ?, now())
 					""",
 					purchaseSnapshotId,
+					purchaseSnapshotLineId,
 					r.getPackagePriceId(),
 					r.getPackageLocationId(),
 					r.getLocationLevelId(),
@@ -1051,6 +1597,106 @@ public class BillingQuoteSubscriptionPersistenceService {
 			inserted++;
 		}
 		log.info("[billing-quote/persist] step=insert_purchase_snapshot_prices outcome=ok rowsInserted={}", inserted);
+	}
+
+	private void insertPurchaseSnapshotPricesWithLineResolution(UUID purchaseSnapshotId, List<PackagePriceRow> rows,
+			List<QuoteLineItemRow> orderedLines, int startSeq, Map<Integer, UUID> seqToLineId,
+			List<AppliedPricingRow> applied) {
+		if (rows == null) {
+			log.info("[billing-quote/persist] step=insert_purchase_snapshot_prices_resolved skipped=true reason=null_rows");
+			return;
+		}
+		int inserted = 0;
+		for (PackagePriceRow r : rows) {
+			if (r == null || r.getPrice() == null) {
+				continue;
+			}
+			UUID lineId = resolvePackagePriceSnapshotLineId(orderedLines, startSeq, seqToLineId, r.getPackagePriceId(),
+					applied);
+			jdbc.update("""
+					INSERT INTO client_subscription_billing.subscription_purchase_snapshot_price (
+					    purchase_snapshot_price_id,
+					    subscription_purchase_snapshot_id,
+					    purchase_snapshot_line_id,
+					    package_price_id,
+					    package_location_id,
+					    location_level_id,
+					    price,
+					    created_on
+					) VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, ?, now())
+					""",
+					purchaseSnapshotId,
+					lineId,
+					r.getPackagePriceId(),
+					r.getPackageLocationId(),
+					r.getLocationLevelId(),
+					r.getPrice());
+			inserted++;
+		}
+		log.info("[billing-quote/persist] step=insert_purchase_snapshot_prices_resolved outcome=ok rowsInserted={}",
+				inserted);
+	}
+
+	private UUID firstPersistedLineId(List<QuoteLineItemRow> ordered, int startSeq, Map<Integer, UUID> seqToLineId) {
+		if (ordered == null || seqToLineId == null) {
+			return null;
+		}
+		int seq = startSeq - 1;
+		for (QuoteLineItemRow li : ordered) {
+			if (li == null) {
+				continue;
+			}
+			seq++;
+			return seqToLineId.get(seq);
+		}
+		return null;
+	}
+
+	private UUID lineIdForFirstNonFeeLine(List<QuoteLineItemRow> ordered, int startSeq, Map<Integer, UUID> seqToLineId) {
+		if (ordered == null || seqToLineId == null) {
+			return null;
+		}
+		int seq = startSeq - 1;
+		for (QuoteLineItemRow li : ordered) {
+			if (li == null) {
+				continue;
+			}
+			seq++;
+			if (!isFeeItemGroupLine(li)) {
+				return seqToLineId.get(seq);
+			}
+		}
+		return firstPersistedLineId(ordered, startSeq, seqToLineId);
+	}
+
+	private UUID resolvePackagePriceSnapshotLineId(List<QuoteLineItemRow> ordered, int startSeq,
+			Map<Integer, UUID> seqToLineId, UUID packagePriceId, List<AppliedPricingRow> applied) {
+		if (packagePriceId == null || ordered == null || seqToLineId == null) {
+			return firstPersistedLineId(ordered, startSeq, seqToLineId);
+		}
+		List<AppliedPricingRow> apx = applied != null ? applied : List.of();
+		boolean bandPricing = apx.stream()
+				.anyMatch(ap -> ap != null && packagePriceId.equals(ap.getPackagePriceId())
+						&& ap.getPriceCycleBandId() != null);
+		boolean packageInApplied = apx.stream().anyMatch(ap -> ap != null && packagePriceId.equals(ap.getPackagePriceId()));
+		int seq = startSeq - 1;
+		for (QuoteLineItemRow li : ordered) {
+			if (li == null) {
+				continue;
+			}
+			seq++;
+			boolean fee = isFeeItemGroupLine(li);
+			if (bandPricing && !fee) {
+				return seqToLineId.get(seq);
+			}
+			if (!bandPricing && packageInApplied && fee) {
+				return seqToLineId.get(seq);
+			}
+		}
+		if (!bandPricing && packageInApplied) {
+			return firstPersistedLineId(ordered, startSeq, seqToLineId);
+		}
+		return firstPersistedLineId(ordered, startSeq, seqToLineId);
 	}
 
 	private void insertPurchaseSnapshotLegalRows(UUID purchaseSnapshotId, List<QuoteLineItemRow> lines) {
@@ -1108,7 +1754,8 @@ public class BillingQuoteSubscriptionPersistenceService {
 				legalRows);
 	}
 
-	private void insertPurchaseSnapshotEntitlements(UUID purchaseSnapshotId, List<EntitlementRow> rows) {
+	private void insertPurchaseSnapshotEntitlements(UUID purchaseSnapshotId, List<EntitlementRow> rows,
+			UUID purchaseSnapshotLineId) {
 		if (rows == null) {
 			log.info("[billing-quote/persist] step=insert_purchase_snapshot_entitlements skipped=true reason=null_rows");
 			return;
@@ -1123,14 +1770,16 @@ public class BillingQuoteSubscriptionPersistenceService {
 					INSERT INTO client_subscription_billing.subscription_purchase_snapshot_entitlement (
 					    purchase_snapshot_entitlement_id,
 					    subscription_purchase_snapshot_id,
+					    purchase_snapshot_line_id,
 					    entitlement_mode_id,
 					    quantity_per_cycle,
 					    total_entitlement,
 					    is_unlimited,
 					    max_redemptions_per_day
-					) VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, ?)
+					) VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?)
 					""",
 					purchaseSnapshotId,
+					purchaseSnapshotLineId,
 					r.getEntitlementModeId(),
 					r.getQuantityPerCycle(),
 					r.getTotalEntitlement(),
@@ -1141,7 +1790,8 @@ public class BillingQuoteSubscriptionPersistenceService {
 		log.info("[billing-quote/persist] step=insert_purchase_snapshot_entitlements outcome=ok rowsInserted={}", ent);
 	}
 
-	private void insertSnapshotCyclePricesFromApplied(UUID purchaseSnapshotId, List<AppliedPricingRow> applied) {
+	private void insertSnapshotCyclePricesFromApplied(UUID purchaseSnapshotId, List<AppliedPricingRow> applied,
+			UUID purchaseSnapshotLineId) {
 		if (purchaseSnapshotId == null || applied == null) {
 			log.info("[billing-quote/persist] step=insert_snapshot_cycle_prices skipped=true reason=null_input");
 			return;
@@ -1160,14 +1810,16 @@ public class BillingQuoteSubscriptionPersistenceService {
 					INSERT INTO client_subscription_billing.subscription_purchase_snapshot_cycle_price (
 					    purchase_snapshot_cycle_price_id,
 					    subscription_purchase_snapshot_id,
+					    purchase_snapshot_line_id,
 					    cycle_start,
 					    cycle_end,
 					    unit_price,
 					    price_cycle_band_id,
 					    created_on
-					) VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, now())
+					) VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, ?, now())
 					""",
 					purchaseSnapshotId,
+					purchaseSnapshotLineId,
 					cycleStart,
 					cycleEnd,
 					ap.getUnitPrice(),
@@ -1671,10 +2323,19 @@ public class BillingQuoteSubscriptionPersistenceService {
 	/**
 	 * Fee-only cart: no {@code subscription_plan} / instance / schedules; persists config + purchase snapshot,
 	 * receipt lines, legal/tax, and package snapshot rows for audit.
+	 *
+	 * @return purchase snapshot id, or {@code null} when {@code skipForMergedCart} (lines appear on merged snapshot)
 	 */
-	private void persistFeeOnlyQuoteSnapshot(BillingQuoteLineItemsResponse quote, BillingSection billing,
+	private UUID persistFeeOnlyQuoteSnapshot(BillingQuoteLineItemsResponse quote, BillingSection billing,
 			PlanPosDetailSection pos, List<QuoteLineItemRow> lines, UUID clientPaymentMethodId, UUID clientAgreementId,
-			UUID invoiceId, UUID clientPaymentTransactionId, UUID transactionId, UUID createdBy) {
+			UUID invoiceId, UUID clientPaymentTransactionId, UUID transactionId, UUID createdBy,
+			boolean skipForMergedCart) {
+		if (skipForMergedCart) {
+			log.info(
+					"[billing-quote/persist] step=fee_only_snapshot outcome=skip reason=merged_agreement_cart planTemplateId={}",
+					quote.getPlanTemplateId());
+			return null;
+		}
 		UUID billingPeriodUnitId = billingLookup.requireBillingPeriodUnitIdByCode(billing.getFrequencyCode(),
 				pifBillingPeriodFallbackCode);
 		UUID chargeTriggerId = billingLookup.requireChargeTriggerTypeId(billing.getChargeTriggerTypeCode());
@@ -1726,56 +2387,27 @@ public class BillingQuoteSubscriptionPersistenceService {
 		UUID purchaseSnapshotKindId = purchaseSnapshotLookupDao
 				.requirePurchaseSnapshotKindId(purchaseSnapshotKindFinalizeCode);
 		String presentationJson = quotePresentationJson(quote);
-		UUID purchaseSnapshotId = jdbc.queryForObject("""
-				INSERT INTO client_subscription_billing.subscription_purchase_snapshot (
-				    subscription_purchase_snapshot_id,
-				    subscription_plan_id,
-				    client_agreement_id,
-				    subscription_billing_config_snapshot_id,
-				    package_item_id,
-				    package_version_id,
-				    package_plan_template_id,
-				    plan_code,
-				    plan_name,
-				    plan_description,
-				    term_interval_count,
-				    term_total_cycles,
-				    invoice_id,
-				    client_payment_transaction_id,
-				    transaction_id,
-				    purchase_snapshot_kind_id,
-				    presentation_json,
-				    captured_by
-				) VALUES (
-				    gen_random_uuid(), NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?
-				) RETURNING subscription_purchase_snapshot_id
-				""", UUID.class,
-				clientAgreementId,
-				configSnapshotId,
-				pos.getPackageItemId(),
-				pos.getPackageVersionId(),
-				pos.getPackagePlanTemplateId(),
-				trunc(pos.getLuPlanCode(), 50),
-				trunc(pos.getLuPlanName(), 100),
-				pos.getLuPlanDescription(),
-				pos.getTermIntervalCount(),
-				pos.getTermTotalCycles(),
-				invoiceId,
-				clientPaymentTransactionId,
-				transactionId,
-				purchaseSnapshotKindId,
-				presentationJson,
-				createdBy);
-		insertPurchaseSnapshotPrices(purchaseSnapshotId, pos.getPackagePrices());
-		insertPurchaseSnapshotEntitlements(purchaseSnapshotId, pos.getEntitlements());
+		String headerDisplayName = purchaseSnapshotHeaderDisplayName(pos, quote);
+		UUID purchaseSnapshotId = insertPurchaseSnapshotHeader(null, clientAgreementId, clientPaymentTransactionId,
+				transactionId, headerDisplayName, purchaseSnapshotKindId, presentationJson, invoiceId, createdBy);
 		insertPurchaseSnapshotLegalRows(purchaseSnapshotId, lines);
 		insertPurchaseSnapshotTaxRows(purchaseSnapshotId, lines);
-		Map<Integer, UUID> snapshotLineIdsBySequence = insertPurchaseSnapshotLines(purchaseSnapshotId, lines, null, null,
-				pos);
+		LocalDate catalogAsOf = nzDate(pos.getBillingStartDate(), quote.getStartDate());
+		Optional<VendorAgreementBundleSlice> catalogSlice = resolveCatalogAgreementBundle(pos, quote, catalogAsOf);
+		Map<Integer, UUID> snapshotLineIdsBySequence = insertPurchaseSnapshotLines(purchaseSnapshotId, null, lines, null,
+				null, pos, configSnapshotId, invoiceId, catalogSlice);
 		insertPurchaseSnapshotPromosFromQuoteRoot(purchaseSnapshotId, quote, snapshotLineIdsBySequence);
+		List<AppliedPricingRow> feeOnlyApplied = readAppliedPricing(quote);
+		List<QuoteLineItemRow> orderedFeeLines = new ArrayList<>(lines);
+		orderedFeeLines.sort(Comparator.comparing(li -> nzInt(li != null ? li.getSequence() : null, Integer.MAX_VALUE)));
+		insertPurchaseSnapshotPricesWithLineResolution(purchaseSnapshotId, pos.getPackagePrices(), orderedFeeLines, 1,
+				snapshotLineIdsBySequence, feeOnlyApplied);
+		UUID feeEntLineId = lineIdForFirstNonFeeLine(orderedFeeLines, 1, snapshotLineIdsBySequence);
+		insertPurchaseSnapshotEntitlements(purchaseSnapshotId, pos.getEntitlements(), feeEntLineId);
 		log.info(
 				"[billing-quote/persist] step=fee_only_snapshot_complete purchaseSnapshotId={} configSnapshotId={}",
 				purchaseSnapshotId, configSnapshotId);
+		return purchaseSnapshotId;
 	}
 
 	private String quotePresentationJson(BillingQuoteLineItemsResponse quote) {
@@ -1795,15 +2427,28 @@ public class BillingQuoteSubscriptionPersistenceService {
 	 *
 	 * @return map of persisted {@code line_sequence} (1-based order after sort) → {@code purchase_snapshot_line_id}
 	 */
-	private Map<Integer, UUID> insertPurchaseSnapshotLines(UUID purchaseSnapshotId, List<QuoteLineItemRow> allLines,
-			UUID subscriptionPlanId, UUID subscriptionInstanceId, PlanPosDetailSection pos) {
+	private Map<Integer, UUID> insertPurchaseSnapshotLines(UUID purchaseSnapshotId, UUID parentLineId,
+			List<QuoteLineItemRow> allLines, UUID subscriptionPlanId, UUID subscriptionInstanceId, PlanPosDetailSection pos,
+			UUID configSnapshotId, UUID invoiceId, Optional<VendorAgreementBundleSlice> catalogSlice) {
+		return insertPurchaseSnapshotLines(purchaseSnapshotId, parentLineId, allLines, subscriptionPlanId,
+				subscriptionInstanceId, pos, configSnapshotId, invoiceId, 1, catalogSlice);
+	}
+
+	private Map<Integer, UUID> insertPurchaseSnapshotLines(UUID purchaseSnapshotId, UUID parentLineId,
+			List<QuoteLineItemRow> allLines, UUID subscriptionPlanId, UUID subscriptionInstanceId, PlanPosDetailSection pos,
+			UUID configSnapshotId, UUID invoiceId, int firstLineSequence,
+			Optional<VendorAgreementBundleSlice> catalogSlice) {
 		Map<Integer, UUID> lineSequenceToId = new HashMap<>();
 		if (purchaseSnapshotId == null || allLines == null || allLines.isEmpty()) {
 			return lineSequenceToId;
 		}
 		List<QuoteLineItemRow> ordered = new ArrayList<>(allLines);
 		ordered.sort(Comparator.comparing(li -> nzInt(li != null ? li.getSequence() : null, Integer.MAX_VALUE)));
-		int seq = 0;
+		int seq = firstLineSequence - 1;
+		Set<UUID> consumedCatalogItemEntityIds = new HashSet<>();
+		List<VendorCatalogItemRow> catalogItems = catalogSlice.map(VendorAgreementBundleSlice::bundleItems).orElse(null);
+		long distinctNonFeeCatalogItems = catalogItems == null ? 0
+				: catalogItems.stream().filter(Objects::nonNull).filter(it -> !it.feeLikeCatalogItem()).count();
 		for (QuoteLineItemRow li : ordered) {
 			if (li == null) {
 				continue;
@@ -1812,70 +2457,47 @@ public class BillingQuoteSubscriptionPersistenceService {
 			boolean fee = isFeeItemGroupLine(li);
 			String lineTypeCode = fee ? purchaseSnapshotLineTypeFeeCode : purchaseSnapshotLineTypeSubscriptionCode;
 			UUID lineTypeId = purchaseSnapshotLookupDao.requirePurchaseSnapshotLineTypeId(lineTypeCode);
-			String title = li.getLabel() != null && !li.getLabel().isBlank() ? li.getLabel().trim() : ("Line " + seq);
+			String displayName = li.getLabel() != null && !li.getLabel().isBlank() ? li.getLabel().trim() : ("Line " + seq);
 			BigDecimal qtyBd = BigDecimal.valueOf(nzInt(li.getQuantity(), 1));
 			BigDecimal sub = lineItemSubtotalForSnapshot(li);
 			BigDecimal unit = unitPriceForSnapshotLine(li, qtyBd, sub);
 			BigDecimal tax = li.getTax() != null ? li.getTax().setScale(4, RoundingMode.HALF_UP) : null;
 			BigDecimal disc = BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP);
 			BigDecimal total = li.getAmount() != null ? li.getAmount().setScale(4, RoundingMode.HALF_UP) : sub;
-			UUID lineId = jdbc.queryForObject("""
-					INSERT INTO client_subscription_billing.subscription_purchase_snapshot_line (
-					    purchase_snapshot_line_id,
-					    subscription_purchase_snapshot_id,
-					    parent_purchase_snapshot_line_id,
-					    line_sequence,
-					    purchase_snapshot_line_type_id,
-					    display_title,
-					    display_subtitle,
-					    item_group_code,
-					    sku_or_item_code,
-					    quantity,
-					    unit_price,
-					    line_subtotal,
-					    tax_amount,
-					    discount_amount,
-					    line_total,
-					    billing_date,
-					    period_label,
-					    is_recurring,
-					    is_prorated,
-					    is_fee,
-					    subscription_plan_id,
-					    subscription_instance_id,
-					    invoice_entity_id,
-					    package_item_id,
-					    package_plan_template_id,
-					    attributes_json,
-					    created_on
-					) VALUES (
-					    gen_random_uuid(), ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, now()
-					)
-					RETURNING purchase_snapshot_line_id
-					""",
-					UUID.class,
-					purchaseSnapshotId,
-					seq,
-					lineTypeId,
-					trunc(title, 500),
-					null,
-					trunc(li.getItemGroupCode(), 64),
-					null,
-					qtyBd,
-					unit,
-					sub,
-					tax,
-					disc,
-					total,
-					li.getBillingDate(),
-					trunc(periodLabelForSnapshotLine(li), 200),
-					!fee,
-					Boolean.TRUE.equals(li.getIsProrated()),
-					fee,
-					fee ? null : subscriptionPlanId,
-					fee ? null : subscriptionInstanceId,
-					fee ? null : pos.getPackageItemId(),
-					fee ? null : pos.getPackagePlanTemplateId());
+			UUID planLineId = fee ? null : subscriptionPlanId;
+			UUID instForAttrs = fee ? null : subscriptionInstanceId;
+			UUID pkgForAttrs = fee || pos == null ? null : pos.getPackageItemId();
+			String attrs = lineItemAttributesJson(instForAttrs, pkgForAttrs, li.getItemGroupCode());
+			UUID pkgVersion = pos != null ? pos.getPackageVersionId() : null;
+			UUID entityVersionIdForLine = pkgVersion;
+			if (catalogItems != null && !catalogItems.isEmpty()) {
+				VendorCatalogItemRow matched = pickCatalogItemForLine(li, catalogItems, consumedCatalogItemEntityIds);
+				if (matched != null) {
+					entityVersionIdForLine = matched.itemVersionId();
+					if (matched.itemDisplayName() != null && !matched.itemDisplayName().isBlank()) {
+						displayName = matched.itemDisplayName().trim();
+					}
+					/*
+					 * Consume fee SKUs once. Consume non-fee only when the bundle has multiple billable items so lines
+					 * map round-robin; a single access item may repeat across cycles (same entity_version_id).
+					 */
+					if (matched.feeLikeCatalogItem() || distinctNonFeeCatalogItems > 1) {
+						consumedCatalogItemEntityIds.add(matched.itemEntityId());
+					}
+				}
+			}
+			UUID planTemplateId = pos != null ? pos.getPackagePlanTemplateId() : null;
+			String planCode = pos != null ? pos.getLuPlanCode() : null;
+			String planName = pos != null ? pos.getLuPlanName() : null;
+			String planDesc = pos != null ? trunc(pos.getLuPlanDescription(), 4000) : null;
+			Integer termInt = pos != null ? pos.getTermIntervalCount() : null;
+			Integer termTot = pos != null ? pos.getTermTotalCycles() : null;
+			UUID lineId = insertPurchaseSnapshotLineRow(purchaseSnapshotId, configSnapshotId, parentLineId, seq,
+					lineTypeId, displayName, snapshotEntityTypeItemId, entityVersionIdForLine, planTemplateId,
+					planCode != null ? trunc(planCode, 50) : null, planName != null ? trunc(planName, 100) : null,
+					planDesc, termInt, termTot, qtyBd, unit, sub, tax, disc, total, li.getBillingDate(),
+					trunc(periodLabelForSnapshotLine(li), 200), !fee, Boolean.TRUE.equals(li.getIsProrated()), fee,
+					planLineId, invoiceId, attrs);
 			lineSequenceToId.put(seq, lineId);
 			insertPurchaseSnapshotLineTaxRows(lineId, li);
 			insertPurchaseSnapshotPromoRowsForLine(purchaseSnapshotId, lineId, li.getPromotions());

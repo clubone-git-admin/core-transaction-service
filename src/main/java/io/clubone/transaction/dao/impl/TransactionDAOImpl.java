@@ -1205,11 +1205,19 @@ public class TransactionDAOImpl implements TransactionDAO {
 				  select sps0.*
 				  from client_subscription_billing.subscription_purchase_snapshot sps0
 				  where sps0.subscription_plan_id = sp.subscription_plan_id
-				  order by sps0.created_on desc nulls last
+				  order by sps0.captured_on desc nulls last
 				  limit 1
 				) sps on true
+				left join lateral (
+				  select l.subscription_billing_config_snapshot_id as sbcs_id
+				  from client_subscription_billing.subscription_purchase_snapshot_line l
+				  where l.subscription_purchase_snapshot_id = sps.subscription_purchase_snapshot_id
+				    and l.subscription_billing_config_snapshot_id is not null
+				  order by l.line_sequence
+				  limit 1
+				) spsl_sbcs on true
 				left join client_subscription_billing.subscription_billing_config_snapshot sbcs
-				  on sbcs.subscription_billing_config_snapshot_id = sps.subscription_billing_config_snapshot_id
+				  on sbcs.subscription_billing_config_snapshot_id = spsl_sbcs.sbcs_id
 				left join billing_config.billing_period_unit lf
 				  on lf.billing_period_unit_id = sbcs.billing_period_unit_id
 
