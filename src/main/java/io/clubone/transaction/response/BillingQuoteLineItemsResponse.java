@@ -28,4 +28,10 @@ public class BillingQuoteLineItemsResponse {
 	private JsonNode lineItems;
 	private JsonNode scheduleLineItems;
 	private JsonNode recurring;
+	/**
+	 * Optional JSON array of promotion rows (same shape as nested {@code promotions} under each line item).
+	 * Use {@code line_sequence} / {@code lineSequence} to attach to a persisted snapshot line (1-based order after
+	 * sorting line items by {@code sequence}); omit or null for snapshot-level promos.
+	 */
+	private JsonNode promotions;
 }

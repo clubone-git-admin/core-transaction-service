@@ -146,6 +146,46 @@ public final class BillingQuoteDeserializeModels {
 			}
 			return periodLabelSnake != null ? periodLabelSnake.trim() : null;
 		}
+
+		/** Optional promotions applied to this line (nested under the line item in quote JSON). */
+		private List<QuotePromotionRow> promotions;
+	}
+
+	/**
+	 * Promotion row from quote {@code promotions[]} or nested under a line item.
+	 * When used at quote root, {@link #lineSequence} selects the snapshot line by persisted {@code line_sequence}.
+	 */
+	@Data
+	@JsonIgnoreProperties(ignoreUnknown = true)
+	public static class QuotePromotionRow {
+		@JsonProperty("lineSequence")
+		@JsonAlias({ "line_sequence" })
+		private Integer lineSequence;
+		@JsonProperty("promotionVersionId")
+		@JsonAlias({ "promotion_version_id" })
+		private UUID promotionVersionId;
+		@JsonProperty("promotionEffectId")
+		@JsonAlias({ "promotion_effect_id" })
+		private UUID promotionEffectId;
+		@JsonProperty("cycleStart")
+		@JsonAlias({ "cycle_start" })
+		private Integer cycleStart;
+		@JsonProperty("cycleEnd")
+		@JsonAlias({ "cycle_end", "endCycle", "end_cycle" })
+		private Integer cycleEnd;
+		@JsonProperty("priceCycleBandId")
+		@JsonAlias({ "price_cycle_band_id" })
+		private UUID priceCycleBandId;
+		@JsonProperty("discountTypeCode")
+		@JsonAlias({ "discount_type_code" })
+		private String discountTypeCode;
+		@JsonProperty("discountValue")
+		@JsonAlias({ "discount_value" })
+		private BigDecimal discountValue;
+
+		public UUID resolvedPromotionVersionId() {
+			return promotionVersionId;
+		}
 	}
 
 	/**
