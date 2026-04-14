@@ -23,6 +23,7 @@ import org.springframework.util.CollectionUtils;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.clubone.transaction.dao.InvoiceDAO;
+import io.clubone.transaction.dao.SubscriptionPlanDao;
 import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.helper.AgreementHelper;
 import io.clubone.transaction.helper.InvoiceNotificationHelper;
@@ -70,6 +71,9 @@ public class TransactionServiceImpl implements TransactionService {
 
 	@Autowired
 	private BillingQuoteSubscriptionPersistenceService billingQuoteSubscriptionPersistenceService;
+
+	@Autowired
+	private SubscriptionPlanDao subscriptionPlanDao;
 
 	@Autowired
 	private AgreementHelper agreementHelper;
@@ -703,9 +707,15 @@ public class TransactionServiceImpl implements TransactionService {
 						logger.info(
 								"[transactions/v3/finalize] step=billing_quote_persist start invoiceId={} transactionId={} clientAgreementId={}",
 								req.getInvoiceId(), transactionId, effectiveClientAgreementId);
+						Optional<UUID> cpmHint = subscriptionPlanDao
+								.findClientPaymentMethodIdByTransactionId(transactionId);
+						if (cpmHint.isEmpty() && clientPaymentTransactionId != null) {
+							cpmHint = subscriptionPlanDao
+									.findClientPaymentMethodIdByClientPaymentTransactionId(clientPaymentTransactionId);
+						}
 						billingQuoteSubscriptionPersistenceService.persistFromQuoteResponses(quoteLineItems,
 								transactionId, effectiveClientAgreementId, req.getInvoiceId(),
-								clientPaymentTransactionId, req.getCreatedBy(), true);
+								clientPaymentTransactionId, req.getCreatedBy(), true, cpmHint.orElse(null));
 						logger.info("[transactions/v3/finalize] step=billing_quote_persist outcome=ok invoiceId={}",
 								req.getInvoiceId());
 					} catch (Exception persistEx) {

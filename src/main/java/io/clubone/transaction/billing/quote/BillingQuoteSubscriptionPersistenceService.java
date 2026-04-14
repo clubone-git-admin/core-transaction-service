@@ -50,6 +50,7 @@ import io.clubone.transaction.billing.quote.BillingQuoteDeserializeModels.PlanPo
 import io.clubone.transaction.billing.quote.BillingQuoteDeserializeModels.RecurringForecastRow;
 import io.clubone.transaction.billing.quote.BillingQuoteDeserializeModels.QuoteLineItemRow;
 import io.clubone.transaction.billing.quote.BillingQuoteDeserializeModels.QuotePromotionRow;
+import io.clubone.transaction.dao.ClientGatewayMandateDao;
 import io.clubone.transaction.dao.SubscriptionPlanDao;
 import io.clubone.transaction.dao.billing.BillingEnterpriseLookupDao;
 import io.clubone.transaction.dao.billing.PurchaseSnapshotLookupDao;
@@ -99,6 +100,7 @@ public class BillingQuoteSubscriptionPersistenceService {
 	private final BillingEnterpriseLookupDao billingLookup;
 	private final PurchaseSnapshotLookupDao purchaseSnapshotLookupDao;
 	private final SubscriptionPlanDao subscriptionPlanDao;
+	private final ClientGatewayMandateDao clientGatewayMandateDao;
 	private final VendorPosAgreementCatalogClient vendorPosAgreementCatalogClient;
 
 	@Value("${clubone.billing.quote.schedule-status-code:PLANNED}")
@@ -161,12 +163,14 @@ public class BillingQuoteSubscriptionPersistenceService {
 			BillingEnterpriseLookupDao billingLookup,
 			PurchaseSnapshotLookupDao purchaseSnapshotLookupDao,
 			SubscriptionPlanDao subscriptionPlanDao,
+			ClientGatewayMandateDao clientGatewayMandateDao,
 			VendorPosAgreementCatalogClient vendorPosAgreementCatalogClient) {
 		this.jdbc = jdbc;
 		this.objectMapper = objectMapper;
 		this.billingLookup = billingLookup;
 		this.purchaseSnapshotLookupDao = purchaseSnapshotLookupDao;
 		this.subscriptionPlanDao = subscriptionPlanDao;
+		this.clientGatewayMandateDao = clientGatewayMandateDao;
 		this.vendorPosAgreementCatalogClient = vendorPosAgreementCatalogClient;
 	}
 
@@ -286,15 +290,17 @@ public class BillingQuoteSubscriptionPersistenceService {
 
 	/**
 	 * Writes one subscription stack per quote response (aligned with each finalize spec line).
+	 * Must use REQUIRED propagation so inserts that reference the current finalize transaction id (e.g. purchase
+	 * snapshots) participate in the same DB transaction as finalize; REQUIRES_NEW breaks those foreign keys.
 	 */
-	@Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
+	@Transactional(propagation = Propagation.REQUIRED, rollbackFor = Exception.class)
 	public void persistFromQuoteResponses(List<BillingQuoteLineItemsResponse> quotes, UUID transactionId,
 			UUID clientAgreementId, UUID invoiceId, UUID clientPaymentTransactionId, UUID createdBy,
-			boolean invoicePaid) {
+			boolean invoicePaid, UUID clientPaymentMethodIdHint) {
 		log.info(
-				"[billing-quote/persist] step=start transactionId={} invoiceId={} clientAgreementId={} clientPaymentTransactionId={} quoteCount={} invoicePaid={} createdBy={}",
+				"[billing-quote/persist] step=start transactionId={} invoiceId={} clientAgreementId={} clientPaymentTransactionId={} quoteCount={} invoicePaid={} createdBy={} hasCpmHint={}",
 				transactionId, invoiceId, clientAgreementId, clientPaymentTransactionId,
-				quotes == null ? 0 : quotes.size(), invoicePaid, createdBy);
+				quotes == null ? 0 : quotes.size(), invoicePaid, createdBy, clientPaymentMethodIdHint != null);
 		if (quotes == null) {
 			log.info("[billing-quote/persist] step=validation outcome=skip reason=null_quotes");
 			return;
@@ -308,14 +314,18 @@ public class BillingQuoteSubscriptionPersistenceService {
 					invoiceId);
 			return;
 		}
-		Optional<UUID> cpmOpt = subscriptionPlanDao.findClientPaymentMethodIdByTransactionId(transactionId);
-		String cpmSource = "transaction_join";
+		/*
+		 * Optional hint: avoids an extra lookup when the caller already resolved CPM; with REQUIRED
+		 * propagation, transaction-join resolution also works without a hint.
+		 */
+		Optional<UUID> cpmOpt = clientPaymentMethodIdHint != null ? Optional.of(clientPaymentMethodIdHint)
+				: Optional.empty();
+		String cpmSource = "caller_outer_transaction";
+		if (cpmOpt.isEmpty()) {
+			cpmOpt = subscriptionPlanDao.findClientPaymentMethodIdByTransactionId(transactionId);
+			cpmSource = "transaction_join";
+		}
 		if (cpmOpt.isEmpty() && clientPaymentTransactionId != null) {
-			/*
-			 * finalize runs in an outer @Transactional; this method uses REQUIRES_NEW, so the
-			 * transactions.transaction row may be uncommitted and invisible to the CPT join.
-			 * client_payment_transaction is committed with the payment — resolve CPM directly.
-			 */
 			log.info(
 					"[billing-quote/persist] step=resolve_cpm fallback=client_payment_transaction reason=txn_row_not_visible_or_missing transactionId={} clientPaymentTransactionId={}",
 					transactionId, clientPaymentTransactionId);
@@ -351,6 +361,7 @@ public class BillingQuoteSubscriptionPersistenceService {
 		}
 		int q = 0;
 		List<MergedQuoteRunOutcome> mergeOutcomes = new ArrayList<>();
+		List<MergedQuoteRunOutcome> allQuoteRuns = new ArrayList<>();
 		for (BillingQuoteLineItemsResponse quote : quotes) {
 			q++;
 			log.info(
@@ -359,6 +370,7 @@ public class BillingQuoteSubscriptionPersistenceService {
 			MergedQuoteRunOutcome run = persistOneQuote(quote, clientPaymentMethodId, clientAgreementId, invoiceId,
 					clientPaymentTransactionId, transactionId, createdBy, billingStatusId, instanceStatusId,
 					plannedScheduleStatusId, paidScheduleStatusId, invoicePaid, mergeSnapshots);
+			allQuoteRuns.add(run);
 			if (mergeSnapshots) {
 				mergeOutcomes.add(run);
 			}
@@ -368,8 +380,36 @@ public class BillingQuoteSubscriptionPersistenceService {
 			insertMergedAgreementPurchaseSnapshot(quotes, mergeOutcomes, transactionId, clientAgreementId, invoiceId,
 					clientPaymentTransactionId, createdBy);
 		}
+		linkClientGatewayMandateToSubscription(invoiceId, clientPaymentMethodId, createdBy, allQuoteRuns);
 		log.info("[billing-quote/persist] step=complete outcome=ok transactionId={} invoiceId={} quotesProcessed={}",
 				transactionId, invoiceId, quotes.size());
+	}
+
+	/**
+	 * When mandate rows were created with {@code parent_invoice_id} = finalize invoice, attach the new subscription plan
+	 * and payment method (no-op if no matching rows).
+	 */
+	private void linkClientGatewayMandateToSubscription(UUID invoiceId, UUID clientPaymentMethodId, UUID createdBy,
+			List<MergedQuoteRunOutcome> allQuoteRuns) {
+		if (invoiceId == null || clientPaymentMethodId == null || allQuoteRuns == null || allQuoteRuns.isEmpty()) {
+			return;
+		}
+		UUID subscriptionPlanId = allQuoteRuns.stream()
+				.filter(o -> o != null && !o.feeOnly() && o.subscriptionPlanId() != null)
+				.map(MergedQuoteRunOutcome::subscriptionPlanId)
+				.findFirst()
+				.orElse(null);
+		if (subscriptionPlanId == null) {
+			log.warn(
+					"[billing-quote/persist] step=client_gateway_mandate outcome=skip reason=no_non_fee_subscription_plan invoiceId={}",
+					invoiceId);
+			return;
+		}
+		int rows = clientGatewayMandateDao.updateSubscriptionLinkForParentInvoice(invoiceId, subscriptionPlanId,
+				clientPaymentMethodId, createdBy);
+		log.info(
+				"[billing-quote/persist] step=client_gateway_mandate outcome=updated rows={} parentInvoiceId={} subscriptionPlanId={} clientPaymentMethodId={}",
+				rows, invoiceId, subscriptionPlanId, clientPaymentMethodId);
 	}
 
 	/**
