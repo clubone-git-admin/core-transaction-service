@@ -26,7 +26,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
         String sql = """
             select
                 s.billing_schedule_id,
-                s.client_agreement_id,
+                sp.client_agreement_id,
                 s.subscription_plan_id,
                 s.subscription_instance_id,
                 s.cycle_number,
@@ -53,8 +53,10 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 st.display_name as status_display_name,
                 coalesce(adj.total_adjustment_amount, 0) as total_adjustment_amount
             from client_subscription_billing.subscription_billing_schedule s
+            join client_subscription_billing.subscription_plan sp on sp.subscription_plan_id=s.subscription_plan_id
             left join billing_config.billing_schedule_status st
                    on st.billing_schedule_status_id = s.billing_schedule_status_id
+                   
             left join (
                 select
                     billing_schedule_id,
@@ -63,7 +65,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 where is_active = true
                 group by billing_schedule_id
             ) adj on adj.billing_schedule_id = s.billing_schedule_id
-            where s.client_agreement_id = ?::uuid
+            where sp.client_agreement_id = ?::uuid
             order by s.billing_date asc, s.cycle_number asc
             """;
 
@@ -85,6 +87,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
             dto.setBillingDate(rs.getDate("billing_date").toLocalDate());
 
             dto.setBaseAmount(rs.getBigDecimal("base_amount"));
+            dto.setUnitPrice(rs.getBigDecimal("unit_price"));
             dto.setOverrideAmount(rs.getBigDecimal("override_amount"));
             dto.setSystemAdjustmentAmount(rs.getBigDecimal("total_adjustment_amount"));
             dto.setManualAdjustmentAmount(BigDecimal.ZERO);
@@ -141,7 +144,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
     public UUID billingScheduleStatusId(String statusCode) {
         String sql = """
             select billing_schedule_status_id
-            from client_subscription_billing.lu_billing_schedule_status
+            from billing_config.billing_schedule_status
             where status_code = ?
               and is_active = true
             limit 1
@@ -157,7 +160,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
     public UUID billingAdjustmentTypeId(String adjustmentTypeCode) {
         String sql = """
             select billing_adjustment_type_id
-            from client_subscription_billing.lu_billing_adjustment_type
+            from billing_config.billing_adjustment_type
             where adjustment_type_code = ?
               and is_active = true
             limit 1
@@ -176,7 +179,6 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 select 1
                 from client_subscription_billing.subscription_billing_schedule s
                 where s.billing_schedule_id = ?::uuid
-                  and s.is_locked = false
                   and s.invoice_id is null
             )
             """;
@@ -185,20 +187,18 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
     }
 
     @Override
-    public int updateScheduleRow(UUID billingScheduleId, UUID statusId, UpdateBillingScheduleRequest request, UUID modifiedBy) {
+    public int updateScheduleRow(
+            UUID billingScheduleId,
+            UUID statusId,
+            UpdateBillingScheduleRequest request,
+            UUID modifiedBy
+    ) {
         String sql = """
             update client_subscription_billing.subscription_billing_schedule
             set override_amount = ?,
                 billing_schedule_status_id = ?::uuid,
-                is_freeze_cycle = ?,
-                is_cancellation_cycle = ?,
-                is_prorated = ?,
-                notes = ?,
-                modified_on = now(),
-                modified_by = ?::uuid
+                is_prorated = ?
             where billing_schedule_id = ?::uuid
-              and is_locked = false
-              and invoice_id is null
             """;
 
         return cluboneJdbcTemplate.update(con -> {
@@ -211,31 +211,25 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
             }
 
             ps.setObject(2, statusId);
-            ps.setBoolean(3, Boolean.TRUE.equals(request.getIsFreezeCycle()));
-            ps.setBoolean(4, Boolean.TRUE.equals(request.getIsCancellationCycle()));
-            ps.setBoolean(5, Boolean.TRUE.equals(request.getIsProrated()));
-            ps.setString(6, request.getNotes());
-            ps.setObject(7, modifiedBy);
-            ps.setObject(8, billingScheduleId);
+            ps.setBoolean(3, Boolean.TRUE.equals(request.getIsProrated()));
+            ps.setObject(4, billingScheduleId);
+
             return ps;
         });
     }
 
     @Override
-    public int bulkUpdateScheduleRows(BulkUpdateBillingScheduleRequest request, UUID statusId, UUID modifiedBy) {
+    public int bulkUpdateScheduleRows(
+            BulkUpdateBillingScheduleRequest request,
+            UUID statusId,
+            UUID modifiedBy
+    ) {
         StringBuilder sql = new StringBuilder("""
             update client_subscription_billing.subscription_billing_schedule
             set override_amount = ?,
                 billing_schedule_status_id = ?::uuid,
-                is_freeze_cycle = ?,
-                is_cancellation_cycle = ?,
-                is_prorated = ?,
-                notes = ?,
-                modified_on = now(),
-                modified_by = ?::uuid
+                is_prorated = ?
             where client_agreement_id = ?::uuid
-              and is_locked = false
-              and invoice_id is null
             """);
 
         if (request.getFromBillingDate() != null) {
@@ -262,11 +256,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
             }
 
             ps.setObject(idx++, statusId);
-            ps.setBoolean(idx++, Boolean.TRUE.equals(request.getIsFreezeCycle()));
-            ps.setBoolean(idx++, Boolean.TRUE.equals(request.getIsCancellationCycle()));
             ps.setBoolean(idx++, Boolean.TRUE.equals(request.getIsProrated()));
-            ps.setString(idx++, request.getNotes());
-            ps.setObject(idx++, modifiedBy);
             ps.setObject(idx++, request.getClientAgreementId());
 
             if (request.getFromBillingDate() != null) {
@@ -287,7 +277,13 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
     }
 
     @Override
-    public int insertAdjustment(UUID billingScheduleId, UUID adjustmentTypeId, AddBillingScheduleAdjustmentRequest request, UUID createdBy) {
+    public int insertAdjustment(
+            UUID billingScheduleId,
+            UUID adjustmentTypeId,
+            AddBillingScheduleAdjustmentRequest request,
+            UUID createdBy
+    ) {
+
         String sql = """
             insert into client_subscription_billing.subscription_billing_schedule_adjustment (
                 billing_schedule_adjustment_id,
@@ -295,7 +291,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 billing_adjustment_type_id,
                 amount,
                 is_system_generated,
-                reference_entity_type,
+                reference_entity_type_id,
                 reference_entity_id,
                 notes,
                 created_on,
@@ -306,25 +302,42 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 ?::uuid,
                 ?,
                 false,
-                ?,
+                (
+                    select reference_entity_type_id
+                    from billing_config.reference_entity_type
+                    where entity_name = ?
+                      and is_active = true
+                    limit 1
+                ),
                 ?::uuid,
                 ?,
                 now(),
                 ?::uuid
             )
-            """;
+        """;
 
-        return cluboneJdbcTemplate.update(sql,
-                billingScheduleId,
-                adjustmentTypeId,
-                request.getAmount(),
-                request.getReferenceEntityType(),
-                request.getReferenceEntityId(),
-                request.getReason(),
-                createdBy
-        );
+        return cluboneJdbcTemplate.update(con -> {
+            var ps = con.prepareStatement(sql);
+
+            ps.setObject(1, billingScheduleId);
+            ps.setObject(2, adjustmentTypeId);
+            ps.setBigDecimal(3, request.getAmount());
+
+            // entity_name instead of UUID
+            ps.setString(4, request.getReferenceEntityType());
+
+            if (request.getReferenceEntityId() != null) {
+                ps.setObject(5, request.getReferenceEntityId());
+            } else {
+                ps.setNull(5, Types.OTHER);
+            }
+
+            ps.setString(6, request.getReason());
+            ps.setObject(7, createdBy);
+
+            return ps;
+        });
     }
-
     
     
     @Override
@@ -346,7 +359,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 a.modified_on,
                 a.modified_by
             from client_subscription_billing.subscription_billing_schedule_adjustment a
-            join client_subscription_billing.lu_billing_adjustment_type t
+            join billing_config.billing_adjustment_type t
               on t.billing_adjustment_type_id = a.billing_adjustment_type_id
             where a.billing_schedule_id = ?::uuid
             order by a.created_on asc
@@ -453,8 +466,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 modified_on = now(),
                 modified_by = ?::uuid
             where s.billing_schedule_id = ?::uuid
-              and s.is_locked = false
-              and s.invoice_id is null
+             and s.invoice_id is null
             """;
 
         return cluboneJdbcTemplate.update(sql, modifiedBy, billingScheduleId);
@@ -476,7 +488,6 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
         if (preserveManualOverrides) {
             sql.append("""
                 and coalesce(override_amount, base_amount) = base_amount
-                and coalesce(manual_adjustment_amount, 0) = 0
             """);
         }
 
@@ -498,8 +509,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 s.billing_date,
                 s.base_amount,
                 s.override_amount,
-                s.system_adjustment_amount,
-                s.manual_adjustment_amount,
+                s.system_adjustment_amount,                
                 s.discount_amount,
                 s.tax_amount,
                 s.final_amount,
@@ -513,12 +523,11 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 s.invoice_id,
                 s.notes
             from client_subscription_billing.subscription_billing_schedule s
-            join client_subscription_billing.lu_billing_schedule_status st
+            join billing_config.billing_schedule_status st
               on st.billing_schedule_status_id = s.billing_schedule_status_id
             where s.client_agreement_id = ?::uuid
               and s.billing_date >= ?
               and s.invoice_id is null
-              and s.is_locked = false
             order by s.billing_date asc, s.cycle_number asc
             """;
 

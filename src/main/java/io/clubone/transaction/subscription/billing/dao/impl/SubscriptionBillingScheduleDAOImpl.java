@@ -29,7 +29,7 @@ public class SubscriptionBillingScheduleDAOImpl implements SubscriptionBillingSc
     public UUID billingScheduleStatusId(String statusCode) {
         String sql = """
             select billing_schedule_status_id
-            from client_subscription_billing.lu_billing_schedule_status
+            from billing_config.billing_schedule_status
             where status_code = ?
               and is_active = true
             limit 1
@@ -57,7 +57,6 @@ public class SubscriptionBillingScheduleDAOImpl implements SubscriptionBillingSc
                 base_amount,
                 override_amount,
                 system_adjustment_amount,
-                manual_adjustment_amount,
                 discount_amount,
                 tax_amount,
                 billing_schedule_status_id,
@@ -76,7 +75,7 @@ public class SubscriptionBillingScheduleDAOImpl implements SubscriptionBillingSc
                 created_by
             ) values (
                 ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::uuid,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?::uuid,
                 ?, ?::uuid, ?, ?::uuid, ?, ?, ?, ?, ?,
                 ?, ?::uuid, ?, ?::uuid
             )
@@ -101,34 +100,33 @@ public class SubscriptionBillingScheduleDAOImpl implements SubscriptionBillingSc
                 ps.setBigDecimal(9, nz(r.getBaseAmount()));
                 setNullableBigDecimal(ps, 10, r.getOverrideAmount());
                 ps.setBigDecimal(11, nz(r.getSystemAdjustmentAmount()));
-                ps.setBigDecimal(12, nz(r.getManualAdjustmentAmount()));
-                ps.setBigDecimal(13, nz(r.getDiscountAmount()));
-                ps.setBigDecimal(14, nz(r.getTaxAmount()));
+                ps.setBigDecimal(12, nz(r.getDiscountAmount()));
+                ps.setBigDecimal(13, nz(r.getTaxAmount()));
 
-                ps.setObject(15, r.getBillingScheduleStatusId());
+                ps.setObject(14, r.getBillingScheduleStatusId());
 
-                ps.setString(16, r.getPriceSourceType());
-                ps.setObject(17, r.getPriceSourceId());
+                ps.setString(15, r.getPriceSourceType());
+                ps.setObject(16, r.getPriceSourceId());
 
-                ps.setString(18, r.getSourceEventType());
-                ps.setObject(19, r.getSourceEventId());
+                ps.setString(17, r.getSourceEventType());
+                ps.setObject(18, r.getSourceEventId());
 
-                ps.setBoolean(20, Boolean.TRUE.equals(r.getIsFreezeCycle()));
-                ps.setBoolean(21, Boolean.TRUE.equals(r.getIsCancellationCycle()));
-                ps.setBoolean(22, Boolean.TRUE.equals(r.getIsProrated()));
-                ps.setBoolean(23, !Boolean.FALSE.equals(r.getIsGenerated()));
-                ps.setBoolean(24, Boolean.TRUE.equals(r.getIsLocked()));
+                ps.setBoolean(19, Boolean.TRUE.equals(r.getIsFreezeCycle()));
+                ps.setBoolean(20, Boolean.TRUE.equals(r.getIsCancellationCycle()));
+                ps.setBoolean(21, Boolean.TRUE.equals(r.getIsProrated()));
+                ps.setBoolean(22, !Boolean.FALSE.equals(r.getIsGenerated()));
+                ps.setBoolean(23, Boolean.TRUE.equals(r.getIsLocked()));
 
-                ps.setString(25, r.getNotes());
+                ps.setString(24, r.getNotes());
 
-                ps.setObject(26, r.getInvoiceId());
+                ps.setObject(25, r.getInvoiceId());
                 if (r.getBilledOn() != null) {
-                    ps.setObject(27, r.getBilledOn());
+                    ps.setObject(26, r.getBilledOn());
                 } else {
-                    ps.setNull(27, Types.TIMESTAMP_WITH_TIMEZONE);
+                    ps.setNull(26, Types.TIMESTAMP_WITH_TIMEZONE);
                 }
 
-                ps.setObject(28, r.getCreatedBy());
+                ps.setObject(27, r.getCreatedBy());
             }
 
             @Override

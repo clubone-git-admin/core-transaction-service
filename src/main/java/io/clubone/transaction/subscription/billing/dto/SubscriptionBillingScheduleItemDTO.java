@@ -14,7 +14,8 @@ public class SubscriptionBillingScheduleItemDTO {
     private LocalDate billingPeriodStart;
     private LocalDate billingPeriodEnd;
     private LocalDate billingDate;
-    private BigDecimal baseAmount;
+    private BigDecimal baseAmount; 
+    private BigDecimal unitPrice;
     private BigDecimal overrideAmount;
     private BigDecimal systemAdjustmentAmount;
     private BigDecimal manualAdjustmentAmount;
@@ -102,4 +103,11 @@ public class SubscriptionBillingScheduleItemDTO {
 
     public String getNotes() { return notes; }
     public void setNotes(String notes) { this.notes = notes; }
+	public BigDecimal getUnitPrice() {
+		return unitPrice;
+	}
+	public void setUnitPrice(BigDecimal unitPrice) {
+		this.unitPrice = unitPrice;
+	}
+    
 }
