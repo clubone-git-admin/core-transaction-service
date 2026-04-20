@@ -76,30 +76,81 @@ public class SubscriptionBillingScheduleManageServiceImpl implements Subscriptio
 
 	@Override
 	@Transactional
-	public SimpleActionResponse addAdjustment(UUID billingScheduleId, AddBillingScheduleAdjustmentRequest request,
-			UUID createdBy) {
-		if (!scheduleDAO.isEditableScheduleRow(billingScheduleId)) {
-			throw new IllegalStateException("Adjustment cannot be added. Schedule row is invoiced or locked.");
-		}
-		if (request.getAdjustmentTypeCode() == null || request.getAdjustmentTypeCode().isBlank()) {
-			throw new IllegalArgumentException("adjustmentTypeCode is required");
-		}
-		if (request.getAmount() == null || request.getAmount().signum() == 0) {
-			throw new IllegalArgumentException("amount must be non-zero");
-		}
+	public SimpleActionResponse addAdjustment(UUID billingScheduleId,
+	        AddBillingScheduleAdjustmentRequest request,
+	        UUID createdBy) {
 
-		UUID adjustmentTypeId = scheduleDAO.billingAdjustmentTypeId(request.getAdjustmentTypeCode());
+	    System.out.println("===== START addAdjustment =====");
+	    System.out.println("billingScheduleId: " + billingScheduleId);
+	    System.out.println("createdBy: " + createdBy);
 
-		int inserted = scheduleDAO.insertAdjustment(billingScheduleId, adjustmentTypeId, request, createdBy);
-		scheduleDAO.recomputeManualAdjustmentAmount(billingScheduleId, createdBy);
+	    if (request != null) {
+	        System.out.println("Request.adjustmentTypeCode: " + request.getAdjustmentTypeCode());
+	        System.out.println("Request.amount: " + request.getAmount());
+	        System.out.println("Request.reason: " + request.getReason());
+	        System.out.println("Request.referenceEntityType: " + request.getReferenceEntityType());
+	        System.out.println("Request.referenceEntityId: " + request.getReferenceEntityId());
+	    } else {
+	        System.out.println("Request is NULL");
+	    }
 
-		SimpleActionResponse resp = new SimpleActionResponse();
-		resp.setSuccess(inserted > 0);
-		resp.setAffectedCount(inserted);
-		resp.setMessage(inserted > 0 ? "Adjustment added successfully" : "Adjustment insert failed");
-		return resp;
+	    // 🔍 Check editable
+	    boolean isEditable = scheduleDAO.isEditableScheduleRow(billingScheduleId);
+	    System.out.println("isEditableScheduleRow: " + isEditable);
+
+	    if (!isEditable) {
+	        System.out.println("❌ Schedule row is NOT editable");
+	        throw new IllegalStateException("Adjustment cannot be added. Schedule row is invoiced or locked.");
+	    }
+
+	    // 🔍 Validation
+	    if (request.getAdjustmentTypeCode() == null || request.getAdjustmentTypeCode().isBlank()) {
+	        System.out.println("❌ adjustmentTypeCode is missing");
+	        throw new IllegalArgumentException("adjustmentTypeCode is required");
+	    }
+
+	    if (request.getAmount() == null || request.getAmount().signum() == 0) {
+	        System.out.println("❌ amount is invalid: " + request.getAmount());
+	        throw new IllegalArgumentException("amount must be non-zero");
+	    }
+
+	    // 🔍 Fetch adjustment type ID
+	    UUID adjustmentTypeId = scheduleDAO.billingAdjustmentTypeId(request.getAdjustmentTypeCode());
+	    System.out.println("Fetched adjustmentTypeId: " + adjustmentTypeId);
+
+	    if (adjustmentTypeId == null) {
+	        System.out.println("❌ No adjustmentTypeId found for code: " + request.getAdjustmentTypeCode());
+	        throw new IllegalArgumentException("Invalid adjustmentTypeCode: " + request.getAdjustmentTypeCode());
+	    }
+
+	    // 🔍 Insert adjustment
+	    System.out.println("Inserting adjustment...");
+	    int inserted = scheduleDAO.insertAdjustment(
+	            billingScheduleId,
+	            adjustmentTypeId,
+	            request,
+	            createdBy
+	    );
+	    System.out.println("Rows inserted: " + inserted);
+
+	    // Optional recompute
+	    // System.out.println("Recomputing manual adjustment amount...");
+	    // scheduleDAO.recomputeManualAdjustmentAmount(billingScheduleId, createdBy);
+
+	    // 🔍 Response
+	    SimpleActionResponse resp = new SimpleActionResponse();
+	    resp.setSuccess(inserted > 0);
+	    resp.setAffectedCount(inserted);
+	    resp.setMessage(inserted > 0 ? "Adjustment added successfully" : "Adjustment insert failed");
+
+	    System.out.println("Response.success: " + resp.isSuccess());
+	    System.out.println("Response.affectedCount: " + resp.getAffectedCount());
+	    System.out.println("Response.message: " + resp.getMessage());
+
+	    System.out.println("===== END addAdjustment =====");
+
+	    return resp;
 	}
-
 	@Override
 	public BillingScheduleAdjustmentListResponse getAdjustmentsByBillingScheduleId(UUID billingScheduleId) {
 		List<BillingScheduleAdjustmentItemDTO> rows = scheduleDAO.getAdjustmentsByBillingScheduleId(billingScheduleId);
@@ -126,7 +177,7 @@ public class SubscriptionBillingScheduleManageServiceImpl implements Subscriptio
 		}
 
 		int updated = scheduleDAO.updateAdjustment(billingScheduleAdjustmentId, request, modifiedBy);
-		scheduleDAO.recomputeManualAdjustmentAmount(billingScheduleId, modifiedBy);
+		//scheduleDAO.recomputeManualAdjustmentAmount(billingScheduleId, modifiedBy);
 
 		writeAudit("BILLING_SCHEDULE", "SCHEDULE_ADJUSTMENT", billingScheduleAdjustmentId,
 				"SCHEDULE_ADJUSTMENT_UPDATED", modifiedBy, userEmail, ipAddress, userAgent, request);
@@ -148,7 +199,7 @@ public class SubscriptionBillingScheduleManageServiceImpl implements Subscriptio
 		}
 
 		int updated = scheduleDAO.deactivateAdjustment(billingScheduleAdjustmentId, modifiedBy);
-		scheduleDAO.recomputeManualAdjustmentAmount(billingScheduleId, modifiedBy);
+		//scheduleDAO.recomputeManualAdjustmentAmount(billingScheduleId, modifiedBy);
 
 		writeAudit("BILLING_SCHEDULE", "SCHEDULE_ADJUSTMENT", billingScheduleAdjustmentId,
 				"SCHEDULE_ADJUSTMENT_DEACTIVATED", modifiedBy, userEmail, ipAddress, userAgent, null);
