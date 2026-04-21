@@ -66,6 +66,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 group by billing_schedule_id
             ) adj on adj.billing_schedule_id = s.billing_schedule_id
             where sp.client_agreement_id = ?::uuid
+            and s.isActive=true
             order by s.billing_date asc, s.cycle_number asc
             """;
 

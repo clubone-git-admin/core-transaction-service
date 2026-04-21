@@ -33,17 +33,15 @@ public class SubscriptionBillingScheduleManageController {
 
     @PutMapping("/schedule/bulk-update")
     public ResponseEntity<SimpleActionResponse> bulkUpdateScheduleRows(
-            @RequestBody BulkUpdateBillingScheduleRequest request,
-            @RequestHeader("X-USER-ID") UUID modifiedBy) {
-        return ResponseEntity.ok(scheduleService.bulkUpdateScheduleRows(request, modifiedBy));
+            @RequestBody BulkUpdateBillingScheduleRequest request) {
+        return ResponseEntity.ok(scheduleService.bulkUpdateScheduleRows(request, UUID.randomUUID()));
     }
 
     @PostMapping("/schedule/{billingScheduleId}/adjustment")
     public ResponseEntity<SimpleActionResponse> addAdjustment(
             @PathVariable UUID billingScheduleId,
-            @RequestBody AddBillingScheduleAdjustmentRequest request,
-            @RequestHeader("X-USER-ID") UUID createdBy) {
-        return ResponseEntity.ok(scheduleService.addAdjustment(billingScheduleId, request, createdBy));
+            @RequestBody AddBillingScheduleAdjustmentRequest request) {
+        return ResponseEntity.ok(scheduleService.addAdjustment(billingScheduleId, request, UUID.randomUUID()));
     }
     
     @GetMapping("/schedule/{billingScheduleId}/adjustments")
