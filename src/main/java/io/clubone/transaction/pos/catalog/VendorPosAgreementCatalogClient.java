@@ -40,7 +40,7 @@ public class VendorPosAgreementCatalogClient {
 
 	private final RestTemplate restTemplate;
 
-	@Value("${clubone.vendor.pos-agreement-catalog-url:http://localhost:8011/vendors/api/pos/agreement/catalog}")
+	@Value("${clubone.vendor.pos-agreement-catalog-url:https://develop-api.clubone.io/vendors/api/pos/agreement/catalog}")
 	private String catalogUrl;
 
 	public VendorPosAgreementCatalogClient(@Qualifier("userAccessRestTemplate") RestTemplate restTemplate) {
