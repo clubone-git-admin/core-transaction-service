@@ -1069,7 +1069,7 @@ public class BillingQuoteSubscriptionPersistenceService {
 					ps.fromAgg() ? agg.unitPrice() : nzBd(ps.recRow().resolvedUnitPrice(), BigDecimal.ZERO),
 					ps.fromAgg() ? agg.unitPriceBeforeDiscount()
 							: nzBd(ps.recRow().resolvedUnitPriceBeforeDiscount(), ps.recRow().resolvedUnitPrice()),
-					ps.fromAgg() ? agg.baseAmount() : recurringRowProratedChargeAmount(ps.recRow()),
+					ps.fromAgg() ? agg.baseAmount() : recurringRowBaseAmountBeforeTax(ps.recRow()),
 					BigDecimal.ZERO,
 					ps.fromAgg() ? agg.taxAmount() : nzBd(ps.recRow().resolvedTaxAmount(), BigDecimal.ZERO),
 					ps.fromAgg() ? agg.taxPct() : nzBd(ps.recRow().resolvedTaxPct(), BigDecimal.ZERO),
@@ -1528,7 +1528,7 @@ public class BillingQuoteSubscriptionPersistenceService {
 				billingRunId);
 	}
 
-	private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
+private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 		BigDecimal amt = r.getAmount();
 		BigDecimal tax = r.resolvedTaxAmount();
 		if (amt != null && tax != null) {
@@ -1540,11 +1540,19 @@ public class BillingQuoteSubscriptionPersistenceService {
 		return BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
 	}
 
-	/** Schedule {@code base_amount}: prorated line charge from quote {@code amount}. */
-	private static BigDecimal recurringRowProratedChargeAmount(RecurringForecastRow r) {
-		BigDecimal amt = r.getAmount();
-		if (amt != null) {
-			return amt.setScale(2, RoundingMode.HALF_UP);
+	/**
+	 * Schedule {@code base_amount} is before-tax:
+	 * prefer recurring {@code proratedAmount} when present, else recurring {@code unitPrice},
+	 * else fallback to derived net amount ({@code amount - tax}).
+	 */
+	private static BigDecimal recurringRowBaseAmountBeforeTax(RecurringForecastRow r) {
+		BigDecimal prorated = r.resolvedProratedAmount();
+		if (prorated != null && prorated.compareTo(BigDecimal.ZERO) > 0) {
+			return prorated.setScale(2, RoundingMode.HALF_UP);
+		}
+		BigDecimal unit = r.resolvedUnitPrice();
+		if (unit != null && unit.compareTo(BigDecimal.ZERO) > 0) {
+			return unit.setScale(2, RoundingMode.HALF_UP);
 		}
 		return recurringRowNetAmount(r);
 	}
@@ -1552,6 +1560,13 @@ public class BillingQuoteSubscriptionPersistenceService {
 	private static boolean recurringRowIndicatesProration(RecurringForecastRow r) {
 		if (r == null) {
 			return false;
+		}
+		BigDecimal prorated = r.resolvedProratedAmount();
+		if (prorated != null && prorated.compareTo(BigDecimal.ZERO) > 0) {
+			return true;
+		}
+		if (r.resolvedProratedFromDate() != null || r.resolvedProratedToDate() != null) {
+			return true;
 		}
 		BigDecimal amt = r.getAmount();
 		BigDecimal up = r.resolvedUnitPrice();
@@ -2212,7 +2227,7 @@ public class BillingQuoteSubscriptionPersistenceService {
 		if (rateId == null) {
 			return;
 		}
-		BigDecimal taxableBase = recurringRowNetAmount(r);
+		BigDecimal taxableBase = recurringRowBaseAmountBeforeTax(r);
 		BigDecimal totalLineTax = nzBd(r.resolvedTaxAmount(), BigDecimal.ZERO);
 		List<UUID> allocs = r.resolvedTaxRateAllocationIds();
 		if (allocs.isEmpty()) {

@@ -238,6 +238,15 @@ public final class BillingQuoteDeserializeModels {
 		@JsonProperty("tax")
 		private BigDecimal taxCompact;
 		private BigDecimal amount;
+		private BigDecimal proratedAmount;
+		@JsonProperty("prorated_amount")
+		private BigDecimal proratedAmountSnake;
+		private LocalDate proratedFromDate;
+		@JsonProperty("prorated_from_date")
+		private LocalDate proratedFromDateSnake;
+		private LocalDate proratedToDate;
+		@JsonProperty("prorated_to_date")
+		private LocalDate proratedToDateSnake;
 		private BigDecimal discountedAmount;
 		@JsonProperty("discounted_amount")
 		private BigDecimal discountedAmountSnake;
@@ -320,6 +329,18 @@ public final class BillingQuoteDeserializeModels {
 
 		public BigDecimal resolvedDiscountedAmount() {
 			return discountedAmount != null ? discountedAmount : discountedAmountSnake;
+		}
+
+		public BigDecimal resolvedProratedAmount() {
+			return proratedAmount != null ? proratedAmount : proratedAmountSnake;
+		}
+
+		public LocalDate resolvedProratedFromDate() {
+			return proratedFromDate != null ? proratedFromDate : proratedFromDateSnake;
+		}
+
+		public LocalDate resolvedProratedToDate() {
+			return proratedToDate != null ? proratedToDate : proratedToDateSnake;
 		}
 
 		public String resolvedPeriodLabel() {
