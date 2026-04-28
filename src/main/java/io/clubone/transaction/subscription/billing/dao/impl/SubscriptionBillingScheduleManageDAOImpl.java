@@ -2,7 +2,12 @@ package io.clubone.transaction.subscription.billing.dao.impl;
 
 import io.clubone.transaction.subscription.billing.dao.SubscriptionBillingScheduleManageDAO;
 import io.clubone.transaction.subscription.billing.dto.*;
+import jakarta.transaction.Transactional;
+
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.math.BigDecimal;
@@ -21,6 +26,9 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
         this.cluboneJdbcTemplate = cluboneJdbcTemplate;
     }
 
+    @Autowired
+    private  NamedParameterJdbcTemplate namedParameterJdbcTemplate;
+    
     @Override
     public List<SubscriptionBillingScheduleItemDTO> getScheduleByClientAgreementId(UUID clientAgreementId) {
         String sql = """
@@ -92,9 +100,11 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
             dto.setOverrideAmount(rs.getBigDecimal("override_amount"));
             dto.setSystemAdjustmentAmount(rs.getBigDecimal("total_adjustment_amount"));
             dto.setManualAdjustmentAmount(BigDecimal.ZERO);
+            dto.setQuantity(rs.getInt("quantity"));
 
             dto.setDiscountAmount(rs.getBigDecimal("discount_amount"));
             dto.setTaxAmount(rs.getBigDecimal("tax_amount"));
+            dto.setTaxPct(rs.getBigDecimal("tax_pct"));
             dto.setFinalAmount(rs.getBigDecimal("final_amount"));
 
             dto.setStatusCode(rs.getString("status_code"));
@@ -166,6 +176,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
               and is_active = true
             limit 1
             """;
+        System.out.println("adjustmentTypeCode "+adjustmentTypeCode);
         return cluboneJdbcTemplate.queryForObject(
                 sql,
                 (rs, rowNum) -> UUID.fromString(rs.getString("billing_adjustment_type_id")),
@@ -175,28 +186,51 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
 
     @Override
     public boolean isEditableScheduleRow(UUID billingScheduleId) {
+        System.out.println("billingScheduleId = " + billingScheduleId);
+
         String sql = """
-            select exists(
+            select exists (
                 select 1
                 from client_subscription_billing.subscription_billing_schedule s
                 where s.billing_schedule_id = ?::uuid
-                  and s.invoice_id is null
+                  and s.billed_on is null
             )
             """;
+
         Boolean val = cluboneJdbcTemplate.queryForObject(sql, Boolean.class, billingScheduleId);
         return Boolean.TRUE.equals(val);
     }
 
     @Override
+    @Transactional
     public int updateScheduleRow(
             UUID billingScheduleId,
             UUID statusId,
             UpdateBillingScheduleRequest request,
             UUID modifiedBy
     ) {
+        // STEP 1: Capture BEFORE state (CRITICAL for rescind)
+        insertBillingScheduleActionImpactBeforeUpdate(
+                billingScheduleId,
+                request.getSourceClientAgreementActionId(),
+                request.getOverrideAmount(),
+                null,
+                null,
+                null,
+                request.getSourceActionTypeCode(),
+                request.getNotes(),
+                modifiedBy
+        );
+
+        // STEP 2: Apply update
         String sql = """
             update client_subscription_billing.subscription_billing_schedule
             set override_amount = ?,
+                tax_amount = case
+                    when ? is not null
+                        then round((? * coalesce(tax_pct, 0)) / 100, 2)
+                    else round((base_amount * coalesce(tax_pct, 0)) / 100, 2)
+                end,
                 billing_schedule_status_id = ?::uuid,
                 is_prorated = ?
             where billing_schedule_id = ?::uuid
@@ -207,13 +241,17 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
 
             if (request.getOverrideAmount() != null) {
                 ps.setBigDecimal(1, request.getOverrideAmount());
+                ps.setBigDecimal(2, request.getOverrideAmount());
+                ps.setBigDecimal(3, request.getOverrideAmount());
             } else {
                 ps.setNull(1, Types.NUMERIC);
+                ps.setNull(2, Types.NUMERIC);
+                ps.setNull(3, Types.NUMERIC);
             }
 
-            ps.setObject(2, statusId);
-            ps.setBoolean(3, Boolean.TRUE.equals(request.getIsProrated()));
-            ps.setObject(4, billingScheduleId);
+            ps.setObject(4, statusId);
+            ps.setBoolean(5, Boolean.TRUE.equals(request.getIsProrated()));
+            ps.setObject(6, billingScheduleId);
 
             return ps;
         });
@@ -588,5 +626,154 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
         );
     }
 
+    @Override
+    public void insertBillingScheduleActionImpactBeforeUpdate(
+            UUID billingScheduleId,
+            UUID clientAgreementActionId,
+            BigDecimal newOverrideAmount,
+            String newProrationCaseCode,
+            String newProrationStrategyCode,
+            String newProrationSource,
+            String actionTypeCode,
+            String notes,
+            UUID createdBy
+    ) {
+        if (clientAgreementActionId == null) {
+            return;
+        }
 
+        String sql = """
+            INSERT INTO client_subscription_billing.billing_schedule_action_impact (
+                client_agreement_action_id,
+                billing_schedule_id,
+
+                previous_override_amount,
+                new_override_amount,
+
+                previous_tax_amount,
+                new_tax_amount,
+
+                previous_discount_amount,
+                new_discount_amount,
+
+                previous_proration_case_code,
+                new_proration_case_code,
+
+                previous_proration_strategy_code,
+                new_proration_strategy_code,
+
+                previous_proration_source,
+                new_proration_source,
+
+                impact_snapshot,
+                created_by
+            )
+            SELECT
+                CAST(:clientAgreementActionId AS uuid),
+                s.billing_schedule_id,
+
+                s.override_amount,
+                CAST(:newOverrideAmount AS numeric),
+
+                s.tax_amount,
+                ROUND(
+                    COALESCE(CAST(:newOverrideAmount AS numeric), s.base_amount)
+                    * COALESCE(s.tax_pct, 0) / 100,
+                    2
+                ),
+
+                s.discount_amount,
+                s.discount_amount,
+
+                s.proration_case_code,
+                CAST(:newProrationCaseCode AS varchar),
+
+                s.proration_strategy_code,
+                CAST(:newProrationStrategyCode AS varchar),
+
+                s.proration_source,
+                CAST(:newProrationSource AS varchar),
+
+                jsonb_build_object(
+                    'actionTypeCode', CAST(:actionTypeCode AS varchar),
+                    'billingScheduleId', s.billing_schedule_id,
+                    'clientAgreementActionId', CAST(:clientAgreementActionId AS uuid),
+
+                    'previousOverrideAmount', s.override_amount,
+                    'newOverrideAmount', CAST(:newOverrideAmount AS numeric),
+
+                    'previousTaxAmount', s.tax_amount,
+                    'newTaxAmount', ROUND(
+                        COALESCE(CAST(:newOverrideAmount AS numeric), s.base_amount)
+                        * COALESCE(s.tax_pct, 0) / 100,
+                        2
+                    ),
+
+                    'previousDiscountAmount', s.discount_amount,
+                    'newDiscountAmount', s.discount_amount,
+
+                    'previousFinalAmount', s.final_amount,
+
+                    'previousProrationCaseCode', s.proration_case_code,
+                    'newProrationCaseCode', CAST(:newProrationCaseCode AS varchar),
+
+                    'previousProrationStrategyCode', s.proration_strategy_code,
+                    'newProrationStrategyCode', CAST(:newProrationStrategyCode AS varchar),
+
+                    'previousProrationSource', s.proration_source,
+                    'newProrationSource', CAST(:newProrationSource AS varchar),
+
+                    'notes', CAST(:notes AS text),
+                    'createdBy', CAST(:createdBy AS uuid),
+                    'capturedAt', now()
+                ),
+                CAST(:createdBy AS uuid)
+            FROM client_subscription_billing.subscription_billing_schedule s
+            WHERE s.billing_schedule_id = CAST(:billingScheduleId AS uuid)
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM client_subscription_billing.billing_schedule_action_impact i
+                    WHERE i.client_agreement_action_id = CAST(:clientAgreementActionId AS uuid)
+                      AND i.billing_schedule_id = s.billing_schedule_id
+                      AND i.is_reverted = false
+              )
+            """;
+
+        MapSqlParameterSource params = new MapSqlParameterSource()
+                .addValue("clientAgreementActionId", clientAgreementActionId)
+                .addValue("billingScheduleId", billingScheduleId)
+                .addValue("newOverrideAmount", newOverrideAmount)
+                .addValue("newProrationCaseCode", newProrationCaseCode)
+                .addValue("newProrationStrategyCode", newProrationStrategyCode)
+                .addValue("newProrationSource", newProrationSource)
+                .addValue("actionTypeCode", actionTypeCode)
+                .addValue("notes", notes)
+                .addValue("createdBy", createdBy);
+
+        namedParameterJdbcTemplate.update(sql, params);
+    }
+    @Override
+    public void updateBillingScheduleRow(
+            UUID billingScheduleId,
+            UpdateBillingScheduleRequest request,
+            UUID modifiedBy
+    ) {
+        String sql = """
+            UPDATE client_subscription_billing.subscription_billing_schedule
+            SET override_amount = :overrideAmount,
+                tax_amount = ROUND(COALESCE(:overrideAmount, base_amount) * COALESCE(tax_pct, 0) / 100, 2),
+                is_prorated = COALESCE(:isProrated, is_prorated),
+                modified_on = now(),
+                modified_by = :modifiedBy
+            WHERE billing_schedule_id = :billingScheduleId
+            """;
+
+        MapSqlParameterSource params = new MapSqlParameterSource()
+                .addValue("billingScheduleId", billingScheduleId)
+                .addValue("overrideAmount", request.getOverrideAmount())
+                .addValue("isProrated", request.getIsProrated())
+                .addValue("modifiedBy", modifiedBy);
+
+        namedParameterJdbcTemplate.update(sql, params);
+    }
 }

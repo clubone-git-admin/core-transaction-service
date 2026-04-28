@@ -21,6 +21,7 @@ public class SubscriptionBillingScheduleItemDTO {
     private BigDecimal manualAdjustmentAmount;
     private BigDecimal discountAmount;
     private BigDecimal taxAmount;
+    private BigDecimal taxPct;
     private BigDecimal finalAmount;
     private String statusCode;
     private String statusDisplayName;
@@ -31,6 +32,7 @@ public class SubscriptionBillingScheduleItemDTO {
     private Boolean isLocked;
     private UUID invoiceId;
     private String notes;
+    private int quantity;
 
     public UUID getBillingScheduleId() { return billingScheduleId; }
     public void setBillingScheduleId(UUID billingScheduleId) { this.billingScheduleId = billingScheduleId; }
@@ -109,5 +111,18 @@ public class SubscriptionBillingScheduleItemDTO {
 	public void setUnitPrice(BigDecimal unitPrice) {
 		this.unitPrice = unitPrice;
 	}
+	public BigDecimal getTaxPct() {
+		return taxPct;
+	}
+	public void setTaxPct(BigDecimal taxPct) {
+		this.taxPct = taxPct;
+	}
+	public int getQuantity() {
+		return quantity;
+	}
+	public void setQuantity(int quantity) {
+		this.quantity = quantity;
+	}
+	
     
 }

@@ -2,6 +2,7 @@ package io.clubone.transaction.subscription.billing.dao;
 
 import io.clubone.transaction.subscription.billing.dto.*;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.UUID;
 
@@ -49,5 +50,23 @@ public interface SubscriptionBillingScheduleManageDAO {
                         String ipAddress,
                         String userAgent,
                         String detailsJson);
+    
+    void insertBillingScheduleActionImpactBeforeUpdate(
+            UUID billingScheduleId,
+            UUID clientAgreementActionId,
+            BigDecimal newOverrideAmount,
+            String newProrationCaseCode,
+            String newProrationStrategyCode,
+            String newProrationSource,
+            String actionTypeCode,
+            String notes,
+            UUID createdBy
+    );
+
+    void updateBillingScheduleRow(
+            UUID billingScheduleId,
+            UpdateBillingScheduleRequest request,
+            UUID modifiedBy
+    );
 
 }
