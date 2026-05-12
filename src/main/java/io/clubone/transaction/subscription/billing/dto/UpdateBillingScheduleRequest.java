@@ -1,6 +1,7 @@
 package io.clubone.transaction.subscription.billing.dto;
 
 import java.math.BigDecimal;
+import java.util.UUID;
 
 public class UpdateBillingScheduleRequest {
 
@@ -10,6 +11,8 @@ public class UpdateBillingScheduleRequest {
     private Boolean isCancellationCycle;
     private Boolean isProrated;
     private String notes;
+    private UUID sourceClientAgreementActionId;
+    private String sourceActionTypeCode;
 
     public BigDecimal getOverrideAmount() { return overrideAmount; }
     public void setOverrideAmount(BigDecimal overrideAmount) { this.overrideAmount = overrideAmount; }
@@ -28,4 +31,18 @@ public class UpdateBillingScheduleRequest {
 
     public String getNotes() { return notes; }
     public void setNotes(String notes) { this.notes = notes; }
+	public UUID getSourceClientAgreementActionId() {
+		return sourceClientAgreementActionId;
+	}
+	public void setSourceClientAgreementActionId(UUID sourceClientAgreementActionId) {
+		this.sourceClientAgreementActionId = sourceClientAgreementActionId;
+	}
+	public String getSourceActionTypeCode() {
+		return sourceActionTypeCode;
+	}
+	public void setSourceActionTypeCode(String sourceActionTypeCode) {
+		this.sourceActionTypeCode = sourceActionTypeCode;
+	}
+    
+    
 }
