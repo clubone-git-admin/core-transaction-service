@@ -121,16 +121,7 @@ public class TransactionServiceImpl implements TransactionService {
 		invoice.setTotalAmount(request.getTotalAmount());
 		invoice.setPaid(false);
 
-		// Step 2: Build PaymentRequestDTO
-		PaymentRequestDTO payment = new PaymentRequestDTO();
-		payment.setClientRoleId(request.getClientRoleId());
-		payment.setAmount(request.getTotalAmount());
-		payment.setPaymentGatewayCode("MANUAL");
-		payment.setPaymentMethodCode("CASH");
-		payment.setPaymentTypeCode("CASH");
-		payment.setCreatedBy(request.getCreatedBy());
-
-		// Step 3: Build TransactionDTO
+		// Step 2: Build TransactionDTO
 		TransactionDTO txn = new TransactionDTO();
 		txn.setClientAgreementId(request.getClientAgreementId());
 		txn.setLevelId(request.getLevelId());
@@ -157,7 +148,15 @@ public class TransactionServiceImpl implements TransactionService {
 		// Step 4: Create Invoice
 		UUID invoiceId = transactionDAO.saveInvoice(invoice);
 
-		// Step 5: Create Payment
+		// Step 5: Create Payment (POST /payment/v1 — include invoiceId for CASH / manual allocation)
+		PaymentRequestDTO payment = new PaymentRequestDTO();
+		payment.setClientRoleId(request.getClientRoleId());
+		payment.setInvoiceId(invoiceId);
+		payment.setAmount(request.getTotalAmount());
+		payment.setPaymentGatewayCode("MANUAL");
+		payment.setPaymentMethodCode("CASH");
+		payment.setPaymentTypeCode("CASH");
+		payment.setCreatedBy(request.getCreatedBy());
 		UUID clientPaymentTransactionId = paymentService.processManualPayment(payment);
 
 		// Step 6: Finalize Transaction
@@ -243,6 +242,7 @@ public class TransactionServiceImpl implements TransactionService {
 		// Call your existing /payment/v1
 		PaymentRequestDTO pay = new PaymentRequestDTO();
 		pay.setClientRoleId(req.getClientRoleId());
+		pay.setInvoiceId(req.getInvoiceId());
 		pay.setAmount(req.getTotalAmount());
 		pay.setPaymentGatewayCode(req.getPaymentGatewayCode());
 		pay.setPaymentMethodCode(req.getPaymentMethodCode());

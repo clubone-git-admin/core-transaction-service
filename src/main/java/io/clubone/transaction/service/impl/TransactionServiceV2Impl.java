@@ -897,6 +897,10 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 					it.setEntityName(e.getEntityName());
 					it.setStartDate(e.getStartDate());
 					it.setEntityVersionId(e.getEntityVersionId());
+					it.setTaxAmount(e.getTaxAmount());
+					it.setTaxPct(e.getTaxPct());
+					it.setTaxRateId(e.getTaxRateId());
+					it.setTaxRateAllocationId(e.getTaxRateAllocationId());
 
 					InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, null, itemTypeId, e.getStartDate(), false,
 							e, invoiceLevelId);

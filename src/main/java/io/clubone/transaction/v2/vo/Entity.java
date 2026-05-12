@@ -1,5 +1,6 @@
 package io.clubone.transaction.v2.vo;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
@@ -28,6 +29,15 @@ public class Entity {
 	private UUID clientAgreementId;
 	private List<InvoiceEntityTaxDTO> taxes;
 	private List<InvoiceEntityDiscountDTO> discounts;
+
+	/**
+	 * POS one-line item purchase: optional tax from client when finance tax-group resolution is not used.
+	 * Copied onto the synthetic {@link Item} for standalone {@code entityType == Item} rows.
+	 */
+	private BigDecimal taxAmount;
+	private BigDecimal taxPct;
+	private UUID taxRateId;
+	private UUID taxRateAllocationId;
 
 	/** Defaults for leaf lines under this entity (each {@link Item} can override). */
 	private UUID billingScheduleId;
