@@ -59,7 +59,8 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 s.billing_schedule_status_id,
                 st.status_code,
                 st.display_name as status_display_name,
-                coalesce(adj.total_adjustment_amount, 0) as total_adjustment_amount
+                coalesce(adj.total_adjustment_amount, 0) as total_adjustment_amount,
+                s.invoice_id
             from client_subscription_billing.subscription_billing_schedule s
             join client_subscription_billing.subscription_plan sp on sp.subscription_plan_id=s.subscription_plan_id
             left join billing_config.billing_schedule_status st
@@ -116,7 +117,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
             dto.setIsGenerated(true);
             dto.setIsLocked(false);
 
-            dto.setInvoiceId(null);
+            dto.setInvoiceId(getUuid(rs, "invoice_id"));
             dto.setNotes(buildNotes(rs));
 
             System.out.println("Mapped row #" + rowNum
