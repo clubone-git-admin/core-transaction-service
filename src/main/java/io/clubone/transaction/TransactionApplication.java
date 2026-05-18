@@ -4,6 +4,7 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.info.BuildProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.transaction.annotation.EnableTransactionManagement;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
@@ -16,9 +17,10 @@ import lombok.extern.slf4j.Slf4j;
 import java.util.Properties;
 
 @SpringBootApplication
+@EnableScheduling
+@EnableTransactionManagement
 @OpenAPIDefinition(info = @Info(title = "clubone Api", version = "2.0", description = "User Access Information"))
 @Slf4j
-//@EnableTransactionManagement
 public class TransactionApplication {
 
 	public static void main(String[] args) {

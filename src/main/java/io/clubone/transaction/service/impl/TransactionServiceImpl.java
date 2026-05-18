@@ -28,6 +28,8 @@ import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.helper.AgreementHelper;
 import io.clubone.transaction.helper.InvoiceNotificationHelper;
 import io.clubone.transaction.billing.quote.BillingQuoteSubscriptionPersistenceService;
+import io.clubone.transaction.gl.model.GlPaymentCollectedPayload;
+import io.clubone.transaction.gl.service.GlPostingOutboxService;
 import io.clubone.transaction.helper.SubscriptionPlanHelper;
 import io.clubone.transaction.request.CreateInvoiceRequest;
 import io.clubone.transaction.request.CreateInvoiceRequestV3;
@@ -83,6 +85,9 @@ public class TransactionServiceImpl implements TransactionService {
 	
 	@Autowired
 	private InvoiceNotificationHelper invoiceNotificationHelper;
+
+	@Autowired
+	private GlPostingOutboxService glPostingOutboxService;
 
 	private static final Logger logger = LoggerFactory.getLogger(TransactionServiceImpl.class);
 
@@ -735,11 +740,38 @@ public class TransactionServiceImpl implements TransactionService {
 			}
 		}
 
+		enqueueGlPaymentCollected(req, clientPaymentTransactionId, transactionId, payAmount);
+
 		logger.info(
 				"[transactions/v3/finalize] step=complete invoiceId={} invoiceStatus={} transactionId={} clientPaymentTransactionId={} partialPayment={}",
 				req.getInvoiceId(), responseStatusName, transactionId, clientPaymentTransactionId, partialPayment);
 		return new FinalizeTransactionResponse(req.getInvoiceId(), responseStatusName, clientPaymentTransactionId,
 				transactionId, partialPayment ? "Partial payment recorded" : "");
+	}
+
+	private void enqueueGlPaymentCollected(FinalizeTransactionRequest req, UUID clientPaymentTransactionId,
+			UUID transactionId, BigDecimal payAmount) {
+		if (clientPaymentTransactionId == null || payAmount == null || payAmount.signum() <= 0) {
+			return;
+		}
+		try {
+			GlPaymentCollectedPayload payload = GlPaymentCollectedPayload.builder()
+					.clientPaymentTransactionId(clientPaymentTransactionId)
+					.transactionId(transactionId)
+					.invoiceId(req.getInvoiceId())
+					.amount(payAmount.setScale(2, RoundingMode.HALF_UP))
+					.levelId(req.getLevelId())
+					.paymentCurrencyTypeId(req.getPaymentGatewayCurrencyTypeId())
+					.paymentMethodCode(req.getPaymentMethodCode())
+					.collectedAt(Instant.now())
+					.createdBy(req.getCreatedBy())
+					.build();
+			glPostingOutboxService.enqueuePaymentCollected(payload);
+		} catch (Exception ex) {
+			logger.error(
+					"[transactions/v3/finalize] step=gl_posting_enqueue outcome=error invoiceId={} cpt={} message={}",
+					req.getInvoiceId(), clientPaymentTransactionId, ex.getMessage(), ex);
+		}
 	}
 
 	private boolean isManualPaymentGateway(FinalizeTransactionRequest req) {
