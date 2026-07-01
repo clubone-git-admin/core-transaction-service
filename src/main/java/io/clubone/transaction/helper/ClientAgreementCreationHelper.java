@@ -199,19 +199,21 @@ public class ClientAgreementCreationHelper {
                 av_choice.agreement_version_id,
                 al_choice.agreement_location_id,
                 (SELECT level_id FROM lvl) AS purchased_level_id,
-                loc.timezone AS location_timezone,
+                tz.timezone_code AS location_timezone,
                 at.duration_value AS term_duration_value,
                 ut.code AS term_duration_unit_code
             FROM agreements.agreement a
             JOIN av_choice ON av_choice.agreement_id = a.agreement_id
             JOIN al_choice ON al_choice.agreement_version_id = av_choice.agreement_version_id
             JOIN lvl ON true
-            LEFT JOIN locations."location" loc ON loc.location_id = (
+            LEFT JOIN locations.location loc ON loc.location_id = (
                 SELECT l.reference_entity_id
                 FROM locations.levels l
                 WHERE l.level_id = lvl.level_id
                 LIMIT 1
             )
+            LEFT JOIN locations.lu_timezone tz ON tz.timezone_id = loc.timezone_id
+                AND COALESCE(tz.is_active, true) = true
             LEFT JOIN agreements.agreement_term at ON at.agreement_term_id = a.agreement_term_id
             LEFT JOIN agreements.lu_duration_unit_type ut ON ut.duration_unit_type_id = at.duration_unit_type_id
             WHERE a.agreement_id = :agreementId
