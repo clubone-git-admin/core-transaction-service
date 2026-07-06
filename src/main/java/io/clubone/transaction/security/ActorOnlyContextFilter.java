@@ -55,15 +55,24 @@ public class ActorOnlyContextFilter extends OncePerRequestFilter {
       throws IOException, ServletException {
 
     final String path = PublicApiPaths.resolvePath(req);
-    log.debug("Tenant filter: {} {}", req.getMethod(), path);
+    final String method = req.getMethod();
+    log.debug("Tenant filter: {} {}", method, path);
 
     String actorHeader = req.getHeader("X-Actor-Id");
+    String locationHeader = req.getHeader("X-Location-Id");
+    String appHeader = firstNonBlank(req.getHeader("application-id"), req.getHeader("X-Application-Id"));
+
+    if (TenantOptionalApiPaths.isOptional(path, method) && !hasAllTenantHeaders(actorHeader, locationHeader, appHeader)) {
+      log.debug("Optional tenant headers for {} {} (partial or missing headers)", method, path);
+      proceedWithoutTenantContext(req, res, chain);
+      return;
+    }
+
     if (actorHeader == null || actorHeader.isBlank()) {
       FilterErrorWriter.write(res, 400, "bad_request", "X-Actor-Id header is required");
       return;
     }
 
-    String locationHeader = req.getHeader("X-Location-Id");
     if (locationHeader == null || locationHeader.isBlank()) {
       FilterErrorWriter.write(res, 400, "bad_request", "X-Location-Id header is required");
       return;
@@ -95,7 +104,6 @@ public class ActorOnlyContextFilter extends OncePerRequestFilter {
       return;
     }
 
-    String appHeader = firstNonBlank(req.getHeader("application-id"), req.getHeader("X-Application-Id"));
     if (appHeader == null || appHeader.isBlank()) {
       FilterErrorWriter.write(res, 400, "bad_request", "application-id header is required");
       return;
@@ -140,6 +148,19 @@ public class ActorOnlyContextFilter extends OncePerRequestFilter {
     }
   }
 
+  private void proceedWithoutTenantContext(HttpServletRequest req, HttpServletResponse res, FilterChain chain)
+      throws IOException, ServletException {
+    var auth = new UsernamePasswordAuthenticationToken("pos-optional", null,
+        List.of(new SimpleGrantedAuthority("ROLE_POS_OPTIONAL")));
+    SecurityContextHolder.getContext().setAuthentication(auth);
+    try {
+      chain.doFilter(req, res);
+    } finally {
+      TenantContext.clear();
+      SecurityContextHolder.clearContext();
+    }
+  }
+
   private ActorCtx loadActorCtx(UUID applicationUserId, UUID workingLocation) {
     try {
       return jdbc.queryForObject("""
@@ -166,6 +187,12 @@ public class ActorOnlyContextFilter extends OncePerRequestFilter {
       log.warn("Actor context not found for applicationUserId={}", applicationUserId);
       return null;
     }
+  }
+
+  private static boolean hasAllTenantHeaders(String actorHeader, String locationHeader, String appHeader) {
+    return actorHeader != null && !actorHeader.isBlank()
+        && locationHeader != null && !locationHeader.isBlank()
+        && appHeader != null && !appHeader.isBlank();
   }
 
   private static String firstNonBlank(String a, String b) {
