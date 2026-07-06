@@ -14,6 +14,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.server.ResponseStatusException;
+import io.clubone.transaction.security.TenantHttpHeaders;
 
 import java.math.BigDecimal;
 import java.sql.ResultSet;
@@ -23,12 +24,6 @@ import java.util.*;
 
 @Service
 public class ClientAgreementCreationHelper {
-
-    // Fixed default IDs as requested
-    private static final UUID DEFAULT_ACTOR_ID =
-            UUID.fromString("1934776b-1912-4886-9890-023f21f6ba3b");
-    private static final UUID DEFAULT_LOCATION_ID =
-            UUID.fromString("290ea7fa-7842-44ba-bf09-578c6e8a7842");
 
     private final NamedParameterJdbcTemplate namedJdbc;
     private final RestTemplate restTemplate;
@@ -240,10 +235,7 @@ public class ClientAgreementCreationHelper {
         String url = clientAgreementServiceBaseUrl;
         System.out.println("[invokeClientAgreementCreate] requestBody=" + caReq);
 
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.set("X-Actor-Id", DEFAULT_ACTOR_ID.toString());
-        headers.set("X-Location-Id", DEFAULT_LOCATION_ID.toString());
+        HttpHeaders headers = TenantHttpHeaders.fromContext();
 
         HttpEntity<ClientAgreementCreateRequest> entity =
                 new HttpEntity<>(caReq, headers);

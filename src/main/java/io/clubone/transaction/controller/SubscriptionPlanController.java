@@ -17,7 +17,7 @@ import io.clubone.transaction.request.SubscriptionPlanCreateRequest;
 import io.clubone.transaction.response.BillingQuoteLineItemsResponse;
 import io.clubone.transaction.response.SubscriptionPlanBatchCreateResponse;
 import io.clubone.transaction.response.SubscriptionPlanCreateResponse;
-import io.clubone.transaction.service.SubscriptionPlanService;
+import io.clubone.transaction.security.AccessContext;
 import io.clubone.transaction.v2.vo.InvoiceDetailDTO;
 import io.clubone.transaction.v2.vo.SubscriptionPlanSummaryDTO;
 
@@ -35,7 +35,9 @@ public class SubscriptionPlanController {
 	public ResponseEntity<SubscriptionPlanCreateResponse> createPlan(
 			@Valid @RequestBody SubscriptionPlanCreateRequest request,
 			@RequestHeader(name = "X-User", required = false) String userHeader) {
-		UUID createdBy = request.getCreatedBy() == null ? UUID.randomUUID() : request.getCreatedBy();
+		UUID createdBy = request.getCreatedBy() != null
+				? request.getCreatedBy()
+				: AccessContext.actorApplicationUserId();
 		SubscriptionPlanCreateResponse resp = service.createPlanWithChildren(request, createdBy);
 		return ResponseEntity.ok(resp);
 	}
@@ -44,7 +46,9 @@ public class SubscriptionPlanController {
 	public ResponseEntity<SubscriptionPlanBatchCreateResponse> createPlans(
 			@Valid @RequestBody SubscriptionPlanBatchCreateRequest request,
 			@RequestHeader(name = "X-User", required = false) String userHeader) {
-		UUID createdBy = request.getCreatedBy() == null ? UUID.randomUUID() : request.getCreatedBy();
+		UUID createdBy = request.getCreatedBy() != null
+				? request.getCreatedBy()
+				: AccessContext.actorApplicationUserId();
 		return ResponseEntity.ok(service.createPlans(request, createdBy));
 	}
 

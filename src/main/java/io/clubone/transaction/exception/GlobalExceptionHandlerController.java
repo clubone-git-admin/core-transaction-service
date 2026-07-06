@@ -17,11 +17,11 @@ import org.springframework.web.client.HttpServerErrorException.ServiceUnavailabl
 
 import lombok.extern.slf4j.Slf4j;
 
-//@RestControllerAdvice
+@RestControllerAdvice
 @Slf4j
 public class GlobalExceptionHandlerController {
 
-	private final static String EXCEPTION_NAME = "inside handleOnRunTimeExceptions method, exception name is :";
+	private static final String EXCEPTION_NAME = "Unhandled exception: ";
 
 	@ExceptionHandler(value = RuntimeException.class)
 	public ProblemDetail handleOnRunTimeExceptions(RuntimeException exception) {
