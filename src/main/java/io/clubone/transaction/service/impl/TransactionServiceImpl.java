@@ -20,6 +20,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.CollectionUtils;
+import org.springframework.context.ApplicationEventPublisher;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.clubone.transaction.dao.InvoiceDAO;
@@ -31,6 +32,7 @@ import io.clubone.transaction.billing.quote.BillingQuoteSubscriptionPersistenceS
 import io.clubone.transaction.gl.model.GlPaymentCollectedPayload;
 import io.clubone.transaction.gl.service.GlPostingOutboxService;
 import io.clubone.transaction.helper.SubscriptionPlanHelper;
+import io.clubone.transaction.inventory.FinalizedInvoiceInventoryEvent;
 import io.clubone.transaction.request.CreateInvoiceRequest;
 import io.clubone.transaction.request.CreateInvoiceRequestV3;
 import io.clubone.transaction.request.CreateTransactionRequest;
@@ -58,8 +60,6 @@ import io.clubone.transaction.vo.TransactionDTO;
 import io.clubone.transaction.vo.TransactionEntityDTO;
 import io.clubone.transaction.vo.TransactionEntityTaxDTO;
 import io.clubone.transaction.vo.TransactionInfoDTO;
-import org.springframework.context.ApplicationEventPublisher;
-import io.clubone.transaction.inventory.FinalizedInvoiceInventoryEvent;
 
 @Service
 public class TransactionServiceImpl implements TransactionService {
@@ -90,7 +90,7 @@ public class TransactionServiceImpl implements TransactionService {
 
 	@Autowired
 	private GlPostingOutboxService glPostingOutboxService;
-	
+
 	@Autowired
 	private ApplicationEventPublisher applicationEventPublisher;
 
@@ -574,6 +574,8 @@ public class TransactionServiceImpl implements TransactionService {
 		logger.info("[transactions/v3/finalize] step=payment_mode invoiceId={} isManual={} gatewayCode={}",
 				req.getInvoiceId(), isManual, req.getPaymentGatewayCode());
 
+		BigDecimal tolerance = finalizeAmountTolerance != null ? finalizeAmountTolerance.setScale(2, RoundingMode.HALF_UP)
+				: new BigDecimal("0.09").setScale(2, RoundingMode.HALF_UP);
 		BigDecimal invoiceTotal = nz(invoiceSummary.getTotalAmount()).setScale(2, RoundingMode.HALF_UP);
 
 		BigDecimal payAmount;
@@ -591,24 +593,20 @@ public class TransactionServiceImpl implements TransactionService {
 					"Payment amount must be greater than zero");
 		}
 
-		/*
-		 * TESTING ONLY:
-		 * Skip tolerance, overpayment and partial-payment evaluation.
-		 * Every positive payment is treated as a full payment so the
-		 * paid-invoice and inventory-provisioning flows can be tested.
-		 */
-		boolean fullPayment = true;
-		boolean partialPayment = false;
+		if (payAmount.subtract(invoiceTotal).compareTo(tolerance) > 0) {
+			logger.warn(
+					"[transactions/v3/finalize] step=amount_validation outcome=reject invoiceId={} payAmount={} invoiceTotal={} tolerance={} reason=overpayment",
+					req.getInvoiceId(), payAmount, invoiceTotal, tolerance);
+			return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null,
+					"Payment amount exceeds invoice balance");
+		}
 
-		logger.warn(
-				"[transactions/v3/finalize] step=amount_validation testingBypass=true "
-						+ "invoiceId={} invoiceTotal={} payAmount={} "
-						+ "fullPayment={} partialPayment={}",
-				req.getInvoiceId(),
-				invoiceTotal,
-				payAmount,
-				fullPayment,
-				partialPayment);
+		boolean fullPayment = invoiceTotal.compareTo(BigDecimal.ZERO) == 0
+				|| payAmount.add(tolerance).compareTo(invoiceTotal) >= 0;
+		boolean partialPayment = invoiceTotal.compareTo(BigDecimal.ZERO) > 0 && !fullPayment;
+		logger.info(
+				"[transactions/v3/finalize] step=amount_validation outcome=ok invoiceId={} invoiceTotal={} payAmount={} tolerance={} fullPayment={} partialPayment={}",
+				req.getInvoiceId(), invoiceTotal, payAmount, tolerance, fullPayment, partialPayment);
 
 		UUID clientPaymentTransactionId = null;
 
@@ -747,72 +745,34 @@ public class TransactionServiceImpl implements TransactionService {
 			}
 		}
 
-		enqueueGlPaymentCollected(
-		        req,
-		        clientPaymentTransactionId,
-		        transactionId,
-		        payAmount
-		);
+		enqueueGlPaymentCollected(req, clientPaymentTransactionId, transactionId, payAmount);
 
 		if (fullPayment) {
-		    String inventoryCorrelationId =
-		            "finalize-inventory-"
-		                    + req.getInvoiceId();
+			String inventoryCorrelationId = "finalize-inventory-" + req.getInvoiceId();
 
-		    applicationEventPublisher.publishEvent(
-		            new FinalizedInvoiceInventoryEvent(
-		                    req.getInvoiceId(),
-		                    clientPaymentTransactionId,
-		                    req.getCreatedBy(),
-		                    inventoryCorrelationId
-		            )
-		    );
+			applicationEventPublisher.publishEvent(
+					new FinalizedInvoiceInventoryEvent(
+							req.getInvoiceId(),
+							clientPaymentTransactionId,
+							req.getCreatedBy(),
+							inventoryCorrelationId));
 
-		    logger.info(
-		            "[transactions/v3/finalize] "
-		                    + "step=inventory_provisioning "
-		                    + "outcome=scheduled_after_commit "
-		                    + "invoiceId={} "
-		                    + "clientPaymentTransactionId={} "
-		                    + "correlationId={}",
-		            req.getInvoiceId(),
-		            clientPaymentTransactionId,
-		            inventoryCorrelationId
-		    );
+			logger.info(
+					"[transactions/v3/finalize] step=inventory_provisioning outcome=scheduled_after_commit "
+							+ "invoiceId={} clientPaymentTransactionId={} correlationId={}",
+					req.getInvoiceId(), clientPaymentTransactionId, inventoryCorrelationId);
 		} else {
-		    logger.info(
-		            "[transactions/v3/finalize] "
-		                    + "step=inventory_provisioning "
-		                    + "skipped=true "
-		                    + "reason=partial_payment "
-		                    + "invoiceId={} "
-		                    + "payAmount={} invoiceTotal={}",
-		            req.getInvoiceId(),
-		            payAmount,
-		            invoiceTotal
-		    );
+			logger.info(
+					"[transactions/v3/finalize] step=inventory_provisioning skipped=true "
+							+ "reason=partial_payment invoiceId={} payAmount={} invoiceTotal={}",
+					req.getInvoiceId(), payAmount, invoiceTotal);
 		}
 
 		logger.info(
-		        "[transactions/v3/finalize] step=complete "
-		                + "invoiceId={} invoiceStatus={} transactionId={} "
-		                + "clientPaymentTransactionId={} partialPayment={}",
-		        req.getInvoiceId(),
-		        responseStatusName,
-		        transactionId,
-		        clientPaymentTransactionId,
-		        partialPayment
-		);
-
-		return new FinalizeTransactionResponse(
-		        req.getInvoiceId(),
-		        responseStatusName,
-		        clientPaymentTransactionId,
-		        transactionId,
-		        partialPayment
-		                ? "Partial payment recorded"
-		                : ""
-		);
+				"[transactions/v3/finalize] step=complete invoiceId={} invoiceStatus={} transactionId={} clientPaymentTransactionId={} partialPayment={}",
+				req.getInvoiceId(), responseStatusName, transactionId, clientPaymentTransactionId, partialPayment);
+		return new FinalizeTransactionResponse(req.getInvoiceId(), responseStatusName, clientPaymentTransactionId,
+				transactionId, partialPayment ? "Partial payment recorded" : "");
 	}
 
 	private void enqueueGlPaymentCollected(FinalizeTransactionRequest req, UUID clientPaymentTransactionId,
