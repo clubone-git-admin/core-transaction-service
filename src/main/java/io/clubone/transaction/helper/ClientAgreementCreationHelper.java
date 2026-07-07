@@ -1,9 +1,13 @@
 package io.clubone.transaction.helper;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.clubone.transaction.v2.vo.InvoiceRequest;
 import io.clubone.transaction.v2.vo.Entity;
 import lombok.Data;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.http.*;
@@ -25,17 +29,24 @@ import java.util.*;
 @Service
 public class ClientAgreementCreationHelper {
 
+    private static final Logger logger =
+            LoggerFactory.getLogger(ClientAgreementCreationHelper.class);
+
     private final NamedParameterJdbcTemplate namedJdbc;
     private final RestTemplate restTemplate;
+    private final ObjectMapper objectMapper;
 
     // e.g. http://client-agreement-service:8080
     @Value("${client.agreement.service.base-url}")
     private String clientAgreementServiceBaseUrl;
 
-    public ClientAgreementCreationHelper(NamedParameterJdbcTemplate namedJdbc,
-                                         RestTemplate restTemplate) {
+    public ClientAgreementCreationHelper(
+            NamedParameterJdbcTemplate namedJdbc,
+            RestTemplate restTemplate,
+            ObjectMapper objectMapper) {
         this.namedJdbc = namedJdbc;
         this.restTemplate = restTemplate;
+        this.objectMapper = objectMapper;
     }
 
     /**
@@ -132,7 +143,10 @@ public class ClientAgreementCreationHelper {
 
         if (primary.getPromotionId() != null) {
             PromotionCreateDto promo = new PromotionCreateDto();
-            promo.setPromotionVersionId(primary.getPromotionId());
+            // The downstream API resolves this value to promotion_version_id.
+            // In the POS flow this value is commonly promotion_applicability_id.
+            promo.setPromotionId(primary.getPromotionId());
+            promo.setNotes("Promotion applied during POS agreement purchase");
             caReq.setPromotions(List.of(promo));
         } else {
             caReq.setPromotions(Collections.emptyList());
@@ -232,37 +246,232 @@ public class ClientAgreementCreationHelper {
     }
 
     private UUID invokeClientAgreementCreate(ClientAgreementCreateRequest caReq) {
-        String url = clientAgreementServiceBaseUrl;
-        System.out.println("[invokeClientAgreementCreate] requestBody=" + caReq);
+        String url = requireConfiguredClientAgreementUrl();
 
         HttpHeaders headers = TenantHttpHeaders.fromContext();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setAccept(List.of(MediaType.APPLICATION_JSON));
+
+        String requestJson = serializeForLog(caReq);
+        String retryCurl = buildCurlCommand(url, headers, requestJson);
+
+        logger.info(
+                "[client-agreement-create] outbound_request " +
+                        "method=POST url={} headers={} body={} retryCurl={}",
+                url,
+                sanitizeHeadersForLog(headers),
+                requestJson,
+                retryCurl
+        );
 
         HttpEntity<ClientAgreementCreateRequest> entity =
                 new HttpEntity<>(caReq, headers);
 
+        long startedAt = System.currentTimeMillis();
+
         try {
             ResponseEntity<ClientAgreementCreateResponse> resp =
-                    restTemplate.postForEntity(url, entity, ClientAgreementCreateResponse.class);
+                    restTemplate.postForEntity(
+                            url,
+                            entity,
+                            ClientAgreementCreateResponse.class
+                    );
 
-            if (!resp.getStatusCode().is2xxSuccessful() ||
-                    resp.getBody() == null ||
-                    resp.getBody().getClientAgreementId() == null) {
+            long elapsedMs = System.currentTimeMillis() - startedAt;
+
+            logger.info(
+                    "[client-agreement-create] downstream_response " +
+                            "url={} status={} elapsedMs={} body={}",
+                    url,
+                    resp.getStatusCode().value(),
+                    elapsedMs,
+                    serializeForLog(resp.getBody())
+            );
+
+            if (!resp.getStatusCode().is2xxSuccessful()) {
                 throw new ResponseStatusException(
                         HttpStatus.BAD_GATEWAY,
-                        "Client-agreement service returned " + resp.getStatusCode()
+                        "Client-agreement service returned HTTP " +
+                                resp.getStatusCode().value()
                 );
             }
+
+            if (resp.getBody() == null) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_GATEWAY,
+                        "Client-agreement service returned an empty response body"
+                );
+            }
+
+            if (resp.getBody().getClientAgreementId() == null) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_GATEWAY,
+                        "Client-agreement response is missing clientAgreementId"
+                );
+            }
+
+            logger.info(
+                    "[client-agreement-create] outcome=success " +
+                            "clientAgreementId={} elapsedMs={}",
+                    resp.getBody().getClientAgreementId(),
+                    elapsedMs
+            );
 
             return resp.getBody().getClientAgreementId();
 
         } catch (HttpStatusCodeException ex) {
+            long elapsedMs = System.currentTimeMillis() - startedAt;
+            String responseBody = ex.getResponseBodyAsString();
+
+            logger.error(
+                    "[client-agreement-create] outcome=http_error " +
+                            "url={} status={} elapsedMs={} responseHeaders={} " +
+                            "responseBody={} retryCurl={}",
+                    url,
+                    ex.getStatusCode().value(),
+                    elapsedMs,
+                    sanitizeHeadersForLog(ex.getResponseHeaders()),
+                    responseBody,
+                    retryCurl,
+                    ex
+            );
+
             throw new ResponseStatusException(
                     HttpStatus.BAD_GATEWAY,
-                    "Error calling client-agreement service: " + ex.getStatusCode() +
-                            " body=" + ex.getResponseBodyAsString(),
+                    "Error calling client-agreement service: HTTP " +
+                            ex.getStatusCode().value() +
+                            " body=" + responseBody,
+                    ex
+            );
+
+        } catch (ResponseStatusException ex) {
+            throw ex;
+
+        } catch (Exception ex) {
+            long elapsedMs = System.currentTimeMillis() - startedAt;
+
+            logger.error(
+                    "[client-agreement-create] outcome=transport_error " +
+                            "url={} elapsedMs={} message={} retryCurl={}",
+                    url,
+                    elapsedMs,
+                    ex.getMessage(),
+                    retryCurl,
+                    ex
+            );
+
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_GATEWAY,
+                    "Unable to call client-agreement service: " + ex.getMessage(),
                     ex
             );
         }
+    }
+
+    private String requireConfiguredClientAgreementUrl() {
+        if (clientAgreementServiceBaseUrl == null ||
+                clientAgreementServiceBaseUrl.isBlank()) {
+            throw new IllegalStateException(
+                    "client.agreement.service.base-url is not configured"
+            );
+        }
+        return clientAgreementServiceBaseUrl.trim();
+    }
+
+    private String serializeForLog(Object value) {
+        if (value == null) {
+            return "null";
+        }
+
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (JsonProcessingException ex) {
+            logger.warn(
+                    "[client-agreement-create] unable_to_serialize_for_log message={}",
+                    ex.getMessage()
+            );
+            return String.valueOf(value);
+        }
+    }
+
+    private Map<String, List<String>> sanitizeHeadersForLog(HttpHeaders headers) {
+        if (headers == null || headers.isEmpty()) {
+            return Collections.emptyMap();
+        }
+
+        Set<String> sensitiveHeaders = Set.of(
+                HttpHeaders.AUTHORIZATION.toLowerCase(Locale.ROOT),
+                "proxy-authorization",
+                "cookie",
+                "set-cookie",
+                "x-api-key"
+        );
+
+        Map<String, List<String>> safe = new LinkedHashMap<>();
+
+        headers.forEach((name, values) -> {
+            String normalized = name.toLowerCase(Locale.ROOT);
+            if (sensitiveHeaders.contains(normalized)) {
+                safe.put(name, List.of("***REDACTED***"));
+            } else {
+                safe.put(name, values == null ? List.of() : List.copyOf(values));
+            }
+        });
+
+        return safe;
+    }
+
+    private String buildCurlCommand(
+            String url,
+            HttpHeaders headers,
+            String requestJson) {
+
+        StringBuilder curl = new StringBuilder();
+        curl.append("curl --location --request POST ")
+                .append(shellQuote(url));
+
+        headers.forEach((headerName, values) -> {
+            if (values == null || values.isEmpty()) {
+                return;
+            }
+
+            String normalized = headerName.toLowerCase(Locale.ROOT);
+            boolean sensitive = normalized.equals(
+                    HttpHeaders.AUTHORIZATION.toLowerCase(Locale.ROOT))
+                    || normalized.equals("proxy-authorization")
+                    || normalized.equals("cookie")
+                    || normalized.equals("set-cookie")
+                    || normalized.equals("x-api-key");
+
+            if (sensitive) {
+                curl.append(" \\")
+                        .append(System.lineSeparator())
+                        .append("  --header ")
+                        .append(shellQuote(headerName + ": <REDACTED>"));
+                return;
+            }
+
+            for (String value : values) {
+                curl.append(" \\")
+                        .append(System.lineSeparator())
+                        .append("  --header ")
+                        .append(shellQuote(headerName + ": " + value));
+            }
+        });
+
+        curl.append(" \\")
+                .append(System.lineSeparator())
+                .append("  --data-raw ")
+                .append(shellQuote(requestJson));
+
+        return curl.toString();
+    }
+
+    private static String shellQuote(String value) {
+        if (value == null) {
+            return "''";
+        }
+        return "'" + value.replace("'", "'\"'\"'") + "'";
     }
 
     private ZoneId resolveZoneId(String tz) {
@@ -411,7 +620,16 @@ public class ClientAgreementCreationHelper {
     @Data
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public static class PromotionCreateDto {
+        /**
+         * Current POS/client-agreement contract field. The downstream API
+         * resolves it as promotion_applicability_id, promotion_version_id,
+         * or master promotion_id.
+         */
+        private UUID promotionId;
+
+        /** Optional direct promotion version ID; takes precedence downstream. */
         private UUID promotionVersionId;
+
         private BigDecimal discountAmount;
         private String notes;
     }
