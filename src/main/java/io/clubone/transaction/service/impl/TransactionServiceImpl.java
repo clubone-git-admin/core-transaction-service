@@ -30,6 +30,7 @@ import io.clubone.transaction.helper.InvoiceNotificationHelper;
 import io.clubone.transaction.billing.quote.BillingQuoteSubscriptionPersistenceService;
 import io.clubone.transaction.gl.model.GlPaymentCollectedPayload;
 import io.clubone.transaction.gl.service.GlPostingOutboxService;
+import io.clubone.transaction.integration.WebhookMembershipPurchasePublisher;
 import io.clubone.transaction.helper.SubscriptionPlanHelper;
 import io.clubone.transaction.request.CreateInvoiceRequest;
 import io.clubone.transaction.request.CreateInvoiceRequestV3;
@@ -88,6 +89,9 @@ public class TransactionServiceImpl implements TransactionService {
 
 	@Autowired
 	private GlPostingOutboxService glPostingOutboxService;
+
+	@Autowired
+	private WebhookMembershipPurchasePublisher webhookMembershipPurchasePublisher;
 
 	private static final Logger logger = LoggerFactory.getLogger(TransactionServiceImpl.class);
 
@@ -698,6 +702,17 @@ public class TransactionServiceImpl implements TransactionService {
 			transactionDAO.activateAgreementAndClientStatusForInvoice(req.getInvoiceId(), req.getCreatedBy());
 			logger.info("[transactions/v3/finalize] step=activate_agreement outcome=ok invoiceId={}",
 					req.getInvoiceId());
+			if (effectiveClientAgreementId != null) {
+				webhookMembershipPurchasePublisher.publishAfterPaymentSuccess(
+						req.getInvoiceId(),
+						transactionId,
+						clientPaymentTransactionId,
+						req.getClientRoleId(),
+						effectiveClientAgreementId,
+						req.getLevelId(),
+						payAmount,
+						req.getCreatedBy());
+			}
 			if (!CollectionUtils.isEmpty(req.getBillingQuoteFinalizeSpecs())) {
 				try {
 					logger.info(
