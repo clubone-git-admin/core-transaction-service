@@ -13,11 +13,15 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.client.RestTemplate;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.clubone.transaction.security.TenantContext;
+import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 
 @Component
@@ -51,10 +55,38 @@ public class WebhookPublishClient {
     this.systemActorId = parseUuid(systemActorId);
   }
 
+  @PostConstruct
+  void logWebhookTarget() {
+    log.info("WebhookPublishClient enabled={} publishUrl={} defaultApplicationId={} afterCommit=true",
+        enabled, publishUrl, defaultApplicationId);
+  }
+
+  /**
+   * Queues the webhook HTTP call until the surrounding Spring transaction commits.
+   * If no transaction is active, publishes immediately.
+   * On rollback, the HTTP call is never made.
+   */
   public void publish(PublishRequest request) {
     if (!enabled || request == null || request.eventType() == null) {
+      log.warn("Webhook publish skipped — client disabled or empty request enabled={} eventType={}",
+          enabled, request != null ? request.eventType() : null);
       return;
     }
+    if (TransactionSynchronizationManager.isSynchronizationActive()) {
+      TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+        @Override
+        public void afterCommit() {
+          publishNow(request);
+        }
+      });
+      log.info("Webhook publish deferred until afterCommit eventType={} idempotencyKey={}",
+          request.eventType(), request.idempotencyKey());
+      return;
+    }
+    publishNow(request);
+  }
+
+  private void publishNow(PublishRequest request) {
     try {
       UUID applicationId = request.applicationId() != null
           ? request.applicationId()
@@ -91,11 +123,25 @@ public class WebhookPublishClient {
       headers.set("X-Location-Id", locationId.toString());
       headers.set("application-id", applicationId.toString());
 
+      log.info("Webhook publish POST url={} eventType={} applicationId={} locationId={} actorId={} idempotencyKey={}",
+          publishUrl, request.eventType(), applicationId, locationId, actorId, request.idempotencyKey());
+
       HttpEntity<String> entity = new HttpEntity<>(objectMapper.writeValueAsString(body), headers);
       ResponseEntity<String> response = restTemplate.exchange(publishUrl, HttpMethod.POST, entity, String.class);
-      log.info("Webhook event queued eventType={} status={}", request.eventType(), response.getStatusCode());
+      String integrationStatus = parseIntegrationStatus(response.getBody());
+      if ("SKIPPED".equalsIgnoreCase(integrationStatus)) {
+        log.warn(
+            "Webhook publish accepted but SKIPPED by integration-service eventType={} applicationId={} — "
+                + "enable integration, configure an external endpoint, and subscribe to this event "
+                + "(rows land in webhook.wh_event_outbox, not transaction DB)",
+            request.eventType(), applicationId);
+      } else {
+        log.info("Webhook event published eventType={} applicationId={} http={} integrationStatus={} body={}",
+            request.eventType(), applicationId, response.getStatusCode(), integrationStatus, response.getBody());
+      }
     } catch (Exception ex) {
-      log.warn("Webhook publish failed eventType={} error={}", request.eventType(), ex.getMessage());
+      log.warn("Webhook publish failed eventType={} url={} error={}", request.eventType(), publishUrl, ex.getMessage(),
+          ex);
     }
   }
 
@@ -159,6 +205,19 @@ public class WebhookPublishClient {
       }
     }
     return null;
+  }
+
+  private String parseIntegrationStatus(String body) {
+    if (body == null || body.isBlank()) {
+      return "UNKNOWN";
+    }
+    try {
+      JsonNode root = objectMapper.readTree(body);
+      JsonNode status = root.path("data").path("status");
+      return status.isMissingNode() || status.isNull() ? "UNKNOWN" : status.asText("UNKNOWN");
+    } catch (Exception ex) {
+      return "UNKNOWN";
+    }
   }
 
   private static UUID parseUuid(String value) {

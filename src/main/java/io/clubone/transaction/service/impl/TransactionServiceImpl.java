@@ -703,6 +703,9 @@ public class TransactionServiceImpl implements TransactionService {
 			logger.info("[transactions/v3/finalize] step=activate_agreement outcome=ok invoiceId={}",
 					req.getInvoiceId());
 			if (effectiveClientAgreementId != null) {
+				logger.info(
+						"[transactions/v3/finalize] step=webhook_publish schedule invoiceId={} clientAgreementId={} (HTTP after DB commit)",
+						req.getInvoiceId(), effectiveClientAgreementId);
 				webhookMembershipPurchasePublisher.publishAfterPaymentSuccess(
 						req.getInvoiceId(),
 						transactionId,
@@ -712,6 +715,13 @@ public class TransactionServiceImpl implements TransactionService {
 						req.getLevelId(),
 						payAmount,
 						req.getCreatedBy());
+				logger.info(
+						"[transactions/v3/finalize] step=webhook_publish scheduled invoiceId={} — actual POST runs afterCommit",
+						req.getInvoiceId());
+			} else {
+				logger.warn(
+						"[transactions/v3/finalize] step=webhook_publish skipped — no clientAgreementId invoiceId={}",
+						req.getInvoiceId());
 			}
 			if (!CollectionUtils.isEmpty(req.getBillingQuoteFinalizeSpecs())) {
 				try {
