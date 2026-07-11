@@ -253,23 +253,40 @@ public class WebhookPublishClient {
     if (clientAgreementId != null) {
       try {
         return jdbc.queryForObject("""
-            SELECT ca.level_id
-            FROM agreements.client_agreement ca
+            SELECT COALESCE(
+              lv_purch.reference_entity_id,
+              lv_agreement.reference_entity_id,
+              cr.location_id
+            )
+            FROM client_agreements.client_agreement ca
+            JOIN clients.client_role cr ON cr.client_role_id = ca.client_role_id
+            LEFT JOIN locations.levels lv_purch
+              ON lv_purch.level_id = ca.purchased_level_id
+            LEFT JOIN agreements.agreement_location al
+              ON al.agreement_location_id = ca.agreement_location_id
+            LEFT JOIN locations.levels lv_agreement
+              ON lv_agreement.level_id = al.level_id
             WHERE ca.client_agreement_id = ?
+              AND COALESCE(ca.is_active, TRUE) = TRUE
             LIMIT 1
             """, UUID.class, clientAgreementId);
-      } catch (Exception ignored) {
+      } catch (Exception ex) {
+        log.warn("Webhook location resolve failed for clientAgreementId={}: {}",
+            clientAgreementId, ex.getMessage());
       }
     }
     if (clientRoleId != null) {
       try {
         return jdbc.queryForObject("""
-            SELECT cr.level_id
+            SELECT cr.location_id
             FROM clients.client_role cr
             WHERE cr.client_role_id = ?
+              AND COALESCE(cr.is_active, TRUE) = TRUE
             LIMIT 1
             """, UUID.class, clientRoleId);
-      } catch (Exception ignored) {
+      } catch (Exception ex) {
+        log.warn("Webhook location resolve failed for clientRoleId={}: {}",
+            clientRoleId, ex.getMessage());
       }
     }
     return null;
@@ -321,7 +338,7 @@ public class WebhookPublishClient {
     executor.setCorePoolSize(size);
     executor.setMaxPoolSize(size);
     executor.setQueueCapacity(500);
-    executor.setRejectedExecutionHandler(new ThreadPoolExecutor.DiscardOldestPolicy());
+    executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
     executor.initialize();
     return executor;
   }
