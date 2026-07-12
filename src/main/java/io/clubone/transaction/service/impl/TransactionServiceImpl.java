@@ -19,6 +19,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.CollectionUtils;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -218,7 +220,6 @@ public class TransactionServiceImpl implements TransactionService {
 	}
 
 	@Override
-	@Transactional
 	public FinalizeTransactionResponse finalizeTransaction(FinalizeTransactionRequest req) {
 		// Idempotency guard: if a transaction already exists for this invoice, return
 		// it
@@ -532,7 +533,6 @@ public class TransactionServiceImpl implements TransactionService {
 	}
 
 	@Override
-	@Transactional
 	public FinalizeTransactionResponse finalizeTransactionV3(FinalizeTransactionRequest req) {
 		logger.info(
 				"[transactions/v3/finalize] step=start invoiceId={} paymentGatewayCode={} paymentMethodCode={} hasClientPaymentTransactionId={} amountToPayNow={} billingQuoteSpecCount={} clientAgreementId={}",
@@ -674,9 +674,8 @@ public class TransactionServiceImpl implements TransactionService {
 				"[transactions/v3/finalize] step=persist_transaction outcome=ok invoiceId={} transactionId={} clientPaymentTransactionId={}",
 				req.getInvoiceId(), transactionId, clientPaymentTransactionId);
 
-		logger.info("[transactions/v3/finalize] step=notification invoiceId={} sending_email=true", req.getInvoiceId());
-		sendFinalizeInvoiceNotification(req, isManual);
-		logger.info("[transactions/v3/finalize] step=notification invoiceId={} completed", req.getInvoiceId());
+		// Email HTTP must not hold the DB connection — run after commit
+		scheduleFinalizeInvoiceNotificationAfterCommit(req, isManual);
 
 		String responseStatusName;
 		if (partialPayment) {
@@ -811,6 +810,25 @@ public class TransactionServiceImpl implements TransactionService {
 			configured = transactionDAO.tryFindInvoiceStatusIdByName(partiallyPaidStatusName.trim());
 		}
 		return configured.orElseGet(() -> transactionDAO.findInvoiceStatusIdByName(invoiceInitialStatusName));
+	}
+
+	private void scheduleFinalizeInvoiceNotificationAfterCommit(FinalizeTransactionRequest req, boolean isManual) {
+		Runnable send = () -> {
+			logger.info("[transactions/v3/finalize] step=notification invoiceId={} sending_email=true",
+					req.getInvoiceId());
+			sendFinalizeInvoiceNotification(req, isManual);
+			logger.info("[transactions/v3/finalize] step=notification invoiceId={} completed", req.getInvoiceId());
+		};
+		if (TransactionSynchronizationManager.isSynchronizationActive()) {
+			TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+				@Override
+				public void afterCommit() {
+					send.run();
+				}
+			});
+		} else {
+			send.run();
+		}
 	}
 
 	private void sendFinalizeInvoiceNotification(FinalizeTransactionRequest req, boolean isManual) {

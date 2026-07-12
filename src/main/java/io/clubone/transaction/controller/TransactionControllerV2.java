@@ -6,6 +6,7 @@ import java.util.NoSuchElementException;
 import java.util.UUID;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -40,6 +41,7 @@ public class TransactionControllerV2 {
 	private InvoiceService invoiceService;
 
 	@PostMapping("/invoice")
+	@PreAuthorize("@perm.canOperatePos()")
 	public ResponseEntity<CreateInvoiceResponse> createInvoice(@RequestBody InvoiceRequest request) {
 		CreateInvoiceResponse response = transactionService.createInvoice(request);
 		return ResponseEntity.ok(response);
@@ -99,6 +101,7 @@ public class TransactionControllerV2 {
 	}
 	
 	@PostMapping("/invoice/{invoiceId}/future")
+	  @PreAuthorize("@perm.canOperatePos()")
 	  public ResponseEntity<CreateInvoiceResponse> createFutureCycleInvoice(
 	      @PathVariable UUID invoiceId,
 	      @RequestBody FutureInvoiceRequestDTO body,

@@ -37,7 +37,8 @@ public class GlPostingProperties {
 	}
 
 	public int getBatchSize() {
-		return batchSize;
+		// Hard cap so misconfig cannot pull huge outbox payloads into heap
+		return Math.min(Math.max(1, batchSize), 50);
 	}
 
 	public void setBatchSize(int batchSize) {

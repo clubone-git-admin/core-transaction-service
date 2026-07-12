@@ -1,6 +1,7 @@
 package io.clubone.transaction.gl.controller;
 
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -32,6 +33,7 @@ public class GlPostingAdminController {
 	}
 
 	@PostMapping("/replay")
+	@PreAuthorize("@perm.canManageBilling()")
 	@Operation(summary = "Replay a FAILED outbox row (resets to PENDING; optional immediate processing)")
 	public ResponseEntity<GlOutboxReplayResponse> replayFailed(@RequestBody GlOutboxReplayRequest request) {
 		boolean processNow = request != null && request.isProcessImmediately();

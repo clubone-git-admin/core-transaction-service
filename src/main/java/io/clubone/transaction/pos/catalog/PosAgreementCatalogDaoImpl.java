@@ -57,6 +57,7 @@ public class PosAgreementCatalogDaoImpl implements PosAgreementCatalogDao {
 				    AND (al.end_date IS NULL OR CAST(al.end_date AS date) >= CAST(? AS date))
 				)
 				ORDER BY ap.agreement_name
+				LIMIT 500
 				""";
 		return cluboneJdbcTemplate.query(sql, AGREEMENT_ROW, asOf, asOf, levelId, asOf, asOf);
 	}

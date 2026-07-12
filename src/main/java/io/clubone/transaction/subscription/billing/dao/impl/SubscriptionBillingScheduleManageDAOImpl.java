@@ -1,5 +1,6 @@
 package io.clubone.transaction.subscription.billing.dao.impl;
 
+import io.clubone.transaction.security.AccessContext;
 import io.clubone.transaction.subscription.billing.dao.SubscriptionBillingScheduleManageDAO;
 import io.clubone.transaction.subscription.billing.dto.*;
 import jakarta.transaction.Transactional;
@@ -75,6 +76,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 group by billing_schedule_id
             ) adj on adj.billing_schedule_id = s.billing_schedule_id
             where sp.client_agreement_id = ?::uuid
+            and s.application_id = ?::uuid
             and s.isActive=true
             order by s.billing_date asc, s.cycle_number asc
             """;
@@ -128,7 +130,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                     + " | adjustmentAmount=" + dto.getSystemAdjustmentAmount());
 
             return dto;
-        }, clientAgreementId);
+        }, clientAgreementId, AccessContext.applicationId());
 
         System.out.println("Total rows fetched: " + result.size());
         System.out.println("===== getScheduleByClientAgreementId END =====");
@@ -194,11 +196,13 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 select 1
                 from client_subscription_billing.subscription_billing_schedule s
                 where s.billing_schedule_id = ?::uuid
+                  and s.application_id = ?::uuid
                   and s.billed_on is null
             )
             """;
 
-        Boolean val = cluboneJdbcTemplate.queryForObject(sql, Boolean.class, billingScheduleId);
+        Boolean val = cluboneJdbcTemplate.queryForObject(sql, Boolean.class, billingScheduleId,
+                AccessContext.applicationId());
         return Boolean.TRUE.equals(val);
     }
 
@@ -235,6 +239,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 billing_schedule_status_id = ?::uuid,
                 is_prorated = ?
             where billing_schedule_id = ?::uuid
+              and application_id = ?::uuid
             """;
 
         return cluboneJdbcTemplate.update(con -> {
@@ -253,6 +258,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
             ps.setObject(4, statusId);
             ps.setBoolean(5, Boolean.TRUE.equals(request.getIsProrated()));
             ps.setObject(6, billingScheduleId);
+            ps.setObject(7, AccessContext.applicationId());
 
             return ps;
         });
@@ -270,6 +276,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 billing_schedule_status_id = ?::uuid,
                 is_prorated = ?
             where client_agreement_id = ?::uuid
+              and application_id = ?::uuid
             """);
 
         if (request.getFromBillingDate() != null) {
@@ -285,6 +292,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
             sql.append(" and cycle_number <= ? ");
         }
 
+        UUID appId = AccessContext.applicationId();
         return cluboneJdbcTemplate.update(con -> {
             var ps = con.prepareStatement(sql.toString());
             int idx = 1;
@@ -298,6 +306,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
             ps.setObject(idx++, statusId);
             ps.setBoolean(idx++, Boolean.TRUE.equals(request.getIsProrated()));
             ps.setObject(idx++, request.getClientAgreementId());
+            ps.setObject(idx++, appId);
 
             if (request.getFromBillingDate() != null) {
                 ps.setObject(idx++, request.getFromBillingDate());
@@ -336,9 +345,10 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 notes,
                 created_on,
                 created_by
-            ) values (
+            )
+            select
                 gen_random_uuid(),
-                ?::uuid,
+                s.billing_schedule_id,
                 ?::uuid,
                 ?,
                 false,
@@ -353,27 +363,30 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 ?,
                 now(),
                 ?::uuid
-            )
+            from client_subscription_billing.subscription_billing_schedule s
+            where s.billing_schedule_id = ?::uuid
+              and s.application_id = ?::uuid
         """;
 
         return cluboneJdbcTemplate.update(con -> {
             var ps = con.prepareStatement(sql);
 
-            ps.setObject(1, billingScheduleId);
-            ps.setObject(2, adjustmentTypeId);
-            ps.setBigDecimal(3, request.getAmount());
+            ps.setObject(1, adjustmentTypeId);
+            ps.setBigDecimal(2, request.getAmount());
 
             // entity_name instead of UUID
-            ps.setString(4, request.getReferenceEntityType());
+            ps.setString(3, request.getReferenceEntityType());
 
             if (request.getReferenceEntityId() != null) {
-                ps.setObject(5, request.getReferenceEntityId());
+                ps.setObject(4, request.getReferenceEntityId());
             } else {
-                ps.setNull(5, Types.OTHER);
+                ps.setNull(4, Types.OTHER);
             }
 
-            ps.setString(6, request.getReason());
-            ps.setObject(7, createdBy);
+            ps.setString(5, request.getReason());
+            ps.setObject(6, createdBy);
+            ps.setObject(7, billingScheduleId);
+            ps.setObject(8, AccessContext.applicationId());
 
             return ps;
         });
@@ -401,7 +414,10 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
             from client_subscription_billing.subscription_billing_schedule_adjustment a
             join billing_config.billing_adjustment_type t
               on t.billing_adjustment_type_id = a.billing_adjustment_type_id
+            join client_subscription_billing.subscription_billing_schedule s
+              on s.billing_schedule_id = a.billing_schedule_id
             where a.billing_schedule_id = ?::uuid
+              and s.application_id = ?::uuid
             order by a.created_on asc
             """;
 
@@ -434,22 +450,26 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
             dto.setModifiedBy(modifiedBy == null ? null : UUID.fromString(modifiedBy));
 
             return dto;
-        }, billingScheduleId);
+        }, billingScheduleId, AccessContext.applicationId());
     }
 
     @Override
     public UUID findBillingScheduleIdByAdjustmentId(UUID billingScheduleAdjustmentId) {
         String sql = """
-            select billing_schedule_id
-            from client_subscription_billing.subscription_billing_schedule_adjustment
-            where billing_schedule_adjustment_id = ?::uuid
+            select a.billing_schedule_id
+            from client_subscription_billing.subscription_billing_schedule_adjustment a
+            join client_subscription_billing.subscription_billing_schedule s
+              on s.billing_schedule_id = a.billing_schedule_id
+            where a.billing_schedule_adjustment_id = ?::uuid
+              and s.application_id = ?::uuid
             limit 1
             """;
 
         return cluboneJdbcTemplate.queryForObject(
                 sql,
                 (rs, rowNum) -> UUID.fromString(rs.getString("billing_schedule_id")),
-                billingScheduleAdjustmentId
+                billingScheduleAdjustmentId,
+                AccessContext.applicationId()
         );
     }
 
@@ -458,15 +478,18 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                                 UpdateBillingScheduleAdjustmentRequest request,
                                 UUID modifiedBy) {
         String sql = """
-            update client_subscription_billing.subscription_billing_schedule_adjustment
+            update client_subscription_billing.subscription_billing_schedule_adjustment a
             set amount = ?,
                 reference_entity_type = ?,
                 reference_entity_id = ?::uuid,
                 notes = ?,
                 modified_on = now(),
                 modified_by = ?::uuid
-            where billing_schedule_adjustment_id = ?::uuid
-              and is_active = true
+            from client_subscription_billing.subscription_billing_schedule s
+            where a.billing_schedule_adjustment_id = ?::uuid
+              and a.is_active = true
+              and s.billing_schedule_id = a.billing_schedule_id
+              and s.application_id = ?::uuid
             """;
 
         return cluboneJdbcTemplate.update(sql,
@@ -475,22 +498,27 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 request.getReferenceEntityId(),
                 request.getReason(),
                 modifiedBy,
-                billingScheduleAdjustmentId
+                billingScheduleAdjustmentId,
+                AccessContext.applicationId()
         );
     }
 
     @Override
     public int deactivateAdjustment(UUID billingScheduleAdjustmentId, UUID modifiedBy) {
         String sql = """
-            update client_subscription_billing.subscription_billing_schedule_adjustment
+            update client_subscription_billing.subscription_billing_schedule_adjustment a
             set is_active = false,
                 modified_on = now(),
                 modified_by = ?::uuid
-            where billing_schedule_adjustment_id = ?::uuid
-              and is_active = true
+            from client_subscription_billing.subscription_billing_schedule s
+            where a.billing_schedule_adjustment_id = ?::uuid
+              and a.is_active = true
+              and s.billing_schedule_id = a.billing_schedule_id
+              and s.application_id = ?::uuid
             """;
 
-        return cluboneJdbcTemplate.update(sql, modifiedBy, billingScheduleAdjustmentId);
+        return cluboneJdbcTemplate.update(sql, modifiedBy, billingScheduleAdjustmentId,
+                AccessContext.applicationId());
     }
 
     @Override
@@ -506,10 +534,11 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 modified_on = now(),
                 modified_by = ?::uuid
             where s.billing_schedule_id = ?::uuid
+             and s.application_id = ?::uuid
              and s.invoice_id is null
             """;
 
-        return cluboneJdbcTemplate.update(sql, modifiedBy, billingScheduleId);
+        return cluboneJdbcTemplate.update(sql, modifiedBy, billingScheduleId, AccessContext.applicationId());
     }
     
     @Override
@@ -519,6 +548,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
         StringBuilder sql = new StringBuilder("""
             delete from client_subscription_billing.subscription_billing_schedule
             where client_agreement_id = ?::uuid
+              and application_id = ?::uuid
               and billing_date >= ?
               and invoice_id is null
               and is_locked = false
@@ -531,7 +561,8 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
             """);
         }
 
-        return cluboneJdbcTemplate.update(sql.toString(), clientAgreementId, fromBillingDate);
+        return cluboneJdbcTemplate.update(sql.toString(), clientAgreementId, AccessContext.applicationId(),
+                fromBillingDate);
     }
 
     @Override
@@ -731,6 +762,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 CAST(:createdBy AS uuid)
             FROM client_subscription_billing.subscription_billing_schedule s
             WHERE s.billing_schedule_id = CAST(:billingScheduleId AS uuid)
+              AND s.application_id = CAST(:applicationId AS uuid)
               AND NOT EXISTS (
                     SELECT 1
                     FROM client_subscription_billing.billing_schedule_action_impact i
@@ -743,6 +775,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
         MapSqlParameterSource params = new MapSqlParameterSource()
                 .addValue("clientAgreementActionId", clientAgreementActionId)
                 .addValue("billingScheduleId", billingScheduleId)
+                .addValue("applicationId", AccessContext.applicationId())
                 .addValue("newOverrideAmount", newOverrideAmount)
                 .addValue("newProrationCaseCode", newProrationCaseCode)
                 .addValue("newProrationStrategyCode", newProrationStrategyCode)
@@ -767,10 +800,12 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 modified_on = now(),
                 modified_by = :modifiedBy
             WHERE billing_schedule_id = :billingScheduleId
+              AND application_id = :applicationId
             """;
 
         MapSqlParameterSource params = new MapSqlParameterSource()
                 .addValue("billingScheduleId", billingScheduleId)
+                .addValue("applicationId", AccessContext.applicationId())
                 .addValue("overrideAmount", request.getOverrideAmount())
                 .addValue("isProrated", request.getIsProrated())
                 .addValue("modifiedBy", modifiedBy);
