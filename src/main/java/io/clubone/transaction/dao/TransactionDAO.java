@@ -147,4 +147,6 @@ public interface TransactionDAO {
 	 */
 	Optional<UUID> resolveLevelIdForInvoice(UUID levelIdOrReferenceEntityId);
 
+	boolean isCorporateAgreement(UUID agreementBusinessEntityId, UUID applicationId);
+
 }

@@ -37,8 +37,11 @@ import io.clubone.transaction.dao.EntityLookupDao;
 import io.clubone.transaction.dao.PromotionEffectDAO;
 import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.helper.ClientAgreementCreationHelper;
+import io.clubone.transaction.helper.OrganizationAgreementLinkService;
+import io.clubone.transaction.helper.OrganizationContractLinkResult;
 import io.clubone.transaction.helper.TransactionUtils;
 import io.clubone.transaction.response.CreateInvoiceResponse;
+import io.clubone.transaction.service.CorporateAgreementSplitService;
 import io.clubone.transaction.service.TransactionServicev2;
 import io.clubone.transaction.util.FrequencyUnit;
 import io.clubone.transaction.v2.vo.Bundle;
@@ -57,6 +60,7 @@ import io.clubone.transaction.v2.vo.InvoiceSummaryDTO;
 import io.clubone.transaction.v2.vo.Item;
 import io.clubone.transaction.v2.vo.PaymentTimelineItemDTO;
 import io.clubone.transaction.v2.vo.PromotionItemEffectDTO;
+import io.clubone.transaction.validation.AgreementPurchaseEligibilityValidator;
 import io.clubone.transaction.vo.EntityTypeDTO;
 import io.clubone.transaction.vo.InvoiceDTO;
 import io.clubone.transaction.vo.InvoiceEntityDTO;
@@ -77,9 +81,18 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 	@Autowired
 	private ClientAgreementCreationHelper caHelper;
+	
+	@Autowired
+	private OrganizationAgreementLinkService organizationAgreementLinkService;
 
 	@Autowired
 	private PromotionEffectDAO promotionEffectDAO;
+	
+	@Autowired
+	private AgreementPurchaseEligibilityValidator
+	        agreementPurchaseEligibilityValidator;
+	
+	
 
 	@Value("${clubone.invoice.initial-status-name:PENDING}")
 	private String initialInvoiceStatusName;
@@ -107,6 +120,20 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		if (request.getApplicationId() == null) {
 			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "applicationId is required");
 		}
+		
+		 /*
+	     * Validate the purchaser against every agreement classification
+	     * before creating:
+	     *
+	     * - invoice lines
+	     * - client agreements
+	     * - organization contracts
+	     * - organization invoice links
+	     * - the invoice
+	     */
+	    agreementPurchaseEligibilityValidator.validate(
+	            request
+	    );
 
 		final UUID agreementTypeId = requireEntityTypeId("Agreement");
 		final UUID bundleTypeId = requireEntityTypeId("Bundle");
@@ -116,6 +143,15 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		BigDecimal subTotal = BigDecimal.ZERO; // NET (gross-discount)
 		BigDecimal taxTotal = BigDecimal.ZERO; // TAX on NET base
 		BigDecimal discountTotal = BigDecimal.ZERO; // informational
+		BigDecimal memberInvoiceTotal = BigDecimal.ZERO;
+		BigDecimal corporateInvoiceTotal = BigDecimal.ZERO;
+
+		List<PendingSplitAllocation> pendingSplitAllocations =
+		        new ArrayList<>();
+
+		
+		UUID splitAgreementId = null;
+		UUID splitAgreementVersionId = null;
 
 		ObjectMapper mapper = new ObjectMapper();
 		final UUID applicationId = request.getApplicationId();
@@ -998,6 +1034,9 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		 */
 		UUID firstClientAgreementId = null;
 
+		final List<OrganizationContractLinkResult>
+		        organizationContractLinks = new ArrayList<>();
+
 		if (isAgreement) {
 
 			final Map<UUID, UUID> parentMap = buildParentMap(lines);
@@ -1046,6 +1085,25 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 				if (firstClientAgreementId == null) {
 					firstClientAgreementId = clientAgreementId;
 				}
+				/*
+				 * If request.clientRoleId is the organization purchasing
+				 * client, create organization.organization_contract.
+				 *
+				 * For a normal member clientRoleId, the service returns
+				 * organizationPurchase=false and does not insert anything.
+				 */
+				OrganizationContractLinkResult organizationLink =
+				        organizationAgreementLinkService
+				                .linkPurchasedAgreement(
+				                        request.getApplicationId(),
+				                        request.getClientRoleId(),
+				                        clientAgreementId,
+				                        request.getCreatedBy()
+				                );
+
+				if (organizationLink.organizationPurchase()) {
+				    organizationContractLinks.add(organizationLink);
+				}
 
 				stampClientAgreementForRoot(lines, parentMap, agreementRootInvoiceEntityId, clientAgreementId);
 			}
@@ -1056,6 +1114,22 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		}
 
 		UUID invoiceId = transactionDAO.saveInvoiceV3(inv);
+		/*
+		 * Link every organization client agreement created by this
+		 * invoice to the saved invoice.
+		 */
+		for (OrganizationContractLinkResult link
+		        : organizationContractLinks) {
+
+		    organizationAgreementLinkService.linkInvoice(
+		            request.getApplicationId(),
+		            link.organizationId(),
+		            link.organizationContractId(),
+		            link.clientAgreementId(),
+		            invoiceId,
+		            request.getCreatedBy()
+		    );
+		}
 		String invoiceNumber = transactionDAO.findInvoiceNumber(invoiceId);
 
 		CreateInvoiceResponse response = new CreateInvoiceResponse();
@@ -2011,5 +2085,21 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 				applicationId, levelId);
 		System.out.println("Creating future invoice");
 		return createInvoice(req);
+	}
+	
+	private record PendingSplitAllocation(
+	        UUID agreementId,
+	        UUID agreementVersionId,
+	        UUID invoiceEntityId,
+	        UUID agreementGroupPaymentAllocationId,
+	        UUID paymentRoleId,
+	        UUID paymentWhenId,
+	        UUID paymentAllocationTypeId,
+	        BigDecimal memberPercentage,
+	        BigDecimal corporatePercentage,
+	        BigDecimal memberAmount,
+	        BigDecimal corporateAmount,
+	        String paymentWhenCode
+	) {
 	}
 }
