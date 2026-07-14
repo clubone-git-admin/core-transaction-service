@@ -117,7 +117,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	private String fallbackBillingCollectionTypeCode;
 
 	@Override
-	@Transactional(rollbackFor = Exception.class)
+	@Transactional
 	public CreateInvoiceResponse createInvoice(InvoiceRequest request) {
 
 		if (request == null) {
@@ -1918,7 +1918,9 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		if (clientRoleId == null) {
 			throw new IllegalArgumentException("clientRoleId is required");
 		}
-		return transactionDAO.findByClientRole(clientRoleId, limit, offset);
+		int safeLimit = Math.min(Math.max(limit != null ? limit : 100, 1), 200);
+		int safeOffset = Math.max(offset != null ? offset : 0, 0);
+		return transactionDAO.findByClientRole(clientRoleId, safeLimit, safeOffset);
 	}
 
 	@Override

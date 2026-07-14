@@ -26,6 +26,7 @@ import org.springframework.stereotype.Repository;
 import io.clubone.transaction.dao.SubscriptionPlanDao;
 import io.clubone.transaction.dao.utils.DaoUtils;
 import io.clubone.transaction.request.SubscriptionPlanCreateRequest;
+import io.clubone.transaction.security.AccessContext;
 import io.clubone.transaction.v2.vo.CyclePriceDTO;
 import io.clubone.transaction.v2.vo.DiscountCodeDTO;
 import io.clubone.transaction.v2.vo.EntitlementDTO;
@@ -47,8 +48,8 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 			INSERT INTO client_subscription_billing.subscription_instance
 			  (subscription_plan_id, start_date, next_billing_date,
 			   subscription_instance_status_id, created_by, last_billed_on,
-			   end_date, current_cycle_number)
-			VALUES (?,?,?,?,?,?,?, COALESCE(?, 1))
+			   end_date, current_cycle_number, application_id)
+			VALUES (?,?,?,?,?,?,?, COALESCE(?, 1), ?)
 			RETURNING subscription_instance_id
 			""";
 
@@ -61,8 +62,8 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 			   pos_override_applied, override_note, overridden_by,
 			   proration_strategy_id, amount_proration_excl_tax,
 			   amount_list_excl_tax, amount_discount_total_excl_tax,
-			   amount_tax_total, tax_breakdown_json)
-			VALUES (?,?,?,?,?, ?, ?, ?, ?, ?, ?, COALESCE(?, FALSE), ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb))
+			   amount_tax_total, tax_breakdown_json, application_id)
+			VALUES (?,?,?,?,?, ?, ?, ?, ?, ?, ?, COALESCE(?, FALSE), ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?)
 			""";
 
 	private static final String SQL_BILLING_STATUS = """
@@ -83,6 +84,7 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 			    JOIN "transactions"."transaction" t
 			      ON t.client_payment_transaction_id = cpt.client_payment_transaction_id
 			    WHERE t.transaction_id = ?
+			      AND t.application_id = ?
 			      AND COALESCE(t.is_active, true) = true
 			    LIMIT 1
 			""";
@@ -135,9 +137,10 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 		        amount_list_excl_tax,
 		        amount_discount_total_excl_tax,
 		        amount_tax_total,
-		        tax_breakdown_json
+		        tax_breakdown_json,
+		        application_id
 		    )
-		    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb))
+		    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?)
 		    RETURNING subscription_billing_history_id
 		    """;
 
@@ -166,13 +169,15 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 				    INSERT INTO client_subscription_billing.subscription_plan
 				      ( client_payment_method_id, interval_count,
 				       subscription_billing_day_rule_id, is_active, created_on, created_by,
-				        contract_start_date, contract_end_date,client_agreement_id,agreement_term_id)
-				    VALUES (?,?,?, TRUE, now(), ?, ?, ?,?,?)
+				        contract_start_date, contract_end_date,client_agreement_id,agreement_term_id,
+				        application_id)
+				    VALUES (?,?,?, TRUE, now(), ?, ?, ?,?,?,?)
 				    RETURNING subscription_plan_id
 				""";
 		return DaoUtils.queryForUuid(cluboneJdbcTemplate, sql,  req.getClientPaymentMethodId(),
 				req.getIntervalCount(), req.getSubscriptionBillingDayRuleId(),
-				createdBy,  req.getContractStartDate(), req.getContractEndDate(),req.getClientAgreementId(),req.getAgreementTermId());
+				createdBy,  req.getContractStartDate(), req.getContractEndDate(),req.getClientAgreementId(),
+				req.getAgreementTermId(), AccessContext.applicationId());
 	}
 
 	@Override
@@ -362,7 +367,8 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 		try {
 			return cluboneJdbcTemplate.queryForObject(
 					INSERT_INSTANCE_SQL, new Object[] { subscriptionPlanId, startDate, nextBillingDate,
-							subscriptionInstanceStatusId, createdBy, lastBilledOn, endDate, currentCycleNumber },
+							subscriptionInstanceStatusId, createdBy, lastBilledOn, endDate, currentCycleNumber,
+							AccessContext.applicationId() },
 					UUID.class);
 		} catch (DataAccessException ex) {
 			logDbError("insertSubscriptionInstance", ex);
@@ -450,6 +456,7 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 					ps.setString(i++, r.taxBreakdownJson);
 				else
 					ps.setNull(i++, Types.VARCHAR); // tax_breakdown_json (CASTed to jsonb)
+				ps.setObject(i++, AccessContext.applicationId());
 				return ps;
 			});
 		} catch (DataAccessException ex) {
@@ -492,7 +499,8 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 	@Override
 	public Optional<UUID> findClientPaymentMethodIdByTransactionId(UUID transactionId) {
 		try {
-			UUID id = cluboneJdbcTemplate.queryForObject(SQL_FIND_CPM_BY_TXN, UUID.class, transactionId);
+			UUID id = cluboneJdbcTemplate.queryForObject(SQL_FIND_CPM_BY_TXN, UUID.class, transactionId,
+					AccessContext.applicationId());
 			return Optional.ofNullable(id);
 		} catch (EmptyResultDataAccessException e) {
 			return Optional.empty();
@@ -550,6 +558,8 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 				  JOIN "transactions".invoice i
 				    ON i.invoice_id = sbh.invoice_id
 				  WHERE si.subscription_plan_id = ?
+				    AND si.application_id = ?
+				    AND i.application_id = ?
 				)
 				SELECT
 				  -- invoice
@@ -684,7 +694,9 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 				 """;
 
 		try {
-			return Optional.ofNullable(cluboneJdbcTemplate.queryForObject(sql, RAW_MAPPER, subscriptionPlanId));
+			UUID appId = AccessContext.applicationId();
+			return Optional.ofNullable(
+					cluboneJdbcTemplate.queryForObject(sql, RAW_MAPPER, subscriptionPlanId, appId, appId));
 		} catch (EmptyResultDataAccessException ex) {
 			return Optional.empty();
 		}
@@ -742,6 +754,7 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 				  JOIN client_payments.client_payment_method cpm
 				    ON cpm.client_payment_method_id = sp.client_payment_method_id
 				  WHERE cpm.client_role_id = ?   -- pass clientRoleId here
+				    AND sp.application_id = ?
 				)
 				SELECT
 				  -- per instance (guaranteed present)
@@ -802,10 +815,12 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 				LEFT JOIN bundles_new.bundle_plan_template bpt
 				  ON bpt.plan_template_id = ie.price_plan_template_id
 
-				ORDER BY si.start_date DESC NULLS LAST, si.subscription_plan_id;
+				ORDER BY si.start_date DESC NULLS LAST, si.subscription_plan_id
+				LIMIT 200;
 				            """;
 
-		return cluboneJdbcTemplate.query(sql, (rs, rowNum) -> mapPlanRow(rs), clientRoleId);
+		return cluboneJdbcTemplate.query(sql, (rs, rowNum) -> mapPlanRow(rs), clientRoleId,
+				AccessContext.applicationId());
 	}
 
 	private SubscriptionPlanSummaryDTO mapPlanRow(ResultSet rs) throws SQLException {
@@ -886,6 +901,8 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 
 	                if (r.taxBreakdownJson != null) ps.setString(i++, r.taxBreakdownJson);
 	                else ps.setNull(i++, Types.VARCHAR);
+
+	                ps.setObject(i++, AccessContext.applicationId());
 
 	                return ps;
 	            },

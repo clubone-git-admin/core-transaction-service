@@ -26,6 +26,7 @@ import io.clubone.transaction.dao.InvoiceDAO;
 import io.clubone.transaction.dao.InvoiceEntityPromotionDAO;
 import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.dao.InvoiceEntityPromotionDAO.InvoiceEntityPromotionRow;
+import io.clubone.transaction.security.AccessContext;
 import io.clubone.transaction.v2.vo.EntityLevelInfoDTO;
 import io.clubone.transaction.v2.vo.InvoiceEntityPriceBandDTO;
 import io.clubone.transaction.v2.vo.InvoiceEntityPromotionDTO;
@@ -78,6 +79,7 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 			  ON lbct.billing_collection_type_id = i.billing_collection_type_id
 			 AND COALESCE(lbct.is_active, true) = true
 			WHERE i.invoice_id = ?
+			  AND i.application_id = ?
 			  AND COALESCE(i.is_active, true) = true
 			""";
 
@@ -97,6 +99,7 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 			  ie.parent_invoice_entity_id AS parentInvoiceEntityId
 			FROM "transactions".invoice_entity ie
 			WHERE ie.invoice_id = ?
+			  AND ie.application_id = ?
 			  AND COALESCE(ie.is_active, true) = true
 			ORDER BY ie.created_on ASC
 			""";
@@ -130,20 +133,22 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 			  ON lclk.charge_line_kind_id = ie.charge_line_kind_id
 			 AND COALESCE(lclk.is_active, true) = true
 			WHERE ie.invoice_id = ?
+			  AND ie.application_id = ?
 			  AND COALESCE(ie.is_active, true) = true
 			ORDER BY ie.created_on ASC
 			""";
 
 	@Override
 	public InvoiceDTO findResolvedById(UUID invoiceId) {
+		UUID appId = AccessContext.applicationId();
 		List<InvoiceDTO> list = cluboneJdbcTemplate.query(INV_HEADER_SQL,
-				BeanPropertyRowMapper.newInstance(InvoiceDTO.class), invoiceId);
+				BeanPropertyRowMapper.newInstance(InvoiceDTO.class), invoiceId, appId);
 		if (list.isEmpty()) {
 			return null;
 		}
 		InvoiceDTO invoice = list.get(0);
 		List<InvoiceEntityDTO> lines = cluboneJdbcTemplate.query(LINE_ITEMS_BASIC_SQL,
-				BeanPropertyRowMapper.newInstance(InvoiceEntityDTO.class), invoiceId);
+				BeanPropertyRowMapper.newInstance(InvoiceEntityDTO.class), invoiceId, appId);
 		enrichLineItemsBasic(invoice, lines);
 		invoice.setLineItems(lines);
 		return invoice;
@@ -151,14 +156,15 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 
 	@Override
 	public InvoiceDTO findResolvedFullById(UUID invoiceId) {
+		UUID appId = AccessContext.applicationId();
 		List<InvoiceDTO> list = cluboneJdbcTemplate.query(INV_HEADER_SQL,
-				BeanPropertyRowMapper.newInstance(InvoiceDTO.class), invoiceId);
+				BeanPropertyRowMapper.newInstance(InvoiceDTO.class), invoiceId, appId);
 		if (list.isEmpty()) {
 			return null;
 		}
 		InvoiceDTO invoice = list.get(0);
 		List<InvoiceEntityDTO> lines = cluboneJdbcTemplate.query(LINE_ITEMS_FULL_SQL,
-				BeanPropertyRowMapper.newInstance(InvoiceEntityDTO.class), invoiceId);
+				BeanPropertyRowMapper.newInstance(InvoiceEntityDTO.class), invoiceId, appId);
 		enrichLineItemsFull(invoice, lines);
 		invoice.setLineItems(lines);
 		return invoice;
@@ -174,9 +180,10 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 					SELECT invoice_id
 					FROM "transactions".invoice
 					WHERE invoice_number = ?
+					  AND application_id = ?
 					  AND COALESCE(is_active, true) = true
 					LIMIT 1
-					""", UUID.class, invoiceNumber.trim());
+					""", UUID.class, invoiceNumber.trim(), AccessContext.applicationId());
 			return Optional.ofNullable(id);
 		} catch (EmptyResultDataAccessException e) {
 			return Optional.empty();
@@ -400,11 +407,13 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 				FROM "transactions"."transaction" t
 				JOIN "transactions".invoice i ON i.invoice_id = t.invoice_id
 				WHERE t.invoice_id = ?
+				  AND t.application_id = ?
 				  AND COALESCE(t.is_active, true) = true
 				ORDER BY t.transaction_date DESC NULLS LAST, t.created_on DESC
 				""";
 
-		return cluboneJdbcTemplate.query(txnSql, (rs, n) -> mapTransactionRow(rs), invoiceId);
+		return cluboneJdbcTemplate.query(txnSql, (rs, n) -> mapTransactionRow(rs), invoiceId,
+				AccessContext.applicationId());
 	}
 
 	private static TransactionDTO mapTransactionRow(ResultSet rs) throws SQLException {
@@ -463,14 +472,15 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 		return map;
 	}
 	
-	 @Override
-	    public int updateClientAgreementId(UUID invoiceId, UUID clientAgreementId) {
-	        String sql = """
-	            UPDATE "transactions".invoice
-	            SET client_agreement_id = ?
-	            WHERE invoice_id = ?
-	        """;
-	        return cluboneJdbcTemplate.update(sql, clientAgreementId, invoiceId);
-	    }
+	@Override
+	public int updateClientAgreementId(UUID invoiceId, UUID clientAgreementId) {
+		String sql = """
+			UPDATE "transactions".invoice
+			SET client_agreement_id = ?
+			WHERE invoice_id = ?
+			  AND application_id = ?
+			""";
+		return cluboneJdbcTemplate.update(sql, clientAgreementId, invoiceId, AccessContext.applicationId());
+	}
 
 }

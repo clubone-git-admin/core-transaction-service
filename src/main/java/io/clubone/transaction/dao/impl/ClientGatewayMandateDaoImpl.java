@@ -8,6 +8,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import io.clubone.transaction.dao.ClientGatewayMandateDao;
+import io.clubone.transaction.security.AccessContext;
 
 @Repository
 public class ClientGatewayMandateDaoImpl implements ClientGatewayMandateDao {
@@ -29,8 +30,9 @@ public class ClientGatewayMandateDaoImpl implements ClientGatewayMandateDao {
 				    modified_on = NOW(),
 				    modified_by = ?
 				WHERE parent_invoice_id = ?
+				  AND application_id = ?
 				""";
 		return cluboneJdbcTemplate.update(sql, subscriptionPlanId, clientPaymentMethodId,
-				modifiedBy, parentInvoiceId);
+				modifiedBy, parentInvoiceId, AccessContext.applicationId());
 	}
 }

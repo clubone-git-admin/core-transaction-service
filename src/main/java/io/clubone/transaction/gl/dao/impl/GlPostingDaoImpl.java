@@ -22,6 +22,9 @@ import io.clubone.transaction.gl.dao.GlPostingDao;
 import io.clubone.transaction.gl.dao.GlPostingLookupDao;
 import io.clubone.transaction.gl.model.GlMappingRuleRow;
 import io.clubone.transaction.gl.model.PaymentTransactionContext;
+import io.clubone.transaction.security.AccessContext;
+import io.clubone.transaction.security.TenantContext;
+import io.clubone.transaction.security.UnauthorizedException;
 
 @Repository
 public class GlPostingDaoImpl implements GlPostingDao {
@@ -62,9 +65,11 @@ public class GlPostingDaoImpl implements GlPostingDao {
 		return queryOptionalUuid("""
 				SELECT i.item_category_id
 				FROM transactions.invoice_entity ie
+				JOIN transactions.invoice inv ON inv.invoice_id = ie.invoice_id
 				JOIN transactions.lu_entity_type et ON et.entity_type_id = ie.entity_type_id
 				JOIN items.item i ON i.item_id = ie.entity_id
 				WHERE ie.invoice_id = ?
+				  AND ie.application_id = inv.application_id
 				  AND UPPER(TRIM(et.entity_type)) = 'ITEM'
 				  AND i.item_category_id IS NOT NULL
 				ORDER BY COALESCE(ie.total_amount, 0) DESC NULLS LAST
@@ -76,6 +81,7 @@ public class GlPostingDaoImpl implements GlPostingDao {
 	public Optional<GlMappingRuleRow> findBestMappingRule(UUID applicationId, LocalDate asOfDate,
 			UUID paymentMethodTypeId, UUID paymentCurrencyTypeId, UUID itemCategoryId, String sourceTypeCode,
 			String transactionTypeCode, String journalTypeCode) {
+		UUID appId = resolveApplicationId(applicationId);
 		List<GlMappingRuleRow> rows = jdbc.query("""
 				SELECT
 				    r.gl_mapping_rule_id,
@@ -95,7 +101,7 @@ public class GlPostingDaoImpl implements GlPostingDao {
 				  AND r.deleted_on IS NULL
 				  AND UPPER(TRIM(st.code)) = UPPER(TRIM(?))
 				  AND UPPER(TRIM(tt.code)) = UPPER(TRIM(?))
-				  AND (r.application_id IS NULL OR r.application_id = ?)
+				  AND r.application_id = ?
 				  AND (r.effective_from IS NULL OR r.effective_from <= ?)
 				  AND (r.effective_to IS NULL OR r.effective_to >= ?)
 				  AND (r.payment_method_type_id IS NULL
@@ -107,10 +113,24 @@ public class GlPostingDaoImpl implements GlPostingDao {
 				  AND (r.journal_type_id IS NULL OR UPPER(TRIM(jt.code)) = UPPER(TRIM(?)))
 				ORDER BY r.match_rank ASC, r.created_on DESC
 				LIMIT 1
-				""", MAPPING_RULE_MAPPER, sourceTypeCode, transactionTypeCode, applicationId, asOfDate, asOfDate,
+				""", MAPPING_RULE_MAPPER, sourceTypeCode, transactionTypeCode, appId, asOfDate, asOfDate,
 				paymentMethodTypeId, paymentMethodTypeId, paymentCurrencyTypeId, paymentCurrencyTypeId,
 				itemCategoryId, itemCategoryId, journalTypeCode);
 		return rows.stream().findFirst();
+	}
+
+	/**
+	 * Prefer AccessContext when actor context is present (request path); otherwise use the
+	 * caller-resolved applicationId (admin/async via findApplicationIdByLevelId).
+	 */
+	private static UUID resolveApplicationId(UUID applicationId) {
+		if (TenantContext.get() != null) {
+			return AccessContext.applicationId();
+		}
+		if (applicationId != null) {
+			return applicationId;
+		}
+		throw new UnauthorizedException("applicationId is required");
 	}
 
 	private static final RowMapper<GlMappingRuleRow> MAPPING_RULE_MAPPER = new RowMapper<>() {

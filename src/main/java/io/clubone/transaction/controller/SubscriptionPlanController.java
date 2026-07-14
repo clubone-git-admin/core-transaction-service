@@ -6,6 +6,7 @@ import java.util.UUID;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -38,6 +39,7 @@ public class SubscriptionPlanController {
 	private SubscriptionPlanHelper helperService;
 
 	@PostMapping
+	@PreAuthorize("@perm.canOperatePos()")
 	public ResponseEntity<SubscriptionPlanCreateResponse> createPlan(
 			@Valid @RequestBody SubscriptionPlanCreateRequest request,
 			@RequestHeader(name = "X-User", required = false) String userHeader) {
@@ -49,6 +51,7 @@ public class SubscriptionPlanController {
 	}
 
 	@PostMapping("/batch")
+	@PreAuthorize("@perm.canOperatePos()")
 	public ResponseEntity<SubscriptionPlanBatchCreateResponse> createPlans(
 			@Valid @RequestBody SubscriptionPlanBatchCreateRequest request,
 			@RequestHeader(name = "X-User", required = false) String userHeader) {
@@ -63,6 +66,7 @@ public class SubscriptionPlanController {
 	 * {@code billingQuoteFinalizeSpecs}).
 	 */
 	@PostMapping("/billing-quote/line-items")
+	@PreAuthorize("@perm.canOperatePos()")
 	public ResponseEntity<List<BillingQuoteLineItemsResponse>> fetchBillingQuoteLineItems(
 			@RequestBody List<BillingQuoteFinalizeSpec> specs) {
 		return ResponseEntity.ok(helperService.fetchQuoteLineItems(specs));

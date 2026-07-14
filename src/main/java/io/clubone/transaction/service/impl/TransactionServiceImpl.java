@@ -20,8 +20,13 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+
 import org.springframework.util.CollectionUtils;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -226,7 +231,6 @@ public class TransactionServiceImpl implements TransactionService {
 	}
 
 	@Override
-	@Transactional
 	public FinalizeTransactionResponse finalizeTransaction(FinalizeTransactionRequest req) {
 		// Idempotency guard: if a transaction already exists for this invoice, return
 		// it
@@ -540,7 +544,6 @@ public class TransactionServiceImpl implements TransactionService {
 	}
 
 	@Override
-	@Transactional
 	public FinalizeTransactionResponse finalizeTransactionV3(FinalizeTransactionRequest req) {
 		logger.info(
 				"[transactions/v3/finalize] step=start invoiceId={} paymentGatewayCode={} paymentMethodCode={} hasClientPaymentTransactionId={} amountToPayNow={} billingQuoteSpecCount={} clientAgreementId={}",
@@ -717,9 +720,8 @@ public class TransactionServiceImpl implements TransactionService {
 				"[transactions/v3/finalize] step=persist_transaction outcome=ok invoiceId={} transactionId={} clientPaymentTransactionId={}",
 				req.getInvoiceId(), transactionId, clientPaymentTransactionId);
 
-		logger.info("[transactions/v3/finalize] step=notification invoiceId={} sending_email=true", req.getInvoiceId());
-		sendFinalizeInvoiceNotification(req, isManual);
-		logger.info("[transactions/v3/finalize] step=notification invoiceId={} completed", req.getInvoiceId());
+		// Email HTTP must not hold the DB connection — run after commit
+		scheduleFinalizeInvoiceNotificationAfterCommit(req, isManual);
 
 		String responseStatusName;
 		boolean purchaseCompleted;
@@ -887,6 +889,9 @@ public class TransactionServiceImpl implements TransactionService {
 					req.getInvoiceId());
 
 			if (effectiveClientAgreementId != null) {
+				logger.info(
+						"[transactions/v3/finalize] step=webhook_publish schedule invoiceId={} clientAgreementId={} (HTTP after DB commit)",
+						req.getInvoiceId(), effectiveClientAgreementId);
 				webhookMembershipPurchasePublisher.publishAfterPaymentSuccess(
 						req.getInvoiceId(),
 						transactionId,
@@ -896,6 +901,13 @@ public class TransactionServiceImpl implements TransactionService {
 						req.getLevelId(),
 						payAmount,
 						req.getCreatedBy());
+				logger.info(
+						"[transactions/v3/finalize] step=webhook_publish scheduled invoiceId={} — actual POST runs afterCommit",
+						req.getInvoiceId());
+			} else {
+				logger.warn(
+						"[transactions/v3/finalize] step=webhook_publish skipped — no clientAgreementId invoiceId={}",
+						req.getInvoiceId());
 			}
 
 			if (!CollectionUtils.isEmpty(req.getBillingQuoteFinalizeSpecs())) {
@@ -1138,6 +1150,25 @@ public class TransactionServiceImpl implements TransactionService {
 			configured = transactionDAO.tryFindInvoiceStatusIdByName(partiallyPaidStatusName.trim());
 		}
 		return configured.orElseGet(() -> transactionDAO.findInvoiceStatusIdByName(invoiceInitialStatusName));
+	}
+
+	private void scheduleFinalizeInvoiceNotificationAfterCommit(FinalizeTransactionRequest req, boolean isManual) {
+		Runnable send = () -> {
+			logger.info("[transactions/v3/finalize] step=notification invoiceId={} sending_email=true",
+					req.getInvoiceId());
+			sendFinalizeInvoiceNotification(req, isManual);
+			logger.info("[transactions/v3/finalize] step=notification invoiceId={} completed", req.getInvoiceId());
+		};
+		if (TransactionSynchronizationManager.isSynchronizationActive()) {
+			TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+				@Override
+				public void afterCommit() {
+					send.run();
+				}
+			});
+		} else {
+			send.run();
+		}
 	}
 
 	private void sendFinalizeInvoiceNotification(FinalizeTransactionRequest req, boolean isManual) {

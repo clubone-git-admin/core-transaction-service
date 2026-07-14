@@ -17,6 +17,8 @@ import org.springframework.web.client.HttpServerErrorException.InternalServerErr
 import org.springframework.web.client.HttpServerErrorException.ServiceUnavailable;
 import org.springframework.web.server.ResponseStatusException;
 
+import io.clubone.transaction.security.ForbiddenException;
+import io.clubone.transaction.security.UnauthorizedException;
 import lombok.extern.slf4j.Slf4j;
 
 @RestControllerAdvice
@@ -24,6 +26,18 @@ import lombok.extern.slf4j.Slf4j;
 public class GlobalExceptionHandlerController {
 
 	private static final String EXCEPTION_NAME = "Unhandled exception: ";
+
+	@ExceptionHandler(UnauthorizedException.class)
+	public ProblemDetail handleUnauthorized(UnauthorizedException exception) {
+		log.warn("Unauthorized: {}", exception.getMessage());
+		return ProblemDetail.forStatusAndDetail(HttpStatus.UNAUTHORIZED, exception.getMessage());
+	}
+
+	@ExceptionHandler(ForbiddenException.class)
+	public ProblemDetail handleForbidden(ForbiddenException exception) {
+		log.warn("Forbidden: {}", exception.getMessage());
+		return ProblemDetail.forStatusAndDetail(HttpStatus.FORBIDDEN, exception.getMessage());
+	}
 
 	@ExceptionHandler(value = RuntimeException.class)
 	public ProblemDetail handleOnRunTimeExceptions(RuntimeException exception) {

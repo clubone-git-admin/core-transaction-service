@@ -9,7 +9,10 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
+import lombok.extern.slf4j.Slf4j;
+
 @Component
+@Slf4j
 public class WebhookMembershipPurchasePublisher {
 
   private final WebhookPublishClient Webhook;
@@ -33,8 +36,15 @@ public class WebhookMembershipPurchasePublisher {
       UUID actorId) {
 
     if (clientAgreementId == null) {
+      log.warn(
+          "Webhook membership purchase NOT published — clientAgreementId is null invoiceId={} transactionId={}",
+          invoiceId, transactionId);
       return;
     }
+
+    log.info(
+        "Webhook membership purchase publish start invoiceId={} transactionId={} clientAgreementId={} clientRoleId={} amount={}",
+        invoiceId, transactionId, clientAgreementId, clientRoleId, amount);
 
     Map<String, Object> payload = new LinkedHashMap<>();
     payload.put("clientRoleId", clientRoleId);
