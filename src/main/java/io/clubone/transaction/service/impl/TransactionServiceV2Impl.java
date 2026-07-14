@@ -98,11 +98,13 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	private AgreementPurchaseEligibilityValidator
 	        agreementPurchaseEligibilityValidator;
 	
+
 	@Autowired
 	private CorporateAgreementSplitService corporateAgreementSplitService;
 
 	@Autowired
 	private NamedParameterJdbcTemplate jdbc;
+
 
 	@Value("${clubone.invoice.initial-status-name:PENDING}")
 	private String initialInvoiceStatusName;
@@ -153,11 +155,23 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		BigDecimal subTotal = BigDecimal.ZERO; // NET (gross-discount)
 		BigDecimal taxTotal = BigDecimal.ZERO; // TAX on NET base
 		BigDecimal discountTotal = BigDecimal.ZERO; // informational
+
 		/*
 		 * Remains empty for Item, Package, Bundle and normal Agreement requests.
 		 * Populated only for CORP-INDIVIDUAL / CORPORATE_INDIVIDUAL agreements.
 		 */
 		List<CorporateInvoiceContext> corporateInvoiceContexts = new ArrayList<>();
+
+		BigDecimal memberInvoiceTotal = BigDecimal.ZERO;
+		BigDecimal corporateInvoiceTotal = BigDecimal.ZERO;
+
+		/*List<PendingSplitAllocation> pendingSplitAllocations =
+		        new ArrayList<>();*/
+
+		
+		UUID splitAgreementId = null;
+		UUID splitAgreementVersionId = null;
+
 
 		ObjectMapper mapper = new ObjectMapper();
 		final UUID applicationId = request.getApplicationId();
@@ -2163,6 +2177,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	}
 	
 
+
 	/*
 	 * ============================================================
 	 * CORPORATE AGREEMENT PAYMENT SPLIT
@@ -2583,5 +2598,22 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			BigDecimal discount,
 			BigDecimal tax,
 			BigDecimal total) {
+
+	private record PendingSplitAllocation(
+	        UUID agreementId,
+	        UUID agreementVersionId,
+	        UUID invoiceEntityId,
+	        UUID agreementGroupPaymentAllocationId,
+	        UUID paymentRoleId,
+	        UUID paymentWhenId,
+	        UUID paymentAllocationTypeId,
+	        BigDecimal memberPercentage,
+	        BigDecimal corporatePercentage,
+	        BigDecimal memberAmount,
+	        BigDecimal corporateAmount,
+	        String paymentWhenCode
+	) {
+
+	}
 	}
 }
