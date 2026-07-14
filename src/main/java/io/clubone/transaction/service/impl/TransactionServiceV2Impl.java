@@ -18,12 +18,15 @@ import java.util.UUID;
 import java.util.Map;
 import java.util.Set;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.function.BiConsumer;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.CollectionUtils;
@@ -37,8 +40,14 @@ import io.clubone.transaction.dao.EntityLookupDao;
 import io.clubone.transaction.dao.PromotionEffectDAO;
 import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.helper.ClientAgreementCreationHelper;
+import io.clubone.transaction.helper.OrganizationAgreementLinkService;
+import io.clubone.transaction.helper.OrganizationContractLinkResult;
 import io.clubone.transaction.helper.TransactionUtils;
 import io.clubone.transaction.response.CreateInvoiceResponse;
+import io.clubone.transaction.service.CorporateAgreementSplitService;
+import io.clubone.transaction.service.CorporateAgreementSplitService.AmountSplit;
+import io.clubone.transaction.service.CorporateAgreementSplitService.CorporateContext;
+import io.clubone.transaction.service.CorporateAgreementSplitService.SplitRule;
 import io.clubone.transaction.service.TransactionServicev2;
 import io.clubone.transaction.util.FrequencyUnit;
 import io.clubone.transaction.v2.vo.Bundle;
@@ -57,6 +66,7 @@ import io.clubone.transaction.v2.vo.InvoiceSummaryDTO;
 import io.clubone.transaction.v2.vo.Item;
 import io.clubone.transaction.v2.vo.PaymentTimelineItemDTO;
 import io.clubone.transaction.v2.vo.PromotionItemEffectDTO;
+import io.clubone.transaction.validation.AgreementPurchaseEligibilityValidator;
 import io.clubone.transaction.vo.EntityTypeDTO;
 import io.clubone.transaction.vo.InvoiceDTO;
 import io.clubone.transaction.vo.InvoiceEntityDTO;
@@ -77,9 +87,22 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 	@Autowired
 	private ClientAgreementCreationHelper caHelper;
+	
+	@Autowired
+	private OrganizationAgreementLinkService organizationAgreementLinkService;
 
 	@Autowired
 	private PromotionEffectDAO promotionEffectDAO;
+	
+	@Autowired
+	private AgreementPurchaseEligibilityValidator
+	        agreementPurchaseEligibilityValidator;
+	
+	@Autowired
+	private CorporateAgreementSplitService corporateAgreementSplitService;
+
+	@Autowired
+	private NamedParameterJdbcTemplate jdbc;
 
 	@Value("${clubone.invoice.initial-status-name:PENDING}")
 	private String initialInvoiceStatusName;
@@ -107,6 +130,20 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		if (request.getApplicationId() == null) {
 			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "applicationId is required");
 		}
+		
+		 /*
+	     * Validate the purchaser against every agreement classification
+	     * before creating:
+	     *
+	     * - invoice lines
+	     * - client agreements
+	     * - organization contracts
+	     * - organization invoice links
+	     * - the invoice
+	     */
+	    agreementPurchaseEligibilityValidator.validate(
+	            request
+	    );
 
 		final UUID agreementTypeId = requireEntityTypeId("Agreement");
 		final UUID bundleTypeId = requireEntityTypeId("Bundle");
@@ -116,6 +153,11 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		BigDecimal subTotal = BigDecimal.ZERO; // NET (gross-discount)
 		BigDecimal taxTotal = BigDecimal.ZERO; // TAX on NET base
 		BigDecimal discountTotal = BigDecimal.ZERO; // informational
+		/*
+		 * Remains empty for Item, Package, Bundle and normal Agreement requests.
+		 * Populated only for CORP-INDIVIDUAL / CORPORATE_INDIVIDUAL agreements.
+		 */
+		List<CorporateInvoiceContext> corporateInvoiceContexts = new ArrayList<>();
 
 		ObjectMapper mapper = new ObjectMapper();
 		final UUID applicationId = request.getApplicationId();
@@ -326,6 +368,26 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 				}
 				UUID agreementBusinessEntityId = e.getEntityId();
 
+				/*
+				 * Corporate-only guard. All existing flows remain untouched unless this
+				 * agreement is explicitly classified as a corporate member agreement.
+				 */
+				boolean corporateAgreement = corporateAgreementSplitService
+						.isCorporateMemberAgreement(applicationId, agreementBusinessEntityId);
+
+				CorporateContext corporateContext = null;
+				List<CorporateSplitLine> corporateSplitLines = new ArrayList<>();
+
+				if (corporateAgreement) {
+					if (e.getEntityVersionId() == null) {
+						throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+								"entities[].entityVersionId is required for a corporate agreement");
+					}
+
+					corporateContext = corporateAgreementSplitService.resolveCorporateContext(
+							applicationId, request.getClientRoleId(), agreementBusinessEntityId);
+				}
+
 				InvoiceEntityDTO agreement = new InvoiceEntityDTO();
 
 				UUID agreementInvoiceEntityId = UUID.randomUUID();
@@ -509,6 +571,13 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 									computeTaxesFromItemOnly(itemLine, it, invoiceLevelId);
 									finalizeLeaf(itemLine);
 
+									if (corporateAgreement) {
+										CorporateSplitLine splitLine = createCorporateSplitLine(
+												applicationId, agreementBusinessEntityId, e.getEntityVersionId(), itemLine, true);
+										corporateSplitLines.add(splitLine);
+										restoreCorporateFullAmount(itemLine, splitLine.amounts());
+									}
+
 									subTotal = subTotal.add(lineNet(itemLine));
 									taxTotal = taxTotal.add(nz(itemLine.getTaxAmount()));
 									discountTotal = discountTotal.add(nz(itemLine.getDiscountAmount()));
@@ -542,6 +611,13 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 									computeTaxesFromItemOnly(itemLine, it, invoiceLevelId);
 									finalizeLeaf(itemLine);
 
+									if (corporateAgreement) {
+										CorporateSplitLine splitLine = createCorporateSplitLine(
+												applicationId, agreementBusinessEntityId, e.getEntityVersionId(), itemLine, false);
+										corporateSplitLines.add(splitLine);
+										restoreCorporateFullAmount(itemLine, splitLine.amounts());
+									}
+
 									subTotal = subTotal.add(lineNet(itemLine));
 									taxTotal = taxTotal.add(nz(itemLine.getTaxAmount()));
 									discountTotal = discountTotal.add(nz(itemLine.getDiscountAmount()));
@@ -572,6 +648,13 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 								computeTaxesFromItemOnly(itemLine, it, invoiceLevelId);
 								finalizeLeaf(itemLine);
+
+								if (corporateAgreement) {
+									CorporateSplitLine splitLine = createCorporateSplitLine(
+											applicationId, agreementBusinessEntityId, e.getEntityVersionId(), itemLine, false);
+									corporateSplitLines.add(splitLine);
+									restoreCorporateFullAmount(itemLine, splitLine.amounts());
+								}
 
 								subTotal = subTotal.add(lineNet(itemLine));
 								taxTotal = taxTotal.add(nz(itemLine.getTaxAmount()));
@@ -606,6 +689,13 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 									computeTaxesFromItemOnly(nextLine, it, invoiceLevelId);
 									finalizeLeaf(nextLine);
+
+									if (corporateAgreement) {
+										CorporateSplitLine splitLine = createCorporateSplitLine(
+												applicationId, agreementBusinessEntityId, e.getEntityVersionId(), nextLine, false);
+										corporateSplitLines.add(splitLine);
+										restoreCorporateFullAmount(nextLine, splitLine.amounts());
+									}
 
 									subTotal = subTotal.add(lineNet(nextLine));
 									taxTotal = taxTotal.add(nz(nextLine.getTaxAmount()));
@@ -642,6 +732,17 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 				agreement.setDiscountAmount(agreementDiscount);
 				agreement.setTaxAmount(agreementTax);
 				rollup.accept(agreement, lines);
+
+				if (corporateAgreement) {
+					if (corporateSplitLines.isEmpty()) {
+						throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+								"Corporate agreement did not produce any payment split lines");
+					}
+					corporateInvoiceContexts.add(new CorporateInvoiceContext(
+							agreementBusinessEntityId, e.getEntityVersionId(), corporateContext,
+							List.copyOf(corporateSplitLines)));
+				}
+
 				break;
 			}
 
@@ -998,6 +1099,9 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		 */
 		UUID firstClientAgreementId = null;
 
+		final List<OrganizationContractLinkResult>
+		        organizationContractLinks = new ArrayList<>();
+
 		if (isAgreement) {
 
 			final Map<UUID, UUID> parentMap = buildParentMap(lines);
@@ -1046,6 +1150,25 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 				if (firstClientAgreementId == null) {
 					firstClientAgreementId = clientAgreementId;
 				}
+				/*
+				 * If request.clientRoleId is the organization purchasing
+				 * client, create organization.organization_contract.
+				 *
+				 * For a normal member clientRoleId, the service returns
+				 * organizationPurchase=false and does not insert anything.
+				 */
+				OrganizationContractLinkResult organizationLink =
+				        organizationAgreementLinkService
+				                .linkPurchasedAgreement(
+				                        request.getApplicationId(),
+				                        request.getClientRoleId(),
+				                        clientAgreementId,
+				                        request.getCreatedBy()
+				                );
+
+				if (organizationLink.organizationPurchase()) {
+				    organizationContractLinks.add(organizationLink);
+				}
 
 				stampClientAgreementForRoot(lines, parentMap, agreementRootInvoiceEntityId, clientAgreementId);
 			}
@@ -1056,7 +1179,33 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		}
 
 		UUID invoiceId = transactionDAO.saveInvoiceV3(inv);
+		/*
+		 * Link every organization client agreement created by this
+		 * invoice to the saved invoice.
+		 */
+		for (OrganizationContractLinkResult link
+		        : organizationContractLinks) {
+
+		    organizationAgreementLinkService.linkInvoice(
+		            request.getApplicationId(),
+		            link.organizationId(),
+		            link.organizationContractId(),
+		            link.clientAgreementId(),
+		            invoiceId,
+		            request.getCreatedBy()
+		    );
+		}
 		String invoiceNumber = transactionDAO.findInvoiceNumber(invoiceId);
+
+		if (!corporateInvoiceContexts.isEmpty()) {
+			saveCorporatePaymentAllocations(
+					invoiceId, applicationId, request.getClientRoleId(), request.getCurrencyCode(),
+					request.getCreatedBy(), corporateInvoiceContexts);
+
+			postCorporateAmountsToOrganization(
+					invoiceId, invoiceNumber, applicationId, request.getCurrencyCode(),
+					request.getCreatedBy(), corporateInvoiceContexts);
+		}
 
 		CreateInvoiceResponse response = new CreateInvoiceResponse();
 		response.setInvoiceId(invoiceId);
@@ -2011,5 +2160,428 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 				applicationId, levelId);
 		System.out.println("Creating future invoice");
 		return createInvoice(req);
+	}
+	
+
+	/*
+	 * ============================================================
+	 * CORPORATE AGREEMENT PAYMENT SPLIT
+	 * ============================================================
+	 */
+
+	private CorporateSplitLine createCorporateSplitLine(
+			UUID applicationId,
+			UUID agreementId,
+			UUID agreementVersionId,
+			InvoiceEntityDTO itemLine,
+			boolean feeItem) {
+
+		String paymentWhenCode = feeItem ? "DOWN_PAYMENT" : "RECURRING";
+
+		SplitRule rule = corporateAgreementSplitService.resolveRule(
+				applicationId, agreementVersionId, paymentWhenCode);
+
+		if (rule == null) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+					"No active corporate payment allocation was found for agreementVersionId="
+							+ agreementVersionId + ", paymentWhen=" + paymentWhenCode);
+		}
+
+		BigDecimal memberSubtotal = nz(itemLine.getUnitPrice())
+				.multiply(BigDecimal.valueOf(def(itemLine.getQuantity(), 1)));
+		BigDecimal memberDiscount = nz(itemLine.getDiscountAmount());
+		BigDecimal memberTax = nz(itemLine.getTaxAmount());
+		BigDecimal memberTotal = nz(itemLine.getTotalAmount());
+
+		AmountSplit split = corporateAgreementSplitService.calculateFromMemberAmounts(
+				memberSubtotal, memberDiscount, memberTax, memberTotal, rule);
+
+		return new CorporateSplitLine(
+				agreementId,
+				agreementVersionId,
+				itemLine.getInvoiceEntityId(),
+				rule,
+				split);
+	}
+
+	private void restoreCorporateFullAmount(InvoiceEntityDTO line, AmountSplit split) {
+		if (line == null || split == null) {
+			return;
+		}
+
+		int quantity = Math.max(def(line.getQuantity(), 1), 1);
+		BigDecimal fullUnitPrice = split.fullSubtotal()
+				.divide(BigDecimal.valueOf(quantity), 2, RoundingMode.HALF_UP);
+
+		line.setUnitPrice(scale2(fullUnitPrice));
+		line.setDiscountAmount(scale2(split.fullDiscount()));
+		line.setTaxAmount(scale2(split.fullTax()));
+		line.setTotalAmount(scale2(split.fullTotal()));
+	}
+
+	private UUID requiredLookupId(String table, String idColumn, String code) {
+		String sql = """
+				SELECT %s
+				FROM %s
+				WHERE UPPER(TRIM(code)) = :code
+				  AND is_active = TRUE
+				LIMIT 1
+				""".formatted(idColumn, table);
+
+		UUID id = jdbc.query(
+				sql,
+				new MapSqlParameterSource().addValue("code", code.trim().toUpperCase(Locale.ROOT)),
+				rs -> rs.next() ? rs.getObject(1, UUID.class) : null);
+
+		if (id == null) {
+			throw new IllegalStateException("Missing active lookup " + table + ", code=" + code);
+		}
+		return id;
+	}
+
+	private String currency(String value) {
+		return StringUtils.hasText(value) ? value.trim().toUpperCase(Locale.ROOT) : "USD";
+	}
+
+	private void saveCorporatePaymentAllocations(
+			UUID invoiceId,
+			UUID applicationId,
+			UUID memberClientRoleId,
+			String currencyCode,
+			UUID actorId,
+			List<CorporateInvoiceContext> contexts) {
+
+		UUID memberPayerRoleId = requiredLookupId(
+				"agreements.lu_agreement_group_payer_role", "payer_role_id", "MEMBER");
+		UUID corporatePayerRoleId = requiredLookupId(
+				"agreements.lu_agreement_group_payer_role", "payer_role_id", "CORPORATE");
+
+		String sql = """
+				INSERT INTO transactions.invoice_payment_allocation (
+				    invoice_payment_allocation_id,
+				    application_id,
+				    invoice_id,
+				    agreement_group_payment_allocation_id,
+				    payment_role_id,
+				    payer_role_id,
+				    payment_allocation_type_id,
+				    payment_when_id,
+				    beneficiary_client_role_id,
+				    payer_client_role_id,
+				    organization_id,
+				    organization_account_id,
+				    organization_contract_id,
+				    allocation_percentage,
+				    configured_amount,
+				    subtotal_amount,
+				    discount_amount,
+				    tax_amount,
+				    total_amount,
+				    paid_amount,
+				    refunded_amount,
+				    balance_amount,
+				    currency_code,
+				    collection_mode_code,
+				    allocation_status_code,
+				    due_date,
+				    is_primary_payer,
+				    metadata,
+				    is_active,
+				    created_on,
+				    created_by
+				) VALUES (
+				    gen_random_uuid(),
+				    :applicationId,
+				    :invoiceId,
+				    :allocationRuleId,
+				    :paymentRoleId,
+				    :payerRoleId,
+				    :allocationTypeId,
+				    :paymentWhenId,
+				    :beneficiaryClientRoleId,
+				    :payerClientRoleId,
+				    :organizationId,
+				    :organizationAccountId,
+				    :organizationContractId,
+				    :allocationPercentage,
+				    NULL,
+				    :subtotalAmount,
+				    :discountAmount,
+				    :taxAmount,
+				    :totalAmount,
+				    0,
+				    0,
+				    :totalAmount,
+				    :currencyCode,
+				    :collectionModeCode,
+				    'PENDING',
+				    :dueDate,
+				    :primaryPayer,
+				    CAST(:metadata AS jsonb),
+				    TRUE,
+				    now(),
+				    :actorId
+				)
+				ON CONFLICT (
+				    invoice_id,
+				    payment_role_id,
+				    payer_role_id,
+				    payment_when_id,
+				    COALESCE(payer_client_role_id, '00000000-0000-0000-0000-000000000000'::uuid),
+				    COALESCE(organization_account_id, '00000000-0000-0000-0000-000000000000'::uuid)
+				)
+				WHERE is_active = TRUE
+				DO UPDATE SET
+				    subtotal_amount = transactions.invoice_payment_allocation.subtotal_amount + EXCLUDED.subtotal_amount,
+				    discount_amount = transactions.invoice_payment_allocation.discount_amount + EXCLUDED.discount_amount,
+				    tax_amount = transactions.invoice_payment_allocation.tax_amount + EXCLUDED.tax_amount,
+				    total_amount = transactions.invoice_payment_allocation.total_amount + EXCLUDED.total_amount,
+				    balance_amount = transactions.invoice_payment_allocation.balance_amount + EXCLUDED.total_amount,
+				    modified_on = now(),
+				    modified_by = :actorId
+				""";
+
+		for (CorporateInvoiceContext context : contexts) {
+			CorporateContext organization = context.organization();
+
+			for (CorporateSplitLine line : context.lines()) {
+				SplitRule rule = line.rule();
+				AmountSplit amount = line.amounts();
+
+				jdbc.update(sql, allocationParams(
+						applicationId, invoiceId, memberClientRoleId, actorId, currencyCode,
+						rule, amount.memberPercentage(), amount.memberSubtotal(), amount.memberDiscount(),
+						amount.memberTax(), amount.memberTotal(), memberPayerRoleId,
+						memberClientRoleId, null, null, null,
+						"IMMEDIATE", LocalDate.now(), true, "MEMBER"));
+
+				if (amount.corporateTotal().compareTo(BigDecimal.ZERO) > 0) {
+					jdbc.update(sql, allocationParams(
+							applicationId, invoiceId, memberClientRoleId, actorId, currencyCode,
+							rule, amount.corporatePercentage(), amount.corporateSubtotal(),
+							amount.corporateDiscount(), amount.corporateTax(), amount.corporateTotal(),
+							corporatePayerRoleId, organization.organizationClientRoleId(),
+							organization.organizationId(), organization.organizationAccountId(),
+							organization.organizationContractId(), "ON_ACCOUNT",
+							corporateAgreementSplitService.calculateDueDate(organization), false, "CORPORATE"));
+				}
+			}
+		}
+	}
+
+	private MapSqlParameterSource allocationParams(
+			UUID applicationId,
+			UUID invoiceId,
+			UUID beneficiaryClientRoleId,
+			UUID actorId,
+			String currencyCode,
+			SplitRule rule,
+			BigDecimal percentage,
+			BigDecimal subtotal,
+			BigDecimal discount,
+			BigDecimal tax,
+			BigDecimal total,
+			UUID payerRoleId,
+			UUID payerClientRoleId,
+			UUID organizationId,
+			UUID organizationAccountId,
+			UUID organizationContractId,
+			String collectionMode,
+			LocalDate dueDate,
+			boolean primaryPayer,
+			String payerCode) {
+
+		return new MapSqlParameterSource()
+				.addValue("applicationId", applicationId)
+				.addValue("invoiceId", invoiceId)
+				.addValue("allocationRuleId", rule.agreementGroupPaymentAllocationId())
+				.addValue("paymentRoleId", rule.paymentRoleId())
+				.addValue("payerRoleId", payerRoleId)
+				.addValue("allocationTypeId", rule.paymentAllocationTypeId())
+				.addValue("paymentWhenId", rule.paymentWhenId())
+				.addValue("beneficiaryClientRoleId", beneficiaryClientRoleId)
+				.addValue("payerClientRoleId", payerClientRoleId)
+				.addValue("organizationId", organizationId)
+				.addValue("organizationAccountId", organizationAccountId)
+				.addValue("organizationContractId", organizationContractId)
+				.addValue("allocationPercentage", percentage)
+				.addValue("subtotalAmount", scale2(subtotal))
+				.addValue("discountAmount", scale2(discount))
+				.addValue("taxAmount", scale2(tax))
+				.addValue("totalAmount", scale2(total))
+				.addValue("currencyCode", currency(currencyCode))
+				.addValue("collectionModeCode", collectionMode)
+				.addValue("dueDate", dueDate)
+				.addValue("primaryPayer", primaryPayer)
+				.addValue("metadata", "{\"source\":\"POS_CORPORATE_SPLIT\",\"payer\":\"" + payerCode + "\"}")
+				.addValue("actorId", actorId);
+	}
+
+	private void postCorporateAmountsToOrganization(
+			UUID invoiceId,
+			String invoiceNumber,
+			UUID applicationId,
+			String currencyCode,
+			UUID actorId,
+			List<CorporateInvoiceContext> contexts) {
+
+		for (CorporateInvoiceContext context : contexts) {
+			CorporateContext organization = context.organization();
+			OrganizationTotals totals = corporateTotals(context);
+
+			if (totals.total().compareTo(BigDecimal.ZERO) <= 0) {
+				continue;
+			}
+
+			int accountUpdated = jdbc.update(
+					"""
+					UPDATE organization.organization_account
+					SET current_balance = current_balance + :amount,
+					    modified_on = now(),
+					    modified_by = :actorId
+					WHERE organization_account_id = :organizationAccountId
+					  AND application_id = :applicationId
+					  AND is_active = TRUE
+					  AND on_account_enabled = TRUE
+					  AND cau_blocked = FALSE
+					  AND (max_transaction_limit = 0 OR :amount <= max_transaction_limit)
+					  AND (credit_limit = 0 OR current_balance + :amount <= credit_limit)
+					""",
+					new MapSqlParameterSource()
+							.addValue("organizationAccountId", organization.organizationAccountId())
+							.addValue("applicationId", applicationId)
+							.addValue("amount", totals.total())
+							.addValue("actorId", actorId));
+
+			if (accountUpdated != 1) {
+				throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+						"Corporate amount cannot be posted because the organization account is blocked, "
+								+ "disabled, or exceeds its credit/transaction limit");
+			}
+
+			jdbc.update(
+					"""
+					INSERT INTO organization.organization_invoice_link (
+					    organization_invoice_link_id,
+					    organization_id,
+					    application_id,
+					    organization_account_id,
+					    organization_contract_id,
+					    invoice_id,
+					    invoice_number,
+					    invoice_date,
+					    due_date,
+					    description,
+					    subtotal_amount,
+					    discount_amount,
+					    tax_amount,
+					    total_amount,
+					    paid_amount,
+					    balance_amount,
+					    currency_code,
+					    invoice_status_code,
+					    metadata,
+					    is_active,
+					    created_on,
+					    created_by
+					) VALUES (
+					    gen_random_uuid(),
+					    :organizationId,
+					    :applicationId,
+					    :organizationAccountId,
+					    :organizationContractId,
+					    :invoiceId,
+					    :invoiceNumber,
+					    CURRENT_DATE,
+					    :dueDate,
+					    'Corporate sponsor portion',
+					    :subtotal,
+					    :discount,
+					    :tax,
+					    :total,
+					    0,
+					    :total,
+					    :currencyCode,
+					    'OPEN',
+					    jsonb_build_object('source','POS_CORPORATE_SPLIT','agreementId',CAST(:agreementId AS text)),
+					    TRUE,
+					    now(),
+					    :actorId
+					)
+					ON CONFLICT (application_id, lower(invoice_number))
+					WHERE is_active = TRUE
+					DO UPDATE SET
+					    organization_account_id = EXCLUDED.organization_account_id,
+					    organization_contract_id = EXCLUDED.organization_contract_id,
+					    subtotal_amount = EXCLUDED.subtotal_amount,
+					    discount_amount = EXCLUDED.discount_amount,
+					    tax_amount = EXCLUDED.tax_amount,
+					    total_amount = EXCLUDED.total_amount,
+					    balance_amount = EXCLUDED.total_amount - organization.organization_invoice_link.paid_amount,
+					    due_date = EXCLUDED.due_date,
+					    invoice_status_code = CASE
+					        WHEN organization.organization_invoice_link.paid_amount >= EXCLUDED.total_amount THEN 'PAID'
+					        WHEN organization.organization_invoice_link.paid_amount > 0 THEN 'PARTIAL'
+					        ELSE 'OPEN'
+					    END,
+					    metadata = organization.organization_invoice_link.metadata || EXCLUDED.metadata,
+					    modified_on = now(),
+					    modified_by = :actorId
+					""",
+					new MapSqlParameterSource()
+							.addValue("organizationId", organization.organizationId())
+							.addValue("applicationId", applicationId)
+							.addValue("organizationAccountId", organization.organizationAccountId())
+							.addValue("organizationContractId", organization.organizationContractId())
+							.addValue("invoiceId", invoiceId)
+							.addValue("invoiceNumber", invoiceNumber)
+							.addValue("dueDate", corporateAgreementSplitService.calculateDueDate(organization))
+							.addValue("subtotal", totals.subtotal())
+							.addValue("discount", totals.discount())
+							.addValue("tax", totals.tax())
+							.addValue("total", totals.total())
+							.addValue("currencyCode", currency(currencyCode))
+							.addValue("agreementId", context.agreementId())
+							.addValue("actorId", actorId));
+		}
+	}
+
+	private OrganizationTotals corporateTotals(CorporateInvoiceContext context) {
+		BigDecimal subtotal = BigDecimal.ZERO;
+		BigDecimal discount = BigDecimal.ZERO;
+		BigDecimal tax = BigDecimal.ZERO;
+		BigDecimal total = BigDecimal.ZERO;
+
+		for (CorporateSplitLine line : context.lines()) {
+			AmountSplit amount = line.amounts();
+			subtotal = subtotal.add(amount.corporateSubtotal());
+			discount = discount.add(amount.corporateDiscount());
+			tax = tax.add(amount.corporateTax());
+			total = total.add(amount.corporateTotal());
+		}
+
+		return new OrganizationTotals(scale2(subtotal), scale2(discount), scale2(tax), scale2(total));
+	}
+
+	private record CorporateSplitLine(
+			UUID agreementId,
+			UUID agreementVersionId,
+			UUID invoiceEntityId,
+			SplitRule rule,
+			AmountSplit amounts) {
+	}
+
+	private record CorporateInvoiceContext(
+			UUID agreementId,
+			UUID agreementVersionId,
+			CorporateContext organization,
+			List<CorporateSplitLine> lines) {
+	}
+
+	private record OrganizationTotals(
+			BigDecimal subtotal,
+			BigDecimal discount,
+			BigDecimal tax,
+			BigDecimal total) {
 	}
 }

@@ -63,7 +63,7 @@ public class WebhookMembershipPurchasePublisher {
     try {
       return jdbc.queryForObject("""
           SELECT agreement_id
-          FROM agreements.client_agreement
+          FROM client_agreements.client_agreement
           WHERE client_agreement_id = ?
           LIMIT 1
           """, UUID.class, clientAgreementId);

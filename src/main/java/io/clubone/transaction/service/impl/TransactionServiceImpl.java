@@ -17,9 +17,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.util.CollectionUtils;
+import org.springframework.web.server.ResponseStatusException;
+
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.clubone.transaction.dao.InvoiceDAO;
@@ -93,12 +98,15 @@ public class TransactionServiceImpl implements TransactionService {
 	@Autowired
 	private WebhookMembershipPurchasePublisher webhookMembershipPurchasePublisher;
 
+	@Autowired
+	private NamedParameterJdbcTemplate jdbc;
+
 	private static final Logger logger = LoggerFactory.getLogger(TransactionServiceImpl.class);
 
 	@Value("${clubone.transaction.finalize.amount-tolerance:0.09}")
 	private BigDecimal finalizeAmountTolerance;
 
-	@Value("${clubone.transaction.finalize.partially-paid-status-name:}")
+	@Value("${clubone.transaction.finalize.partially-paid-status-name:PARTIALLY_PAID}")
 	private String partiallyPaidStatusName;
 
 	@Value("${clubone.invoice.initial-status-name:PENDING}")
@@ -577,11 +585,29 @@ public class TransactionServiceImpl implements TransactionService {
 				: new BigDecimal("0.09").setScale(2, RoundingMode.HALF_UP);
 		BigDecimal invoiceTotal = nz(invoiceSummary.getTotalAmount()).setScale(2, RoundingMode.HALF_UP);
 
+		/*
+		 * Corporate split behavior is activated only when the invoice has an active
+		 * CORPORATE payer allocation. All existing non-corporate flows continue to
+		 * use the original invoice-total based behavior.
+		 */
+		final boolean corporateSplitInvoice = hasCorporatePaymentAllocations(req.getInvoiceId());
+		CorporateAllocationBalances corporateBalancesBefore = corporateSplitInvoice
+				? loadCorporateAllocationBalances(req.getInvoiceId())
+				: CorporateAllocationBalances.zero();
+		BigDecimal memberOutstandingBefore = corporateBalancesBefore.memberBalance()
+				.setScale(2, RoundingMode.HALF_UP);
+
+		logger.info(
+				"[transactions/v3/finalize] step=corporate_split_detection invoiceId={} corporateSplitInvoice={} memberOutstanding={} corporateOutstanding={}",
+				req.getInvoiceId(), corporateSplitInvoice, memberOutstandingBefore,
+				corporateBalancesBefore.corporateBalance());
+
 		BigDecimal payAmount;
 		if (req.getAmountToPayNow() != null) {
 			payAmount = req.getAmountToPayNow().setScale(2, RoundingMode.HALF_UP);
 		} else {
-			payAmount = invoiceTotal;
+			// Never default a corporate split invoice to the full invoice total.
+			payAmount = corporateSplitInvoice ? memberOutstandingBefore : invoiceTotal;
 		}
 
 		if (invoiceTotal.compareTo(BigDecimal.ZERO) > 0 && payAmount.compareTo(BigDecimal.ZERO) <= 0) {
@@ -592,17 +618,26 @@ public class TransactionServiceImpl implements TransactionService {
 					"Payment amount must be greater than zero");
 		}
 
-		if (payAmount.subtract(invoiceTotal).compareTo(tolerance) > 0) {
+		BigDecimal maximumCollectibleNow = corporateSplitInvoice ? memberOutstandingBefore : invoiceTotal;
+		if (payAmount.subtract(maximumCollectibleNow).compareTo(tolerance) > 0) {
 			logger.warn(
-					"[transactions/v3/finalize] step=amount_validation outcome=reject invoiceId={} payAmount={} invoiceTotal={} tolerance={} reason=overpayment",
-					req.getInvoiceId(), payAmount, invoiceTotal, tolerance);
+					"[transactions/v3/finalize] step=amount_validation outcome=reject invoiceId={} payAmount={} maximumCollectibleNow={} invoiceTotal={} tolerance={} corporateSplitInvoice={} reason=overpayment",
+					req.getInvoiceId(), payAmount, maximumCollectibleNow, invoiceTotal, tolerance,
+					corporateSplitInvoice);
 			return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null,
-					"Payment amount exceeds invoice balance");
+					corporateSplitInvoice
+							? "Payment amount exceeds outstanding member responsibility"
+							: "Payment amount exceeds invoice balance");
 		}
 
-		boolean fullPayment = invoiceTotal.compareTo(BigDecimal.ZERO) == 0
-				|| payAmount.add(tolerance).compareTo(invoiceTotal) >= 0;
-		boolean partialPayment = invoiceTotal.compareTo(BigDecimal.ZERO) > 0 && !fullPayment;
+		boolean fullPayment = corporateSplitInvoice
+				? memberOutstandingBefore.compareTo(BigDecimal.ZERO) == 0
+						|| payAmount.add(tolerance).compareTo(memberOutstandingBefore) >= 0
+				: invoiceTotal.compareTo(BigDecimal.ZERO) == 0
+						|| payAmount.add(tolerance).compareTo(invoiceTotal) >= 0;
+		boolean partialPayment = corporateSplitInvoice
+				? memberOutstandingBefore.compareTo(BigDecimal.ZERO) > 0 && !fullPayment
+				: invoiceTotal.compareTo(BigDecimal.ZERO) > 0 && !fullPayment;
 		logger.info(
 				"[transactions/v3/finalize] step=amount_validation outcome=ok invoiceId={} invoiceTotal={} payAmount={} tolerance={} fullPayment={} partialPayment={}",
 				req.getInvoiceId(), invoiceTotal, payAmount, tolerance, fullPayment, partialPayment);
@@ -610,7 +645,7 @@ public class TransactionServiceImpl implements TransactionService {
 		UUID clientPaymentTransactionId = null;
 
 		if (!isManual) {
-			if (invoiceTotal.compareTo(BigDecimal.ZERO) > 0 && req.getClientPaymentTransactionId() == null) {
+			if (payAmount.compareTo(BigDecimal.ZERO) > 0 && req.getClientPaymentTransactionId() == null) {
 				logger.warn(
 						"[transactions/v3/finalize] step=gateway_payment outcome=reject invoiceId={} reason=missing_client_payment_transaction_id",
 						req.getInvoiceId());
@@ -636,7 +671,7 @@ public class TransactionServiceImpl implements TransactionService {
 					req.getInvoiceId(), clientPaymentTransactionId);
 		}
 
-		if (invoiceTotal.compareTo(BigDecimal.ZERO) <= 0) {
+		if (payAmount.compareTo(BigDecimal.ZERO) <= 0) {
 			clientPaymentTransactionId = isManual ? null : req.getClientPaymentTransactionId();
 			logger.info(
 					"[transactions/v3/finalize] step=collect_payment outcome=zero_balance invoiceId={} clientPaymentTransactionId={}",
@@ -661,6 +696,14 @@ public class TransactionServiceImpl implements TransactionService {
 		}
 		// else: gateway — clientPaymentTransactionId already set and idempotency checked above
 
+		if (corporateSplitInvoice && payAmount.compareTo(BigDecimal.ZERO) > 0) {
+			applyPaymentToCorporateMemberAllocations(
+					req.getInvoiceId(),
+					payAmount,
+					req.getCreatedBy(),
+					tolerance);
+		}
+
 		TransactionDTO txn = new TransactionDTO();
 		txn.setClientAgreementId(effectiveClientAgreementId);
 		txn.setLevelId(req.getLevelId());
@@ -679,7 +722,137 @@ public class TransactionServiceImpl implements TransactionService {
 		logger.info("[transactions/v3/finalize] step=notification invoiceId={} completed", req.getInvoiceId());
 
 		String responseStatusName;
-		if (partialPayment) {
+		boolean purchaseCompleted;
+
+		if (corporateSplitInvoice) {
+
+		    CorporateAllocationBalances balancesAfter =
+		            loadCorporateAllocationBalances(
+		                    req.getInvoiceId()
+		            );
+
+		    boolean memberResponsibilityPaid =
+		            balancesAfter.memberBalance()
+		                    .compareTo(tolerance) <= 0;
+
+		    boolean corporateResponsibilityPaid =
+		            balancesAfter.corporateBalance()
+		                    .compareTo(tolerance) <= 0;
+
+		    /*
+		     * The purchase is complete when the MEMBER portion is paid.
+		     * The corporate portion is already accepted as an ON_ACCOUNT
+		     * receivable.
+		     */
+		    purchaseCompleted = memberResponsibilityPaid;
+
+		    boolean organizationBalancePending =
+		            memberResponsibilityPaid
+		                    && !corporateResponsibilityPaid;
+
+		    fullPayment =
+		            memberResponsibilityPaid
+		                    && corporateResponsibilityPaid;
+
+		    if (fullPayment) {
+
+		        /*
+		         * Both MEMBER and CORPORATE responsibilities are paid.
+		         * Persist invoice as PAID.
+		         */
+		        UUID paidStatusId =
+		                transactionDAO.findInvoiceStatusIdByName(
+		                        "PAID"
+		                );
+
+		        transactionDAO.updateInvoiceStatusAndPaidFlag(
+		                req.getInvoiceId(),
+		                paidStatusId,
+		                true,
+		                req.getCreatedBy()
+		        );
+
+		        responseStatusName = "PAID";
+		        partialPayment = false;
+
+		    } else if (organizationBalancePending) {
+
+		        /*
+		         * MEMBER checkout is complete, but the organization still owes
+		         * its ON_ACCOUNT portion.
+		         *
+		         * Database accounting status remains PARTIALLY_PAID.
+		         */
+		        UUID partialStatusId =
+		                resolvePartialPaymentInvoiceStatusId();
+
+		        transactionDAO.updateInvoiceStatusAndPaidFlag(
+		                req.getInvoiceId(),
+		                partialStatusId,
+		                false,
+		                req.getCreatedBy()
+		        );
+
+		        /*
+		         * POS response represents the MEMBER checkout result, not the
+		         * organization receivable status.
+		         */
+		        responseStatusName = "PAID";
+
+		        /*
+		         * Do not return "Partial payment recorded", because the frontend
+		         * interprets that as checkout failure.
+		         */
+		        partialPayment = false;
+
+		    } else {
+
+		        /*
+		         * The MEMBER responsibility is still outstanding.
+		         */
+		        UUID pendingStatusId =
+		                transactionDAO.findInvoiceStatusIdByName(
+		                        invoiceInitialStatusName
+		                );
+
+		        transactionDAO.updateInvoiceStatusAndPaidFlag(
+		                req.getInvoiceId(),
+		                pendingStatusId,
+		                false,
+		                req.getCreatedBy()
+		        );
+
+		        responseStatusName =
+		                transactionDAO.currentInvoiceStatusName(
+		                        req.getInvoiceId()
+		                );
+
+		        partialPayment = true;
+		    }
+
+		    logger.info(
+		            "[transactions/v3/finalize] " +
+		            "step=invoice_update " +
+		            "branch=corporate_split " +
+		            "invoiceId={} " +
+		            "responseStatus={} " +
+		            "persistedInvoiceStatus={} " +
+		            "memberBalance={} " +
+		            "corporateBalance={} " +
+		            "purchaseCompleted={}",
+		            req.getInvoiceId(),
+		            responseStatusName,
+		            transactionDAO.currentInvoiceStatusName(
+		                    req.getInvoiceId()
+		            ),
+		            balancesAfter.memberBalance(),
+		            balancesAfter.corporateBalance(),
+		            purchaseCompleted
+		    );
+
+		} else if (partialPayment) {
+		    // Keep your existing non-corporate partial-payment block unchanged.
+			purchaseCompleted = false;
 			logger.info("[transactions/v3/finalize] step=invoice_update branch=partial invoiceId={} payAmount={} invoiceTotal={}",
 					req.getInvoiceId(), payAmount, invoiceTotal);
 			UUID partialStatusId = resolvePartialPaymentInvoiceStatusId();
@@ -690,6 +863,7 @@ public class TransactionServiceImpl implements TransactionService {
 					"[transactions/v3/finalize] step=invoice_update branch=partial outcome=ok invoiceId={} status={} paidAmount={} of invoiceTotal={}",
 					req.getInvoiceId(), responseStatusName, payAmount, invoiceTotal);
 		} else {
+			purchaseCompleted = true;
 			logger.info("[transactions/v3/finalize] step=invoice_update branch=full_payment invoiceId={}",
 					req.getInvoiceId());
 			UUID paidStatusId = transactionDAO.findInvoiceStatusIdByName("PAID");
@@ -697,11 +871,21 @@ public class TransactionServiceImpl implements TransactionService {
 			responseStatusName = transactionDAO.currentInvoiceStatusName(req.getInvoiceId());
 			logger.info("[transactions/v3/finalize] step=invoice_update outcome=marked_paid invoiceId={} status={}",
 					req.getInvoiceId(), responseStatusName);
+		}
+
+		/*
+		 * For a corporate split invoice, the purchase is complete once the member
+		 * responsibility is paid. The remaining organization responsibility is an
+		 * accepted ON_ACCOUNT receivable, so the existing agreement activation,
+		 * webhook and billing-schedule side effects must still run.
+		 */
+		if (purchaseCompleted) {
 			logger.info("[transactions/v3/finalize] step=activate_agreement invoiceId={} actor={}", req.getInvoiceId(),
 					req.getCreatedBy());
 			transactionDAO.activateAgreementAndClientStatusForInvoice(req.getInvoiceId(), req.getCreatedBy());
 			logger.info("[transactions/v3/finalize] step=activate_agreement outcome=ok invoiceId={}",
 					req.getInvoiceId());
+
 			if (effectiveClientAgreementId != null) {
 				webhookMembershipPurchasePublisher.publishAfterPaymentSuccess(
 						req.getInvoiceId(),
@@ -713,6 +897,7 @@ public class TransactionServiceImpl implements TransactionService {
 						payAmount,
 						req.getCreatedBy());
 			}
+
 			if (!CollectionUtils.isEmpty(req.getBillingQuoteFinalizeSpecs())) {
 				try {
 					logger.info(
@@ -760,8 +945,160 @@ public class TransactionServiceImpl implements TransactionService {
 		logger.info(
 				"[transactions/v3/finalize] step=complete invoiceId={} invoiceStatus={} transactionId={} clientPaymentTransactionId={} partialPayment={}",
 				req.getInvoiceId(), responseStatusName, transactionId, clientPaymentTransactionId, partialPayment);
-		return new FinalizeTransactionResponse(req.getInvoiceId(), responseStatusName, clientPaymentTransactionId,
-				transactionId, partialPayment ? "Partial payment recorded" : "");
+		String responseMessage;
+
+		if (corporateSplitInvoice && purchaseCompleted) {
+		    responseMessage = "";
+		} else if (partialPayment) {
+		    responseMessage = "Partial payment recorded";
+		} else {
+		    responseMessage = "";
+		}
+
+		return new FinalizeTransactionResponse(
+		        req.getInvoiceId(),
+		        responseStatusName,
+		        clientPaymentTransactionId,
+		        transactionId,
+		        responseMessage
+		);
+	}
+
+
+	private boolean hasCorporatePaymentAllocations(UUID invoiceId) {
+		if (invoiceId == null) {
+			return false;
+		}
+		Boolean exists = jdbc.queryForObject(
+				"""
+				SELECT EXISTS (
+				    SELECT 1
+				    FROM transactions.invoice_payment_allocation ipa
+				    JOIN agreements.lu_agreement_group_payer_role ppr
+				      ON ppr.payer_role_id = ipa.payer_role_id
+				     AND ppr.is_active = TRUE
+				    WHERE ipa.invoice_id = :invoiceId
+				      AND ipa.is_active = TRUE
+				      AND UPPER(TRIM(ppr.code)) = 'CORPORATE'
+				)
+				""",
+				new MapSqlParameterSource().addValue("invoiceId", invoiceId),
+				Boolean.class);
+		return Boolean.TRUE.equals(exists);
+	}
+
+	private CorporateAllocationBalances loadCorporateAllocationBalances(UUID invoiceId) {
+		return jdbc.query(
+				"""
+				SELECT
+				    COALESCE(SUM(CASE
+				        WHEN UPPER(TRIM(ppr.code)) = 'MEMBER' THEN ipa.balance_amount
+				        ELSE 0
+				    END), 0) AS member_balance,
+				    COALESCE(SUM(CASE
+				        WHEN UPPER(TRIM(ppr.code)) = 'CORPORATE' THEN ipa.balance_amount
+				        ELSE 0
+				    END), 0) AS corporate_balance
+				FROM transactions.invoice_payment_allocation ipa
+				JOIN agreements.lu_agreement_group_payer_role ppr
+				  ON ppr.payer_role_id = ipa.payer_role_id
+				 AND ppr.is_active = TRUE
+				WHERE ipa.invoice_id = :invoiceId
+				  AND ipa.is_active = TRUE
+				""",
+				new MapSqlParameterSource().addValue("invoiceId", invoiceId),
+				rs -> rs.next()
+						? new CorporateAllocationBalances(
+								nz(rs.getBigDecimal("member_balance")).setScale(2, RoundingMode.HALF_UP),
+								nz(rs.getBigDecimal("corporate_balance")).setScale(2, RoundingMode.HALF_UP))
+						: CorporateAllocationBalances.zero());
+	}
+
+	private void applyPaymentToCorporateMemberAllocations(
+			UUID invoiceId,
+			BigDecimal paymentAmount,
+			UUID actorId,
+			BigDecimal tolerance) {
+
+		BigDecimal remaining = nz(paymentAmount).setScale(2, RoundingMode.HALF_UP);
+		List<MemberAllocationBalance> rows = jdbc.query(
+				"""
+				SELECT
+				    ipa.invoice_payment_allocation_id,
+				    ipa.balance_amount
+				FROM transactions.invoice_payment_allocation ipa
+				JOIN agreements.lu_agreement_group_payer_role ppr
+				  ON ppr.payer_role_id = ipa.payer_role_id
+				 AND ppr.is_active = TRUE
+				WHERE ipa.invoice_id = :invoiceId
+				  AND ipa.is_active = TRUE
+				  AND UPPER(TRIM(ppr.code)) = 'MEMBER'
+				  AND ipa.balance_amount > 0
+				ORDER BY
+				    CASE WHEN ipa.collection_mode_code = 'IMMEDIATE' THEN 0 ELSE 1 END,
+				    ipa.due_date NULLS LAST,
+				    ipa.created_on,
+				    ipa.invoice_payment_allocation_id
+				FOR UPDATE OF ipa
+				""",
+				new MapSqlParameterSource().addValue("invoiceId", invoiceId),
+				(rs, rowNum) -> new MemberAllocationBalance(
+						rs.getObject("invoice_payment_allocation_id", UUID.class),
+						nz(rs.getBigDecimal("balance_amount")).setScale(2, RoundingMode.HALF_UP)));
+
+		if (rows.isEmpty() && remaining.compareTo(tolerance) > 0) {
+			throw new ResponseStatusException(HttpStatus.CONFLICT,
+					"Corporate split invoice has no outstanding MEMBER payment allocation");
+		}
+
+		for (MemberAllocationBalance row : rows) {
+			if (remaining.compareTo(BigDecimal.ZERO) <= 0) {
+				break;
+			}
+			BigDecimal applied = remaining.min(row.balanceAmount());
+			jdbc.update(
+					"""
+					UPDATE transactions.invoice_payment_allocation
+					SET
+					    paid_amount = paid_amount + :applied,
+					    balance_amount = GREATEST(
+					        total_amount - (paid_amount + :applied) + refunded_amount,
+					        0
+					    ),
+					    allocation_status_code = CASE
+					        WHEN total_amount - (paid_amount + :applied) + refunded_amount <= :tolerance
+					            THEN 'PAID'
+					        WHEN paid_amount + :applied > 0
+					            THEN 'PARTIAL'
+					        ELSE allocation_status_code
+					    END,
+					    modified_on = CURRENT_TIMESTAMP,
+					    modified_by = :actorId
+					WHERE invoice_payment_allocation_id = :allocationId
+					""",
+					new MapSqlParameterSource()
+							.addValue("applied", applied)
+							.addValue("tolerance", tolerance)
+							.addValue("actorId", actorId)
+							.addValue("allocationId", row.allocationId()));
+			remaining = remaining.subtract(applied).setScale(2, RoundingMode.HALF_UP);
+		}
+
+		if (remaining.compareTo(tolerance) > 0) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+					"Payment amount exceeds outstanding member responsibility by " + remaining);
+		}
+	}
+
+	private record MemberAllocationBalance(UUID allocationId, BigDecimal balanceAmount) {
+	}
+
+	private record CorporateAllocationBalances(BigDecimal memberBalance, BigDecimal corporateBalance) {
+		private static CorporateAllocationBalances zero() {
+			return new CorporateAllocationBalances(
+					BigDecimal.ZERO.setScale(2),
+					BigDecimal.ZERO.setScale(2));
+		}
 	}
 
 	private void enqueueGlPaymentCollected(FinalizeTransactionRequest req, UUID clientPaymentTransactionId,

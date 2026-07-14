@@ -251,9 +251,10 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    billing_run_id,
 				    billing_collection_type_id,
 				    created_on,
-				    created_by
+				    created_by,
+				    application_id
 				) VALUES (
-				    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?
+				    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?,'5949a200-82fb-4171-9001-0f77ac439011'
 				);
 								""";
 
@@ -277,8 +278,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    quantity, unit_price, discount_amount, tax_amount, total_amount,
 				    created_on, created_by, price_plan_template_id, client_agreement_id,
 				    billing_schedule_id, subscription_instance_id, cycle_number,
-				    service_period_start, service_period_end, charge_line_kind_id, entity_version_id
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				    service_period_start, service_period_end, charge_line_kind_id, entity_version_id,application_id
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,'5949a200-82fb-4171-9001-0f77ac439011')
 				""";
 
 		// 4) Insert taxes per entity
