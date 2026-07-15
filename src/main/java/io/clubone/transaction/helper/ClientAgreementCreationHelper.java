@@ -257,17 +257,19 @@ public class ClientAgreementCreationHelper {
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.setAccept(List.of(MediaType.APPLICATION_JSON));
 
-        String requestJson = serializeForLog(caReq);
-        String retryCurl = buildCurlCommand(url, headers, requestJson);
-
-        logger.info(
-                "[client-agreement-create] outbound_request " +
-                        "method=POST url={} headers={} body={} retryCurl={}",
-                url,
-                sanitizeHeadersForLog(headers),
-                requestJson,
-                retryCurl
-        );
+        // Avoid serializing full request/curl on every call under load (CPU + I/O).
+        if (logger.isDebugEnabled()) {
+            String requestJson = serializeForLog(caReq);
+            logger.debug(
+                    "[client-agreement-create] outbound_request method=POST url={} headers={} body={} retryCurl={}",
+                    url,
+                    sanitizeHeadersForLog(headers),
+                    requestJson,
+                    buildCurlCommand(url, headers, requestJson)
+            );
+        } else {
+            logger.info("[client-agreement-create] outbound_request method=POST url={}", url);
+        }
 
         HttpEntity<ClientAgreementCreateRequest> entity =
                 new HttpEntity<>(caReq, headers);
@@ -284,14 +286,22 @@ public class ClientAgreementCreationHelper {
 
             long elapsedMs = System.currentTimeMillis() - startedAt;
 
-            logger.info(
-                    "[client-agreement-create] downstream_response " +
-                            "url={} status={} elapsedMs={} body={}",
-                    url,
-                    resp.getStatusCode().value(),
-                    elapsedMs,
-                    serializeForLog(resp.getBody())
-            );
+            if (elapsedMs >= 1000 || logger.isDebugEnabled()) {
+                logger.info(
+                        "[client-agreement-create] downstream_response url={} status={} elapsedMs={} body={}",
+                        url,
+                        resp.getStatusCode().value(),
+                        elapsedMs,
+                        serializeForLog(resp.getBody())
+                );
+            } else {
+                logger.info(
+                        "[client-agreement-create] downstream_response url={} status={} elapsedMs={}",
+                        url,
+                        resp.getStatusCode().value(),
+                        elapsedMs
+                );
+            }
 
             if (!resp.getStatusCode().is2xxSuccessful()) {
                 throw new ResponseStatusException(
@@ -327,6 +337,8 @@ public class ClientAgreementCreationHelper {
         } catch (HttpStatusCodeException ex) {
             long elapsedMs = System.currentTimeMillis() - startedAt;
             String responseBody = ex.getResponseBodyAsString();
+            String requestJson = serializeForLog(caReq);
+            String retryCurl = buildCurlCommand(url, headers, requestJson);
 
             logger.error(
                     "[client-agreement-create] outcome=http_error " +
@@ -341,8 +353,12 @@ public class ClientAgreementCreationHelper {
                     ex
             );
 
+            // Preserve 429/503 from agreement capacity gates; only map unexpected 5xx to BAD_GATEWAY.
+            HttpStatus mapped = ex.getStatusCode().value() == 503 || ex.getStatusCode().value() == 429
+                    ? HttpStatus.SERVICE_UNAVAILABLE
+                    : HttpStatus.BAD_GATEWAY;
             throw new ResponseStatusException(
-                    HttpStatus.BAD_GATEWAY,
+                    mapped,
                     "Error calling client-agreement service: HTTP " +
                             ex.getStatusCode().value() +
                             " body=" + responseBody,
@@ -354,6 +370,8 @@ public class ClientAgreementCreationHelper {
 
         } catch (Exception ex) {
             long elapsedMs = System.currentTimeMillis() - startedAt;
+            String requestJson = serializeForLog(caReq);
+            String retryCurl = buildCurlCommand(url, headers, requestJson);
 
             logger.error(
                     "[client-agreement-create] outcome=transport_error " +
