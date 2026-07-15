@@ -3,22 +3,26 @@ package io.clubone.transaction.service.impl;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.sql.Timestamp;
+import java.time.DayOfWeek;
 import java.time.Instant;
 import java.time.LocalDate;
-import java.time.DayOfWeek;
-import java.time.temporal.TemporalAdjusters;
 import java.time.temporal.ChronoUnit;
+import java.time.temporal.TemporalAdjusters;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Optional;
-import java.util.UUID;
-import java.util.Map;
 import java.util.Set;
-import java.util.HashSet;
-import java.util.Locale;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.BiConsumer;
 
 import org.springframework.beans.factory.annotation.Autowired;
@@ -28,7 +32,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 import org.springframework.web.server.ResponseStatusException;
@@ -44,6 +50,7 @@ import io.clubone.transaction.helper.OrganizationAgreementLinkService;
 import io.clubone.transaction.helper.OrganizationContractLinkResult;
 import io.clubone.transaction.helper.TransactionUtils;
 import io.clubone.transaction.response.CreateInvoiceResponse;
+import io.clubone.transaction.security.TenantContext;
 import io.clubone.transaction.service.CorporateAgreementSplitService;
 import io.clubone.transaction.service.CorporateAgreementSplitService.AmountSplit;
 import io.clubone.transaction.service.CorporateAgreementSplitService.CorporateContext;
@@ -105,6 +112,8 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	@Autowired
 	private NamedParameterJdbcTemplate jdbc;
 
+	private final TransactionTemplate invoicePersistTx;
+
 
 	@Value("${clubone.invoice.initial-status-name:PENDING}")
 	private String initialInvoiceStatusName;
@@ -116,8 +125,16 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	@Value("${clubone.invoice.fallback-billing-collection-type-code:STANDARD}")
 	private String fallbackBillingCollectionTypeCode;
 
+	@Autowired
+	public TransactionServiceV2Impl(PlatformTransactionManager transactionManager) {
+		this.invoicePersistTx = new TransactionTemplate(transactionManager);
+	}
+
+	/**
+	 * Not {@code @Transactional}: line building + client-agreement HTTP must not hold a Hikari
+	 * connection. Persist phase uses {@link #invoicePersistTx}.
+	 */
 	@Override
-	@Transactional
 	public CreateInvoiceResponse createInvoice(InvoiceRequest request) {
 
 		if (request == null) {
@@ -297,8 +314,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 						itemLine.setQuantity(finalQty);
 
-						System.out.println("[QTY][PACKAGE] parentQty=" + parentQty + " entQty=" + entQty + " finalQty="
-								+ finalQty + " planTemplateId=" + it.getPricePlanTemplateId());
 
 						// ✅ 1) discountIds FIRST (ADD, not overwrite)
 						List<UUID> pkgDiscountIds = mergeDiscountIds(e, it);
@@ -343,8 +358,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 							applyPromotionEffectOnLeafLine(itemLine, eff);
 						}
 
-						System.out.println("[DEBUG][BEFORE_TAX][PACKAGE] itemId=" + it.getEntityId() + " gross="
-								+ scale2(lineSub(itemLine)) + " discount=" + scale2(itemLine.getDiscountAmount()));
 
 						// ✅ 3) TAX THIRD (NET)
 						computeTaxesFromItemOnly(itemLine, it, invoiceLevelId);
@@ -498,9 +511,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 								itemLine.setQuantity(finalQty);
 
-								System.out.println("[QTY][AGREEMENT] agreementQty=" + agreementQty + " bundleQty="
-										+ bundleQty + " parentQty=" + parentQty + " entQty=" + entQty + " finalQty="
-										+ finalQty + " planTemplateId=" + it.getPricePlanTemplateId());
 
 								// ✅ 1) discountIds FIRST
 								List<UUID> agrDiscountIds = mergeDiscountIds(e, it);
@@ -571,13 +581,9 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 								try {
 									isFee = transactionDAO.isFeeItem(it.getEntityId(), applicationId);
 								} catch (Exception ex) {
-									System.out.println("[FEE_LOOKUP_FAILED] itemId=" + it.getEntityId() + " err="
-											+ ex.getMessage());
 								}
 
 								if (isFee) {
-									System.out.println(
-											"[FEE] current only. No proration, no next. itemId=" + it.getEntityId());
 
 									// keep qty & full gross; do NOT prorate
 									itemLine.setQuantity(billedQty);
@@ -650,10 +656,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 								final CalendarBillingContext ctx = resolveCalendarBillingContextForPlan(
 										it.getPricePlanTemplateId(), startDate);
 
-								System.out.println("[AGREEMENT][CTX] itemId=" + it.getEntityId() + " freq=" + ctx.freq
-										+ " interval=" + ctx.interval + " periodStart=" + ctx.periodStart
-										+ " periodEndExclusive=" + ctx.periodEndExclusive + " cutoffDate="
-										+ ctx.cutoffDate + " startAfterCutoff=" + ctx.startAfterCutoff);
 
 								// (A) CURRENT prorated (remaining in current period)
 								itemLine.setQuantity(billedQty); // capture qty before collapse
@@ -723,8 +725,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 									lines.add(nextLine);
 
-									System.out.println("[AGREEMENT][NEXT_FULL] itemId=" + it.getEntityId()
-											+ " nextStart=" + nextStart);
 								}
 
 							}
@@ -766,7 +766,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			 */
 			case "bundle": {
 
-				System.out.println("Bundle");
 				if (e.getEntityId() == null) {
 					throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
 							"entityId is required when entity type is Bundle (business id of the bundle)");
@@ -804,17 +803,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 					Set<UUID> ids = collectItemIds(e.getItems());
 					bundleFx = promotionEffectDAO.fetchEffectsByPromotionForItems(bundlePromotionId, ids,
 							applicationId);
-					try {
-						System.out.println("Ids " + mapper.writeValueAsString(ids));
-					} catch (JsonProcessingException ex) {
-						ex.printStackTrace();
-					}
-				}
-
-				try {
-					System.out.println("PromoId" + bundlePromotionId + " Data " + mapper.writeValueAsString(bundleFx));
-				} catch (JsonProcessingException ex) {
-					ex.printStackTrace();
 				}
 
 				if (e.getItems() != null) {
@@ -831,8 +819,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 						itemLine.setQuantity(finalQty);
 
-						System.out.println("[QTY][BUNDLE] parentQty=" + parentQty + " entQty=" + entQty + " finalQty="
-								+ finalQty + " planTemplateId=" + it.getPricePlanTemplateId());
 
 						List<UUID> bundleDiscountIds = mergeDiscountIds(e, it);
 						if (!bundleDiscountIds.isEmpty()) {
@@ -876,8 +862,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 							applyPromotionEffectOnLeafLine(itemLine, eff);
 						}
 
-						System.out.println("[DEBUG][BEFORE_TAX][BUNDLE] itemId=" + it.getEntityId() + " gross="
-								+ scale2(lineSub(itemLine)) + " discount=" + scale2(itemLine.getDiscountAmount()));
 
 						computeTaxesFromItemOnly(itemLine, it, invoiceLevelId);
 
@@ -911,7 +895,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			 */
 			case "item": {
 
-				System.out.println("Item Case " + e.getClientAgreementId());
 
 				UUID itemPromotionId = e.getPromotionId();
 				Map<UUID, PromotionItemEffectDTO> itemFx = Collections.emptyMap();
@@ -941,8 +924,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 						itemLine.setQuantity(finalQty);
 
-						System.out.println("[QTY][ITEM_LIST] parentQty=" + parentQty + " entQty=" + entQty
-								+ " finalQty=" + finalQty + " planTemplateId=" + it.getPricePlanTemplateId());
 
 						List<UUID> itemListDiscountIds = mergeDiscountIds(e, it);
 						if (!itemListDiscountIds.isEmpty()) {
@@ -986,8 +967,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 							applyPromotionEffectOnLeafLine(itemLine, eff);
 						}
 
-						System.out.println("[DEBUG][BEFORE_TAX][ITEM] itemId=" + it.getEntityId() + " gross="
-								+ scale2(lineSub(itemLine)) + " discount=" + scale2(itemLine.getDiscountAmount()));
 
 						computeTaxesFromItemOnly(itemLine, it, invoiceLevelId);
 
@@ -1028,8 +1007,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 					itemLine.setQuantity(finalQty);
 					itemLine.setClientAgreementId(e.getClientAgreementId());
 
-					System.out.println("[QTY][ITEM_SINGLE] parentQty=" + parentQty + " entQty=" + entQty + " finalQty="
-							+ finalQty + " planTemplateId=" + e.getPricePlanTemplateId());
 
 					List<UUID> itemSingleDiscountIds = mergeDiscountIds(e, it);
 					if (!itemSingleDiscountIds.isEmpty()) {
@@ -1072,8 +1049,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 						applyPromotionEffectOnLeafLine(itemLine, eff);
 					}
 
-					System.out.println("[DEBUG][BEFORE_TAX][ITEM_SINGLE] itemId=" + it.getEntityId() + " gross="
-							+ scale2(lineSub(itemLine)) + " discount=" + scale2(itemLine.getDiscountAmount()));
 
 					computeTaxesFromItemOnly(itemLine, it, invoiceLevelId);
 
@@ -1102,23 +1077,15 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 		inv.setLineItems(lines);
 
-		System.out.println("[INVOICE][TOTALS] netSubTotal=" + scale2(subTotal) + " taxTotal=" + scale2(taxTotal)
-				+ " discountTotal=" + scale2(discountTotal) + " finalTotal=" + scale2(subTotal.add(taxTotal)));
-
-		/*
-		 * try { if (isAgreement) { System.out.println("For Agreement"); UUID
-		 * clientAgreementId = caHelper.createClientAgreementFromInvoice(request);
-		 * inv.setClientAgreementId(clientAgreementId); } } catch (Exception ex) {
-		 * System.out.println("Error in agreement purchase" + ex.getMessage()); }
-		 */
 		UUID firstClientAgreementId = null;
-
-		final List<OrganizationContractLinkResult>
-		        organizationContractLinks = new ArrayList<>();
 
 		if (isAgreement) {
 
 			final Map<UUID, UUID> parentMap = buildParentMap(lines);
+
+			// Create client-agreements outside any DB TX (and in parallel when multiple).
+			record PendingAgreement(Entity entity, UUID rootInvoiceEntityId, InvoiceRequest perAgreementReq) {}
+			List<PendingAgreement> pendingAgreements = new ArrayList<>();
 
 			for (Entity e : request.getEntities()) {
 
@@ -1158,81 +1125,134 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 				perAgreementReq.setBillingCollectionTypeId(request.getBillingCollectionTypeId());
 				perAgreementReq.setBillingCollectionTypeCode(request.getBillingCollectionTypeCode());
 				perAgreementReq.setEntities(List.of(e));
+				pendingAgreements.add(new PendingAgreement(e, agreementRootInvoiceEntityId, perAgreementReq));
+			}
 
-				UUID clientAgreementId = caHelper.createClientAgreementFromInvoice(perAgreementReq);
+			List<UUID> createdClientAgreementIds;
+			if (pendingAgreements.size() <= 1) {
+				createdClientAgreementIds = new ArrayList<>(pendingAgreements.size());
+				for (PendingAgreement p : pendingAgreements) {
+					createdClientAgreementIds.add(caHelper.createClientAgreementFromInvoice(p.perAgreementReq()));
+				}
+			} else {
+				final TenantContext tenantCtx = TenantContext.get();
+				try (ExecutorService vexec = Executors.newVirtualThreadPerTaskExecutor()) {
+					List<CompletableFuture<UUID>> futures = pendingAgreements.stream()
+							.map(p -> CompletableFuture.supplyAsync(() -> {
+								TenantContext previous = TenantContext.get();
+								try {
+									if (tenantCtx != null) {
+										TenantContext.set(tenantCtx);
+									}
+									return caHelper.createClientAgreementFromInvoice(p.perAgreementReq());
+								} finally {
+									if (previous != null) {
+										TenantContext.set(previous);
+									} else {
+										TenantContext.clear();
+									}
+								}
+							}, vexec))
+							.toList();
+					try {
+						createdClientAgreementIds = futures.stream().map(CompletableFuture::join).toList();
+					} catch (CompletionException ex) {
+						Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+						if (cause instanceof RuntimeException re) {
+							throw re;
+						}
+						throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+								"Client agreement create failed: " + cause.getMessage(), cause);
+					}
+				}
+			}
+
+			for (int i = 0; i < pendingAgreements.size(); i++) {
+				PendingAgreement p = pendingAgreements.get(i);
+				UUID clientAgreementId = createdClientAgreementIds.get(i);
 
 				if (firstClientAgreementId == null) {
 					firstClientAgreementId = clientAgreementId;
 				}
-				/*
-				 * If request.clientRoleId is the organization purchasing
-				 * client, create organization.organization_contract.
-				 *
-				 * For a normal member clientRoleId, the service returns
-				 * organizationPurchase=false and does not insert anything.
-				 */
-				OrganizationContractLinkResult organizationLink =
-				        organizationAgreementLinkService
-				                .linkPurchasedAgreement(
-				                        request.getApplicationId(),
-				                        request.getClientRoleId(),
-				                        clientAgreementId,
-				                        request.getCreatedBy()
-				                );
 
-				if (organizationLink.organizationPurchase()) {
-				    organizationContractLinks.add(organizationLink);
-				}
-
-				stampClientAgreementForRoot(lines, parentMap, agreementRootInvoiceEntityId, clientAgreementId);
+				stampClientAgreementForRoot(lines, parentMap, p.rootInvoiceEntityId(), clientAgreementId);
 			}
 
 			if (firstClientAgreementId != null) {
 				inv.setClientAgreementId(firstClientAgreementId);
 			}
+
+			return persistInvoiceAfterClientAgreements(
+					request, inv, corporateInvoiceContexts, applicationId, createdClientAgreementIds);
 		}
 
-		UUID invoiceId = transactionDAO.saveInvoiceV3(inv);
-		/*
-		 * Link every organization client agreement created by this
-		 * invoice to the saved invoice.
-		 */
-		for (OrganizationContractLinkResult link
-		        : organizationContractLinks) {
+		return persistInvoiceAfterClientAgreements(
+				request, inv, corporateInvoiceContexts, applicationId, List.of());
+	}
 
-		    organizationAgreementLinkService.linkInvoice(
-		            request.getApplicationId(),
-		            link.organizationId(),
-		            link.organizationContractId(),
-		            link.clientAgreementId(),
-		            invoiceId,
-		            request.getCreatedBy()
-		    );
-		}
-		String invoiceNumber = transactionDAO.findInvoiceNumber(invoiceId);
+	/**
+	 * Persist invoice (+ org links / corporate splits) in a short DB transaction.
+	 * Client-agreement HTTP must already be done before this runs so Hikari connections
+	 * are not held across RestTemplate latency.
+	 */
+	private CreateInvoiceResponse persistInvoiceAfterClientAgreements(
+			InvoiceRequest request,
+			InvoiceDTO inv,
+			List<CorporateInvoiceContext> corporateInvoiceContexts,
+			UUID applicationId,
+			List<UUID> createdClientAgreementIds) {
 
-		if (!corporateInvoiceContexts.isEmpty()) {
-			saveCorporatePaymentAllocations(
-					invoiceId, applicationId, request.getClientRoleId(), request.getCurrencyCode(),
-					request.getCreatedBy(), corporateInvoiceContexts);
+		return invoicePersistTx.execute(status -> {
+			List<OrganizationContractLinkResult> organizationContractLinks = new ArrayList<>();
+			if (createdClientAgreementIds != null && !createdClientAgreementIds.isEmpty()) {
+				for (UUID clientAgreementId : createdClientAgreementIds) {
+					OrganizationContractLinkResult organizationLink =
+							organizationAgreementLinkService.linkPurchasedAgreement(
+									request.getApplicationId(),
+									request.getClientRoleId(),
+									clientAgreementId,
+									request.getCreatedBy());
+					if (organizationLink.organizationPurchase()) {
+						organizationContractLinks.add(organizationLink);
+					}
+				}
+			}
 
-			postCorporateAmountsToOrganization(
-					invoiceId, invoiceNumber, applicationId, request.getCurrencyCode(),
-					request.getCreatedBy(), corporateInvoiceContexts);
-		}
+			UUID invoiceId = transactionDAO.saveInvoiceV3(inv);
+			for (OrganizationContractLinkResult link : organizationContractLinks) {
+				organizationAgreementLinkService.linkInvoice(
+						request.getApplicationId(),
+						link.organizationId(),
+						link.organizationContractId(),
+						link.clientAgreementId(),
+						invoiceId,
+						request.getCreatedBy());
+			}
+			String invoiceNumber = transactionDAO.findInvoiceNumber(invoiceId);
 
-		CreateInvoiceResponse response = new CreateInvoiceResponse();
-		response.setInvoiceId(invoiceId);
-		response.setInvoiceNumber(invoiceNumber);
-		response.setStatus(transactionDAO.currentInvoiceStatusName(invoiceId));
-		response.setClientAgreementId(inv.getClientAgreementId());
-		response.setBillingRunId(inv.getBillingRunId());
-		response.setBillingCollectionTypeId(inv.getBillingCollectionTypeId());
-		if (StringUtils.hasText(request.getBillingCollectionTypeCode())) {
-			response.setBillingCollectionTypeCode(request.getBillingCollectionTypeCode().trim());
-		}
-		response.setLineItemCount(inv.getLineItems() != null ? inv.getLineItems().size() : 0);
-		return response;
+			if (corporateInvoiceContexts != null && !corporateInvoiceContexts.isEmpty()) {
+				saveCorporatePaymentAllocations(
+						invoiceId, applicationId, request.getClientRoleId(), request.getCurrencyCode(),
+						request.getCreatedBy(), corporateInvoiceContexts);
+
+				postCorporateAmountsToOrganization(
+						invoiceId, invoiceNumber, applicationId, request.getCurrencyCode(),
+						request.getCreatedBy(), corporateInvoiceContexts);
+			}
+
+			CreateInvoiceResponse response = new CreateInvoiceResponse();
+			response.setInvoiceId(invoiceId);
+			response.setInvoiceNumber(invoiceNumber);
+			response.setStatus(transactionDAO.currentInvoiceStatusName(invoiceId));
+			response.setClientAgreementId(inv.getClientAgreementId());
+			response.setBillingRunId(inv.getBillingRunId());
+			response.setBillingCollectionTypeId(inv.getBillingCollectionTypeId());
+			if (StringUtils.hasText(request.getBillingCollectionTypeCode())) {
+				response.setBillingCollectionTypeCode(request.getBillingCollectionTypeCode().trim());
+			}
+			response.setLineItemCount(inv.getLineItems() != null ? inv.getLineItems().size() : 0);
+			return response;
+		});
 	}
 
 	/*
@@ -1297,9 +1317,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		row.setAdjustmentTypeId(d.getAdjustmentTypeId());
 		line.setDiscounts(Collections.singletonList(row));
 
-		System.out.println("[DISCOUNT] itemId=" + it.getEntityId() + " qty=" + qty + " lineSub=" + scale2(lineSub)
-				+ " mode=" + d.getCalculationMode() + " disc=" + scale2(discAmt) + " totalDiscNow="
-				+ scale2(line.getDiscountAmount()));
 	}
 
 	private int qtyFromParentAndEntitlement(int parentQty, int entQty) {
@@ -1373,8 +1390,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			line.setPromotions(list);
 		}
 
-		System.out.println("[PROMO] itemId=" + line.getEntityId() + " promoDiscount=" + scale2(promoDiscount) + " pvId="
-				+ pvId + " paId=" + paId + " peId=" + peId);
 	}
 
 	/*
@@ -1426,10 +1441,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		line.setUnitPrice(perUnitAfter); // ✅ per-unit price so totals remain correct
 		line.setDiscountAmount(scale2(discBefore));// total discount remains same
 
-		System.out.println("[PRORATE][KEEP_QTY] itemId=" + line.getEntityId() + " qty=" + qtyInt + " factor=" + f
-				+ " grossBefore=" + scale2(grossBefore) + " discBefore=" + scale2(discBefore) + " netBefore="
-				+ scale2(netBefore) + " netAfter=" + scale2(netAfter) + " grossAfter=" + scale2(grossAfter)
-				+ " perUnitAfter=" + perUnitAfter);
 	}
 
 	/**
@@ -1677,7 +1688,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	private InvoiceEntityDTO buildItemLineFromPayload(Item it, UUID parentId, UUID itemTypeId, LocalDate startDate,
 			boolean prorateEnabled, Entity lineContextParent, UUID invoiceLevelId) {
 		InvoiceEntityDTO line = new InvoiceEntityDTO();
-		System.out.println("buildItemLineFromPayload");
 
 		line.setInvoiceEntityId(UUID.randomUUID());
 		line.setParentInvoiceEntityId(parentId);
@@ -1694,7 +1704,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		line.setQuantity(1);
 
 		boolean isProrateApplicable = prorateEnabled;
-		System.out.println("isProrateApplicable " + isProrateApplicable);
 
 		BigDecimal unitPrice;
 
@@ -1709,7 +1718,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 				BundlePriceCycleBandDTO band = bundlePriceBands.get(0);
 
 				BigDecimal fullUnit = scale2(bd(band.getUnitPrice().doubleValue()));
-				System.out.println("Full Unit " + fullUnit);
 
 				unitPrice = fullUnit;
 
@@ -1719,8 +1727,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 					BigDecimal prorationFactor = transactionUtils.prorateFactorForCurrentMonth(prorationDate);
 					unitPrice = scale2(fullUnit.multiply(prorationFactor));
 
-					System.out.println("[PRORATE][BANDS] itemId=" + it.getEntityId() + " baseUnit=" + fullUnit
-							+ " factor=" + prorationFactor + " proratedUnit=" + unitPrice);
 				}
 			}
 
@@ -1733,8 +1739,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 				BigDecimal prorationFactorNb = transactionUtils.prorateFactorForCurrentMonth(prorationDate2);
 				unitPrice = scale2(unitPrice.multiply(prorationFactorNb));
 
-				System.out.println("[PRORATE][NO_BANDS] itemId=" + it.getEntityId() + " baseUnit="
-						+ scale2(bd(it.getPrice())) + " factor=" + prorationFactorNb + " proratedUnit=" + unitPrice);
 			}
 		}
 
@@ -1803,7 +1807,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	/** TAX: item-level only (tax on NET = gross - discount) */
 	private void computeTaxesFromItemOnly(InvoiceEntityDTO line, Item it, UUID levelId) {
 
-		System.out.println("computeTaxesFromItemOnly(net)");
 
 		if (it != null && it.getTaxAmount() != null) {
 			BigDecimal amt = scale2(nz(it.getTaxAmount()));
@@ -1846,8 +1849,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		if (taxableBase.compareTo(BigDecimal.ZERO) < 0)
 			taxableBase = BigDecimal.ZERO;
 
-		System.out.println("[TAX][BASE] itemId=" + it.getEntityId() + " gross=" + scale2(gross) + " discount="
-				+ scale2(discount) + " taxableBase=" + scale2(taxableBase));
 
 		List<InvoiceEntityTaxDTO> taxes = new ArrayList<>();
 		BigDecimal taxAmount = BigDecimal.ZERO;
@@ -1871,7 +1872,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	}
 
 	private static void finalizeLeaf(InvoiceEntityDTO line) {
-		System.out.println("finalizeLeaf");
 		BigDecimal q = BigDecimal.valueOf(def(line.getQuantity(), 1));
 		BigDecimal sub = nz(line.getUnitPrice()).multiply(q);
 		BigDecimal total = sub.add(nz(line.getTaxAmount())).subtract(nz(line.getDiscountAmount()));
@@ -2047,9 +2047,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 		final var seed = transactionDAO.fetchInvoiceSeed(invoiceId);
 		final UUID createdBy = (actorId != null ? actorId : seed.createdBy());
-		System.out.println("cycleNumber " + cycleNumber);
 		final var oldLines = transactionDAO.fetchBillableLeafLines(invoiceId, cycleNumber, clientAgreementId);
-		System.out.println("Client agreement id " + clientAgreementId);
 		if (oldLines == null || oldLines.isEmpty()) {
 			throw new IllegalStateException("No billable leaf lines found for invoiceId=" + invoiceId);
 		}
@@ -2086,9 +2084,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 			items.add(it);
 
-			System.out.println("[FUTURE][QTY] itemId=" + itemId + " planTemplateId=" + planTemplateId + " entQty="
-					+ entQty + " finalQty=" + finalQty + " cycle=" + cycleNumber + " bandId="
-					+ bandRef.getPriceCycleBandId());
 		}
 
 		Entity root = new Entity();
@@ -2099,7 +2094,6 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 		root.setItems(items);
 		root.setClientAgreementId(clientAgreementId);
-		System.out.println("Root agreement " + root.getClientAgreementId());
 		if (promotionId != null) {
 			root.setPromotionId(promotionId);
 		}
@@ -2171,10 +2165,8 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
 					"levelId is required in request body (JSON may use locationId)");
 		}
-		System.out.println("Building future invoice request");
 		InvoiceRequest req = buildFutureInvoiceRequest(invoiceId, cycleNumber, billingDate, actorId, clientAgreementId,
 				applicationId, levelId);
-		System.out.println("Creating future invoice");
 		return createInvoice(req);
 	}
 	

@@ -1,14 +1,17 @@
 package io.clubone.transaction.config;
 
+import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Executors;
 
 import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.web.client.RestTemplate;
 
 import io.clubone.transaction.security.TenantContext;
@@ -44,9 +47,18 @@ public class RestTemplateConfig {
       }
       return execution.execute(request, body);
     });
+
+    // JDK HttpClient + virtual-thread executor: connection reuse without Apache pool dep.
+    HttpClient httpClient = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(3))
+        .executor(Executors.newVirtualThreadPerTaskExecutor())
+        .version(HttpClient.Version.HTTP_1_1)
+        .build();
+    JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
+    requestFactory.setReadTimeout(Duration.ofSeconds(10));
+
     return builder
-        .setConnectTimeout(Duration.ofSeconds(3))
-        .setReadTimeout(Duration.ofSeconds(15))
+        .requestFactory(() -> requestFactory)
         .additionalInterceptors(interceptors)
         .build();
   }
