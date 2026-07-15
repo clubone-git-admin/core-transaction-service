@@ -20,12 +20,15 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.web.server.ResponseStatusException;
 import io.clubone.transaction.config.LoadPressureGuard;
 import io.clubone.transaction.security.TenantHttpHeaders;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 
 import java.math.BigDecimal;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.*;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public class ClientAgreementCreationHelper {
@@ -37,21 +40,32 @@ public class ClientAgreementCreationHelper {
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
     private final LoadPressureGuard loadPressureGuard;
+    private final ClientAgreementDirectCreator directCreator;
+    private final Cache<String, AgreementMeta> agreementMetaCache = Caffeine.newBuilder()
+            .maximumSize(5_000)
+            .expireAfterWrite(1, TimeUnit.HOURS)
+            .build();
 
     // e.g. http://client-agreement-service:8080
     @Value("${client.agreement.service.base-url}")
     private String clientAgreementServiceBaseUrl;
+
+    /** direct = same-DB insert (high load); http = call agreement-service */
+    @Value("${client.agreement.create.mode:direct}")
+    private String createMode;
 
     public ClientAgreementCreationHelper(
             NamedParameterJdbcTemplate namedJdbc,
             @org.springframework.beans.factory.annotation.Qualifier("clientAgreementRestTemplate")
             RestTemplate restTemplate,
             ObjectMapper objectMapper,
-            LoadPressureGuard loadPressureGuard) {
+            LoadPressureGuard loadPressureGuard,
+            ClientAgreementDirectCreator directCreator) {
         this.namedJdbc = namedJdbc;
         this.restTemplate = restTemplate;
         this.objectMapper = objectMapper;
         this.loadPressureGuard = loadPressureGuard;
+        this.directCreator = directCreator;
     }
 
     /**
@@ -158,7 +172,14 @@ public class ClientAgreementCreationHelper {
         }
         caReq.setUpsellItems(Collections.emptyList());
 
-        // 3) Call downstream API
+        // 3) Prefer same-DB insert under high load (skips gateway + agreement pool).
+        return createClientAgreement(caReq);
+    }
+
+    private UUID createClientAgreement(ClientAgreementCreateRequest caReq) {
+        if ("direct".equalsIgnoreCase(createMode != null ? createMode.trim() : "direct")) {
+            return loadPressureGuard.withClientAgreementHttp(() -> directCreator.create(caReq));
+        }
         return invokeClientAgreementCreate(caReq);
     }
 
@@ -172,6 +193,13 @@ public class ClientAgreementCreationHelper {
                                                UUID requestedAgreementVersionId,
                                                UUID levelReferenceOrId,
                                                LocalDate asOf) {
+
+        String cacheKey = agreementId + "|" + requestedAgreementVersionId + "|"
+                + levelReferenceOrId + "|" + asOf;
+        AgreementMeta cached = agreementMetaCache.getIfPresent(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
 
         String sql = """
             WITH lvl AS (
@@ -240,7 +268,11 @@ public class ClientAgreementCreationHelper {
                 .addValue("asOf", asOf);
 
         try {
-            return namedJdbc.queryForObject(sql, params, new AgreementMetaRowMapper());
+            AgreementMeta meta = namedJdbc.queryForObject(sql, params, new AgreementMetaRowMapper());
+            if (meta != null) {
+                agreementMetaCache.put(cacheKey, meta);
+            }
+            return meta;
         } catch (EmptyResultDataAccessException ex) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "Unable to resolve agreement metadata for agreementId=" + agreementId +
