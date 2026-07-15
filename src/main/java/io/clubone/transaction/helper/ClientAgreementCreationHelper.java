@@ -44,6 +44,7 @@ public class ClientAgreementCreationHelper {
 
     public ClientAgreementCreationHelper(
             NamedParameterJdbcTemplate namedJdbc,
+            @org.springframework.beans.factory.annotation.Qualifier("clientAgreementRestTemplate")
             RestTemplate restTemplate,
             ObjectMapper objectMapper,
             LoadPressureGuard loadPressureGuard) {

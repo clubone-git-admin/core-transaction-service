@@ -25,15 +25,29 @@ public class RestTemplateConfig {
   @Bean
   @Primary
   public RestTemplate restTemplate(RestTemplateBuilder builder) {
-    return buildWithTenantHeaders(builder);
+    return buildWithTenantHeaders(builder, Duration.ofSeconds(3), Duration.ofSeconds(8));
   }
 
   @Bean("userAccessRestTemplate")
   public RestTemplate userAccessRestTemplate(RestTemplateBuilder builder) {
-    return buildWithTenantHeaders(builder);
+    return buildWithTenantHeaders(builder, Duration.ofSeconds(3), Duration.ofSeconds(8));
   }
 
-  private static RestTemplate buildWithTenantHeaders(RestTemplateBuilder builder) {
+  /**
+   * Client-agreement create under load can exceed the default 8s before the API gateway
+   * times out; keep this slightly under typical ALB/gateway idle so we fail in-app first.
+   */
+  @Bean("clientAgreementRestTemplate")
+  public RestTemplate clientAgreementRestTemplate(
+      RestTemplateBuilder builder,
+      @org.springframework.beans.factory.annotation.Value("${clubone.load.client-agreement-http.read-timeout-ms:15000}")
+      long readTimeoutMs) {
+    long readMs = Math.max(5_000L, readTimeoutMs);
+    return buildWithTenantHeaders(builder, Duration.ofSeconds(3), Duration.ofMillis(readMs));
+  }
+
+  private static RestTemplate buildWithTenantHeaders(
+      RestTemplateBuilder builder, Duration connectTimeout, Duration readTimeout) {
     List<ClientHttpRequestInterceptor> interceptors = new ArrayList<>();
     interceptors.add((request, body, execution) -> {
       TenantContext ctx = TenantContext.get();
@@ -48,14 +62,13 @@ public class RestTemplateConfig {
       return execution.execute(request, body);
     });
 
-    // JDK HttpClient + virtual-thread executor: connection reuse without Apache pool dep.
     HttpClient httpClient = HttpClient.newBuilder()
-        .connectTimeout(Duration.ofSeconds(3))
+        .connectTimeout(connectTimeout)
         .executor(Executors.newVirtualThreadPerTaskExecutor())
         .version(HttpClient.Version.HTTP_1_1)
         .build();
     JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
-		requestFactory.setReadTimeout(Duration.ofSeconds(8));
+    requestFactory.setReadTimeout(readTimeout);
 
     return builder
         .requestFactory(() -> requestFactory)
