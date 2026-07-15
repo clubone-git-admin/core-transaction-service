@@ -15,7 +15,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -27,6 +27,9 @@ import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
+
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 
 import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.security.AccessContext;
@@ -66,10 +69,23 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 	private static final Logger logger = LoggerFactory.getLogger(TransactionDAOImpl.class);
 
-	/** Process-wide caches for tiny lookup tables hit on every invoice create. */
-	private static final ConcurrentHashMap<String, UUID> INVOICE_STATUS_ID_CACHE = new ConcurrentHashMap<>();
-	private static final ConcurrentHashMap<String, UUID> ENTITY_TYPE_ID_BY_NAME_CACHE = new ConcurrentHashMap<>();
-	private static final ConcurrentHashMap<UUID, EntityTypeDTO> ENTITY_TYPE_BY_ID_CACHE = new ConcurrentHashMap<>();
+	/** Lookup caches: expire after 1 hour (min TTL policy). */
+	private static final Cache<String, UUID> INVOICE_STATUS_ID_CACHE = Caffeine.newBuilder()
+			.maximumSize(256)
+			.expireAfterWrite(1, TimeUnit.HOURS)
+			.build();
+	private static final Cache<String, UUID> ENTITY_TYPE_ID_BY_NAME_CACHE = Caffeine.newBuilder()
+			.maximumSize(256)
+			.expireAfterWrite(1, TimeUnit.HOURS)
+			.build();
+	private static final Cache<UUID, EntityTypeDTO> ENTITY_TYPE_BY_ID_CACHE = Caffeine.newBuilder()
+			.maximumSize(256)
+			.expireAfterWrite(1, TimeUnit.HOURS)
+			.build();
+	private static final Cache<String, UUID> ACTIVATE_LOOKUP_CACHE = Caffeine.newBuilder()
+			.maximumSize(64)
+			.expireAfterWrite(1, TimeUnit.HOURS)
+			.build();
 
 	private static final String ENTITY_TYPE_SQL = """
 			SELECT entity_type
@@ -497,9 +513,28 @@ public class TransactionDAOImpl implements TransactionDAO {
 			throw new IllegalArgumentException("invoice status name is required");
 		}
 		String key = statusName.trim().toLowerCase(Locale.ROOT);
-		UUID cached = INVOICE_STATUS_ID_CACHE.get(key);
+		try {
+			return INVOICE_STATUS_ID_CACHE.get(key, k -> cluboneJdbcTemplate.queryForObject("""
+					SELECT invoice_status_id
+					FROM transactions.lu_invoice_status
+					WHERE LOWER(TRIM(status_name)) = LOWER(TRIM(?))
+					  AND COALESCE(is_active, true) = true
+					LIMIT 1
+					""", UUID.class, statusName.trim()));
+		} catch (EmptyResultDataAccessException e) {
+			throw new IllegalStateException("No active lu_invoice_status row for status_name=" + statusName.trim(), e);
+		}
+	}
+
+	@Override
+	public Optional<UUID> tryFindInvoiceStatusIdByName(String statusName) {
+		if (statusName == null || statusName.isBlank()) {
+			return Optional.empty();
+		}
+		String key = statusName.trim().toLowerCase(Locale.ROOT);
+		UUID cached = INVOICE_STATUS_ID_CACHE.getIfPresent(key);
 		if (cached != null) {
-			return cached;
+			return Optional.of(cached);
 		}
 		try {
 			UUID id = cluboneJdbcTemplate.queryForObject("""
@@ -512,25 +547,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 			if (id != null) {
 				INVOICE_STATUS_ID_CACHE.put(key, id);
 			}
-			return id;
-		} catch (EmptyResultDataAccessException e) {
-			throw new IllegalStateException("No active lu_invoice_status row for status_name=" + statusName.trim(), e);
-		}
-	}
-
-	@Override
-	public Optional<UUID> tryFindInvoiceStatusIdByName(String statusName) {
-		if (statusName == null || statusName.isBlank()) {
-			return Optional.empty();
-		}
-		try {
-			return Optional.of(cluboneJdbcTemplate.queryForObject("""
-					SELECT invoice_status_id
-					FROM transactions.lu_invoice_status
-					WHERE LOWER(TRIM(status_name)) = LOWER(TRIM(?))
-					  AND COALESCE(is_active, true) = true
-					LIMIT 1
-					""", UUID.class, statusName.trim()));
+			return Optional.ofNullable(id);
 		} catch (EmptyResultDataAccessException e) {
 			return Optional.empty();
 		}
@@ -584,10 +601,6 @@ public class TransactionDAOImpl implements TransactionDAO {
 	@Override
 	public UUID findEntityTypeIdByName(String name) {
 		String key = name == null ? "" : name.trim().toLowerCase(Locale.ROOT);
-		UUID cached = ENTITY_TYPE_ID_BY_NAME_CACHE.get(key);
-		if (cached != null) {
-			return cached;
-		}
 		String sql = """
 				    SELECT entity_type_id
 				    FROM transactions.lu_entity_type
@@ -595,11 +608,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 				      AND is_active = true
 				    LIMIT 1
 				""";
-		UUID id = cluboneJdbcTemplate.queryForObject(sql, UUID.class, name);
-		if (id != null) {
-			ENTITY_TYPE_ID_BY_NAME_CACHE.put(key, id);
-		}
-		return id;
+		return ENTITY_TYPE_ID_BY_NAME_CACHE.get(key, k -> cluboneJdbcTemplate.queryForObject(sql, UUID.class, name));
 	}
 
 	private static final String SQL = """
@@ -698,7 +707,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 		if (entityTypeId == null) {
 			return Optional.empty();
 		}
-		EntityTypeDTO cached = ENTITY_TYPE_BY_ID_CACHE.get(entityTypeId);
+		EntityTypeDTO cached = ENTITY_TYPE_BY_ID_CACHE.getIfPresent(entityTypeId);
 		if (cached != null) {
 			return Optional.of(cached);
 		}
@@ -1329,6 +1338,10 @@ public class TransactionDAOImpl implements TransactionDAO {
 				cycleNumber, cycleNumber);
 	}
 
+	private UUID resolveCachedLookupId(String cacheKey, String sql) {
+		return ACTIVATE_LOOKUP_CACHE.get(cacheKey, k -> cluboneJdbcTemplate.queryForObject(sql, UUID.class));
+	}
+
 	@Override
 	public void activateAgreementAndClientStatusForInvoice(UUID invoiceId, UUID actorId) {
 		if (invoiceId == null) {
@@ -1338,17 +1351,33 @@ public class TransactionDAOImpl implements TransactionDAO {
 			throw new IllegalArgumentException("actorId must not be null");
 		}
 
-		// 1) Update client_agreements.client_agreement status to ACTIVE
+		// Resolve lookup IDs once (process cache) instead of correlated subqueries per UPDATE.
+		UUID activeAgreementStatusId = resolveCachedLookupId("ca_status_ACTIVE", """
+				SELECT las.client_agreement_status_id
+				FROM client_agreements.lu_client_agreement_status las
+				WHERE las.code = 'ACTIVE'
+				  AND las.is_active = TRUE
+				LIMIT 1
+				""");
+		UUID activeClientStatusId = resolveCachedLookupId("client_status_Active", """
+				SELECT lcs.lu_client_status_id
+				FROM clients.lu_client_status lcs
+				WHERE lcs.client_status_type = 'Active'
+				  AND COALESCE(lcs.is_active, TRUE) = TRUE
+				LIMIT 1
+				""");
+		UUID activeAccountStatusId = resolveCachedLookupId("client_account_status_Active", """
+				SELECT lcas.lu_client_account_status_id
+				FROM clients.lu_client_account_status lcas
+				WHERE lcas.client_account_status_type = 'Active'
+				  AND COALESCE(lcas.is_active, TRUE) = TRUE
+				LIMIT 1
+				""");
+
 		final String updateClientAgreementSql = """
 				UPDATE client_agreements.client_agreement ca
 				SET
-				    client_agreement_status_id = (
-				        SELECT las.client_agreement_status_id
-				        FROM client_agreements.lu_client_agreement_status las
-				        WHERE las.code = 'ACTIVE'
-				          AND las.is_active = TRUE
-				        LIMIT 1
-				    ),
+				    client_agreement_status_id = ?,
 				    is_active = TRUE,
 				    modified_on = NOW(),
 				    modified_by = ?
@@ -1359,35 +1388,15 @@ public class TransactionDAOImpl implements TransactionDAO {
 				  AND i.client_agreement_id = ca.client_agreement_id
 				""";
 
-		// order of args must match the ? placeholders: modified_by, invoice_id, application_id
-		cluboneJdbcTemplate.update(updateClientAgreementSql, actorId, invoiceId, AccessContext.applicationId());
+		cluboneJdbcTemplate.update(updateClientAgreementSql, activeAgreementStatusId, actorId, invoiceId,
+				AccessContext.applicationId());
 
-		// 2) Update clients.client_role_status to ACTIVE values, again using joins &
-		// subqueries
 		final String updateClientRoleStatusSql = """
 				UPDATE clients.client_role_status crs
 				SET
-				    agreement_status_id = (
-				        SELECT las.client_agreement_status_id
-				        FROM client_agreements.lu_client_agreement_status las
-				        WHERE las.code = 'ACTIVE'
-				          AND las.is_active = TRUE
-				        LIMIT 1
-				    ),
-				    status_id = (
-				        SELECT lcs.lu_client_status_id
-				        FROM clients.lu_client_status lcs
-				        WHERE lcs.client_status_type = 'Active'
-				          AND COALESCE(lcs.is_active, TRUE) = TRUE
-				        LIMIT 1
-				    ),
-				    account_status_id = (
-				        SELECT lcas.lu_client_account_status_id
-				        FROM clients.lu_client_account_status lcas
-				        WHERE lcas.client_account_status_type = 'Active'
-				          AND COALESCE(lcas.is_active, TRUE) = TRUE
-				        LIMIT 1
-				    ),
+				    agreement_status_id = ?,
+				    status_id = ?,
+				    account_status_id = ?,
 				    is_active = TRUE,
 				    modified_on = NOW(),
 				    modified_by = ?
@@ -1401,7 +1410,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 				  AND COALESCE(crs.is_active, TRUE) = TRUE
 				""";
 
-		cluboneJdbcTemplate.update(updateClientRoleStatusSql, actorId, invoiceId, AccessContext.applicationId());
+		cluboneJdbcTemplate.update(updateClientRoleStatusSql, activeAgreementStatusId, activeClientStatusId,
+				activeAccountStatusId, actorId, invoiceId, AccessContext.applicationId());
 	}
 
 	private static final class PromotionEffectValueRowMapper implements RowMapper<PromotionEffectValueDTO> {
