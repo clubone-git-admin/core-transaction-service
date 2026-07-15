@@ -12,6 +12,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
+import io.clubone.transaction.config.LoadPressureGuard;
 import io.clubone.transaction.response.PaymentResponseDTO;
 import io.clubone.transaction.service.PaymentService;
 import io.clubone.transaction.vo.PaymentRequestDTO;
@@ -22,24 +23,24 @@ public class PaymentServiceImpl implements PaymentService {
 	@Autowired
 	private RestTemplate restTemplate;
 
+	@Autowired
+	private LoadPressureGuard loadPressureGuard;
+
 	@Value("${payment.api.url}")
 	private String paymentApiUrl;
 
 	@Override
 	public UUID processManualPayment(PaymentRequestDTO request) {
-		HttpHeaders headers = new HttpHeaders();
-		headers.setContentType(MediaType.APPLICATION_JSON);
-
-		HttpEntity<PaymentRequestDTO> entity = new HttpEntity<>(request, headers);
-
-		ResponseEntity<PaymentResponseDTO> response = restTemplate.exchange(paymentApiUrl, HttpMethod.POST, entity,
-				PaymentResponseDTO.class);
-
-		if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
-			return response.getBody().getTransactionId();
-		} else {
+		return loadPressureGuard.withPaymentHttp(() -> {
+			HttpHeaders headers = new HttpHeaders();
+			headers.setContentType(MediaType.APPLICATION_JSON);
+			HttpEntity<PaymentRequestDTO> entity = new HttpEntity<>(request, headers);
+			ResponseEntity<PaymentResponseDTO> response = restTemplate.exchange(
+					paymentApiUrl, HttpMethod.POST, entity, PaymentResponseDTO.class);
+			if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+				return response.getBody().getTransactionId();
+			}
 			throw new RuntimeException("Failed to create payment. Status: " + response.getStatusCode());
-		}
+		});
 	}
-
 }

@@ -18,6 +18,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.server.ResponseStatusException;
+import io.clubone.transaction.config.LoadPressureGuard;
 import io.clubone.transaction.security.TenantHttpHeaders;
 
 import java.math.BigDecimal;
@@ -35,6 +36,7 @@ public class ClientAgreementCreationHelper {
     private final NamedParameterJdbcTemplate namedJdbc;
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
+    private final LoadPressureGuard loadPressureGuard;
 
     // e.g. http://client-agreement-service:8080
     @Value("${client.agreement.service.base-url}")
@@ -43,10 +45,12 @@ public class ClientAgreementCreationHelper {
     public ClientAgreementCreationHelper(
             NamedParameterJdbcTemplate namedJdbc,
             RestTemplate restTemplate,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            LoadPressureGuard loadPressureGuard) {
         this.namedJdbc = namedJdbc;
         this.restTemplate = restTemplate;
         this.objectMapper = objectMapper;
+        this.loadPressureGuard = loadPressureGuard;
     }
 
     /**
@@ -271,11 +275,11 @@ public class ClientAgreementCreationHelper {
 
         try {
             ResponseEntity<ClientAgreementCreateResponse> resp =
-                    restTemplate.postForEntity(
+                    loadPressureGuard.withClientAgreementHttp(() -> restTemplate.postForEntity(
                             url,
                             entity,
                             ClientAgreementCreateResponse.class
-                    );
+                    ));
 
             long elapsedMs = System.currentTimeMillis() - startedAt;
 

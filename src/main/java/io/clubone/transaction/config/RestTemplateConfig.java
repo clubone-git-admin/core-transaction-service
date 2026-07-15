@@ -55,7 +55,7 @@ public class RestTemplateConfig {
         .version(HttpClient.Version.HTTP_1_1)
         .build();
     JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
-    requestFactory.setReadTimeout(Duration.ofSeconds(10));
+		requestFactory.setReadTimeout(Duration.ofSeconds(8));
 
     return builder
         .requestFactory(() -> requestFactory)

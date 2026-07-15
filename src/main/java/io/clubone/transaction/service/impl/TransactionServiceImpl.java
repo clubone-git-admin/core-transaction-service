@@ -36,6 +36,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import io.clubone.transaction.request.BillingQuoteFinalizeSpec;
 import io.clubone.transaction.security.TenantContext;
+import io.clubone.transaction.config.LoadPressureGuard;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -112,6 +113,9 @@ public class TransactionServiceImpl implements TransactionService {
 
 	@Autowired
 	private NamedParameterJdbcTemplate jdbc;
+
+	@Autowired
+	private LoadPressureGuard loadPressureGuard;
 
 	private final TransactionTemplate finalizePersistTx;
 
@@ -680,7 +684,7 @@ public class TransactionServiceImpl implements TransactionService {
 		final boolean fullPaymentHint = fullPayment;
 		final boolean partialPaymentHint = partialPayment;
 
-		FinalizePersistOutcome outcome = finalizePersistTx.execute(status -> {
+		FinalizePersistOutcome outcome = loadPressureGuard.withFinalizeDb(() -> finalizePersistTx.execute(status -> {
 			boolean partial = partialPaymentHint;
 			boolean full = fullPaymentHint;
 
@@ -781,7 +785,7 @@ public class TransactionServiceImpl implements TransactionService {
 			enqueueGlPaymentCollected(req, cptId, transactionId, payAmountFinal);
 
 			return new FinalizePersistOutcome(transactionId, responseStatusName, purchaseCompleted, partial);
-		});
+		}));
 
 		if (outcome == null) {
 			throw new IllegalStateException("Finalize persist returned null outcome");
@@ -1042,7 +1046,7 @@ public class TransactionServiceImpl implements TransactionService {
 
 	private void runAfterCommitAsync(Runnable task) {
 		final TenantContext tenantCtx = TenantContext.get();
-		Runnable async = () -> FINALIZE_ASYNC.execute(() -> {
+		Runnable async = () -> FINALIZE_ASYNC.execute(() -> loadPressureGuard.withFinalizeAsync(() -> {
 			TenantContext previous = TenantContext.get();
 			try {
 				if (tenantCtx != null) {
@@ -1059,7 +1063,7 @@ public class TransactionServiceImpl implements TransactionService {
 					TenantContext.clear();
 				}
 			}
-		});
+		}));
 		if (TransactionSynchronizationManager.isSynchronizationActive()) {
 			TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
 				@Override
