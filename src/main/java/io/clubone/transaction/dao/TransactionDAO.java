@@ -106,6 +106,15 @@ public interface TransactionDAO {
 
 	void activateAgreementAndClientStatusForInvoice(UUID invoiceId, UUID actorId);
 
+	/**
+	 * Hydrates {@code clients.client_dashboard_proj} for one client.
+	 * Needed because DB triggers may only {@code pg_notify} and no listener refreshes the row.
+	 */
+	void refreshClientDashboardProjection(UUID clientRoleId);
+
+	/** Resolves {@code client_role_id} from invoice → client_agreement (for post-finalize projection refresh). */
+	Optional<UUID> findClientRoleIdByInvoiceId(UUID invoiceId);
+
 	List<PromotionEffectValueDTO> fetchEffectValuesByPromotionId(UUID promotionId, UUID applicationId);
 
 	boolean isFeeItem(UUID itemId, UUID applicationId);

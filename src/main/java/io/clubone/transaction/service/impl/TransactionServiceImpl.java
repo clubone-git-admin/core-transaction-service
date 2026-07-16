@@ -757,6 +757,14 @@ public class TransactionServiceImpl implements TransactionService {
 			if (purchaseCompleted) {
 				transactionDAO.activateAgreementAndClientStatusForInvoice(req.getInvoiceId(), req.getCreatedBy());
 
+				// Projection triggers only NOTIFY (migration 060); refresh explicitly so list status_display updates.
+				final UUID clientRoleIdForProj = req.getClientRoleId() != null
+						? req.getClientRoleId()
+						: transactionDAO.findClientRoleIdByInvoiceId(req.getInvoiceId()).orElse(null);
+				if (clientRoleIdForProj != null) {
+					runAfterCommitAsync(() -> transactionDAO.refreshClientDashboardProjection(clientRoleIdForProj));
+				}
+
 				if (effectiveClientAgreementId != null) {
 					// Fully async: agreement lookup + webhook HTTP never touch the finalize request thread.
 					final UUID scheduledTxnId = transactionId;
