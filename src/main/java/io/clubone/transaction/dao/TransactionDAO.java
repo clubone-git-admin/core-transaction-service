@@ -106,6 +106,18 @@ public interface TransactionDAO {
 
 	void activateAgreementAndClientStatusForInvoice(UUID invoiceId, UUID actorId);
 
+	/**
+	 * Hydrates {@code clients.client_dashboard_proj} for one client.
+	 * Call only from async after-commit paths — never on the finalize request thread.
+	 */
+	void refreshClientDashboardProjection(UUID clientRoleId);
+
+	/**
+	 * Resolves {@code client_role_id} from invoice → client_agreement.
+	 * Prefer calling from async refresh paths with an explicit {@code applicationId}.
+	 */
+	Optional<UUID> findClientRoleIdByInvoiceId(UUID invoiceId, UUID applicationId);
+
 	List<PromotionEffectValueDTO> fetchEffectValuesByPromotionId(UUID promotionId, UUID applicationId);
 
 	boolean isFeeItem(UUID itemId, UUID applicationId);

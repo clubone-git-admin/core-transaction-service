@@ -1414,6 +1414,44 @@ public class TransactionDAOImpl implements TransactionDAO {
 				activeAccountStatusId, actorId, invoiceId, AccessContext.applicationId());
 	}
 
+	@Override
+	public Optional<UUID> findClientRoleIdByInvoiceId(UUID invoiceId, UUID applicationId) {
+		if (invoiceId == null) {
+			return Optional.empty();
+		}
+		UUID appId = applicationId != null ? applicationId : AccessContext.applicationId();
+		try {
+			UUID id = cluboneJdbcTemplate.queryForObject("""
+					SELECT ca.client_role_id
+					FROM transactions.invoice i
+					JOIN client_agreements.client_agreement ca
+					  ON ca.client_agreement_id = i.client_agreement_id
+					WHERE i.invoice_id = ?
+					  AND i.application_id = ?
+					LIMIT 1
+					""", UUID.class, invoiceId, appId);
+			return Optional.ofNullable(id);
+		} catch (EmptyResultDataAccessException ex) {
+			return Optional.empty();
+		}
+	}
+
+	@Override
+	public void refreshClientDashboardProjection(UUID clientRoleId) {
+		if (clientRoleId == null) {
+			return;
+		}
+		try {
+			cluboneJdbcTemplate.query(
+					"SELECT clients.refresh_client_dashboard_proj(?)",
+					ps -> ps.setObject(1, clientRoleId),
+					rs -> null);
+		} catch (DataAccessException ex) {
+			logger.warn("refresh_client_dashboard_proj skipped for clientRoleId={}: {}",
+					clientRoleId, ex.getMessage());
+		}
+	}
+
 	private static final class PromotionEffectValueRowMapper implements RowMapper<PromotionEffectValueDTO> {
 		@Override
 		public PromotionEffectValueDTO mapRow(ResultSet rs, int rowNum) throws SQLException {

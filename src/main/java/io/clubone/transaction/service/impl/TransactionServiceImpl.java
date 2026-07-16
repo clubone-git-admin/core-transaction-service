@@ -44,6 +44,7 @@ import io.clubone.transaction.dao.InvoiceDAO;
 import io.clubone.transaction.dao.SubscriptionPlanDao;
 import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.helper.AgreementHelper;
+import io.clubone.transaction.helper.ClientDashboardProjectionRefresher;
 import io.clubone.transaction.helper.InvoiceNotificationHelper;
 import io.clubone.transaction.billing.quote.BillingQuoteSubscriptionPersistenceService;
 import io.clubone.transaction.gl.model.GlPaymentCollectedPayload;
@@ -114,6 +115,9 @@ public class TransactionServiceImpl implements TransactionService {
 
 	@Autowired
 	private WebhookMembershipPurchasePublisher webhookMembershipPurchasePublisher;
+
+	@Autowired
+	private ClientDashboardProjectionRefresher clientDashboardProjectionRefresher;
 
 	@Autowired
 	private NamedParameterJdbcTemplate jdbc;
@@ -775,6 +779,10 @@ public class TransactionServiceImpl implements TransactionService {
 								+ "outcome=registered_for_after_commit "
 								+ "invoiceId={} clientPaymentTransactionId={} correlationId={}",
 						req.getInvoiceId(), cptId, inventoryCorrelationId);
+				// Fully async: resolve + refresh_client_dashboard_proj never touch the finalize request thread.
+				UUID applicationId = TenantContext.get() != null ? TenantContext.get().applicationId() : null;
+				clientDashboardProjectionRefresher.scheduleRefreshAfterCommit(
+						req.getInvoiceId(), req.getClientRoleId(), applicationId);
 
 				if (effectiveClientAgreementId != null) {
 					// Fully async: agreement lookup + webhook HTTP never touch the finalize request thread.
