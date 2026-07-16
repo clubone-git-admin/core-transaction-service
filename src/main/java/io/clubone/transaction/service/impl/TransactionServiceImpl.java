@@ -32,12 +32,12 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import org.springframework.util.CollectionUtils;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.web.server.ResponseStatusException;
 
 import io.clubone.transaction.request.BillingQuoteFinalizeSpec;
 import io.clubone.transaction.security.TenantContext;
 import io.clubone.transaction.config.LoadPressureGuard;
-
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.clubone.transaction.dao.InvoiceDAO;
@@ -51,6 +51,7 @@ import io.clubone.transaction.gl.model.GlPaymentCollectedPayload;
 import io.clubone.transaction.gl.service.GlPostingOutboxService;
 import io.clubone.transaction.integration.WebhookMembershipPurchasePublisher;
 import io.clubone.transaction.helper.SubscriptionPlanHelper;
+import io.clubone.transaction.inventory.FinalizedInvoiceInventoryEvent;
 import io.clubone.transaction.request.CreateInvoiceRequest;
 import io.clubone.transaction.request.CreateInvoiceRequestV3;
 import io.clubone.transaction.request.CreateTransactionRequest;
@@ -108,6 +109,9 @@ public class TransactionServiceImpl implements TransactionService {
 
 	@Autowired
 	private GlPostingOutboxService glPostingOutboxService;
+
+	@Autowired
+	private ApplicationEventPublisher applicationEventPublisher;
 
 	@Autowired
 	private WebhookMembershipPurchasePublisher webhookMembershipPurchasePublisher;
@@ -807,6 +811,27 @@ public class TransactionServiceImpl implements TransactionService {
 			responseMessage = "Partial payment recorded";
 		} else {
 			responseMessage = "";
+		}
+
+		if (fullPayment) {
+			String inventoryCorrelationId = "finalize-inventory-" + req.getInvoiceId();
+
+			applicationEventPublisher.publishEvent(
+					new FinalizedInvoiceInventoryEvent(
+							req.getInvoiceId(),
+							clientPaymentTransactionId,
+							req.getCreatedBy(),
+							inventoryCorrelationId));
+
+			logger.info(
+					"[transactions/v3/finalize] step=inventory_provisioning outcome=scheduled_after_commit "
+							+ "invoiceId={} clientPaymentTransactionId={} correlationId={}",
+					req.getInvoiceId(), clientPaymentTransactionId, inventoryCorrelationId);
+		} else {
+			logger.info(
+					"[transactions/v3/finalize] step=inventory_provisioning skipped=true "
+							+ "reason=partial_payment invoiceId={} payAmount={} invoiceTotal={}",
+					req.getInvoiceId(), payAmount, invoiceTotal);
 		}
 
 		logger.info(
