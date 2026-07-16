@@ -761,6 +761,21 @@ public class TransactionServiceImpl implements TransactionService {
 			if (purchaseCompleted) {
 				transactionDAO.activateAgreementAndClientStatusForInvoice(req.getInvoiceId(), req.getCreatedBy());
 
+				String inventoryCorrelationId = "finalize-inventory-" + req.getInvoiceId();
+
+				applicationEventPublisher.publishEvent(
+						new FinalizedInvoiceInventoryEvent(
+								req.getInvoiceId(),
+								cptId,
+								req.getCreatedBy(),
+								inventoryCorrelationId));
+
+				logger.info(
+						"[transactions/v3/finalize] step=inventory_provisioning "
+								+ "outcome=registered_for_after_commit "
+								+ "invoiceId={} clientPaymentTransactionId={} correlationId={}",
+						req.getInvoiceId(), cptId, inventoryCorrelationId);
+
 				if (effectiveClientAgreementId != null) {
 					// Fully async: agreement lookup + webhook HTTP never touch the finalize request thread.
 					final UUID scheduledTxnId = transactionId;
@@ -804,24 +819,10 @@ public class TransactionServiceImpl implements TransactionService {
 			responseMessage = "";
 		}
 
-		if (fullPayment) {
-			String inventoryCorrelationId = "finalize-inventory-" + req.getInvoiceId();
-
-			applicationEventPublisher.publishEvent(
-					new FinalizedInvoiceInventoryEvent(
-							req.getInvoiceId(),
-							clientPaymentTransactionId,
-							req.getCreatedBy(),
-							inventoryCorrelationId));
-
-			logger.info(
-					"[transactions/v3/finalize] step=inventory_provisioning outcome=scheduled_after_commit "
-							+ "invoiceId={} clientPaymentTransactionId={} correlationId={}",
-					req.getInvoiceId(), clientPaymentTransactionId, inventoryCorrelationId);
-		} else {
+		if (!outcome.purchaseCompleted()) {
 			logger.info(
 					"[transactions/v3/finalize] step=inventory_provisioning skipped=true "
-							+ "reason=partial_payment invoiceId={} payAmount={} invoiceTotal={}",
+							+ "reason=purchase_not_completed invoiceId={} payAmount={} invoiceTotal={}",
 					req.getInvoiceId(), payAmount, invoiceTotal);
 		}
 

@@ -375,8 +375,7 @@ public class FinalizeInventoryProvisioningHelper {
                 entitlement.itemVersionId().toString(),
                 entitlement.packageItemId() == null
                         ? "-"
-                        : entitlement.packageItemId().toString(),
-                UUID.randomUUID().toString()
+                        : entitlement.packageItemId().toString()
         );
 
         return "finalize-inventory-"

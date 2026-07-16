@@ -11,31 +11,35 @@ import org.springframework.transaction.event.TransactionalEventListener;
 @RequiredArgsConstructor
 public class FinalizedInvoiceInventoryListener {
 
-    private final FinalizeInventoryProvisioningHelper
-            inventoryProvisioningHelper;
+    private final FinalizeInventoryProvisioningHelper inventoryProvisioningHelper;
 
-    @TransactionalEventListener(
-            phase = TransactionPhase.AFTER_COMMIT
-    )
-    public void provisionInventory(
-            FinalizedInvoiceInventoryEvent event) {
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    public void provisionInventory(FinalizedInvoiceInventoryEvent event) {
+
+        log.info(
+                "[inventory-provisioning] step=listener_received "
+                        + "invoiceId={}, clientPaymentTransactionId={}, "
+                        + "actorId={}, correlationId={}",
+                event.invoiceId(),
+                event.clientPaymentTransactionId(),
+                event.actorId(),
+                event.correlationId()
+        );
 
         try {
             InventoryProvisioningResult result =
-                    inventoryProvisioningHelper
-                            .provisionForFinalizedInvoice(
-                                    event.invoiceId(),
-                                    event.clientPaymentTransactionId(),
-                                    event.actorId(),
-                                    event.correlationId()
-                            );
+                    inventoryProvisioningHelper.provisionForFinalizedInvoice(
+                            event.invoiceId(),
+                            event.clientPaymentTransactionId(),
+                            event.actorId(),
+                            event.correlationId()
+                    );
 
             log.info(
                     "Inventory provisioning completed "
                             + "invoiceId={}, clientRoleId={}, "
-                            + "invoiceEntityCount={}, "
-                            + "entitlementCount={}, createdCount={}, "
-                            + "skippedCount={}",
+                            + "invoiceEntityCount={}, entitlementCount={}, "
+                            + "createdCount={}, skippedCount={}",
                     result.invoiceId(),
                     result.clientRoleId(),
                     result.invoiceEntityCount(),
@@ -55,8 +59,7 @@ public class FinalizedInvoiceInventoryListener {
              */
             log.error(
                     "Inventory provisioning failed after finalize "
-                            + "invoiceId={}, "
-                            + "clientPaymentTransactionId={}, "
+                            + "invoiceId={}, clientPaymentTransactionId={}, "
                             + "correlationId={}, message={}",
                     event.invoiceId(),
                     event.clientPaymentTransactionId(),

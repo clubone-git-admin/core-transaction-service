@@ -59,10 +59,18 @@ public class ClientInventoryApiClient {
         headers.setAccept(
                 List.of(MediaType.APPLICATION_JSON)
         );
-		/*
-		 * headers.set( "x-actor-id", actorId.toString() ); headers.set(
-		 * "x-location-id", locationId.toString() );
-		 */
+
+        if (request.applicationId() == null) {
+            throw new InventoryProvisioningException(
+                    "applicationId is required for client inventory creation"
+            );
+        }
+
+        headers.set(
+                "application-id",
+                request.applicationId().toString()
+        );
+
         headers.set(
                 "x-actor-id",
                 TEST_ACTOR_ID.toString()
@@ -72,6 +80,7 @@ public class ClientInventoryApiClient {
                 "x-location-id",
                 TEST_HEADER_LOCATION_ID.toString()
         );
+
         headers.set(
                 "X-Correlation-Id",
                 correlationId
@@ -94,12 +103,14 @@ public class ClientInventoryApiClient {
                         + "step=request "
                         + "endpoint={} "
                         + "clientRoleId={} "
+                        + "applicationId={} "
                         + "headerActorId={} "
                         + "headerLocationId={} "
                         + "correlationId={} "
                         + "payload={}",
                 endpoint,
                 clientRoleId,
+                request.applicationId(),
                 TEST_ACTOR_ID,
                 TEST_HEADER_LOCATION_ID,
                 correlationId,
