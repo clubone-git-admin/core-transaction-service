@@ -44,6 +44,7 @@ import io.clubone.transaction.dao.InvoiceDAO;
 import io.clubone.transaction.dao.SubscriptionPlanDao;
 import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.helper.AgreementHelper;
+import io.clubone.transaction.helper.ClientDashboardProjectionRefresher;
 import io.clubone.transaction.helper.InvoiceNotificationHelper;
 import io.clubone.transaction.billing.quote.BillingQuoteSubscriptionPersistenceService;
 import io.clubone.transaction.gl.model.GlPaymentCollectedPayload;
@@ -110,6 +111,9 @@ public class TransactionServiceImpl implements TransactionService {
 
 	@Autowired
 	private WebhookMembershipPurchasePublisher webhookMembershipPurchasePublisher;
+
+	@Autowired
+	private ClientDashboardProjectionRefresher clientDashboardProjectionRefresher;
 
 	@Autowired
 	private NamedParameterJdbcTemplate jdbc;
@@ -757,13 +761,10 @@ public class TransactionServiceImpl implements TransactionService {
 			if (purchaseCompleted) {
 				transactionDAO.activateAgreementAndClientStatusForInvoice(req.getInvoiceId(), req.getCreatedBy());
 
-				// Projection triggers only NOTIFY (migration 060); refresh explicitly so list status_display updates.
-				final UUID clientRoleIdForProj = req.getClientRoleId() != null
-						? req.getClientRoleId()
-						: transactionDAO.findClientRoleIdByInvoiceId(req.getInvoiceId()).orElse(null);
-				if (clientRoleIdForProj != null) {
-					runAfterCommitAsync(() -> transactionDAO.refreshClientDashboardProjection(clientRoleIdForProj));
-				}
+				// Fully async: resolve + refresh_client_dashboard_proj never touch the finalize request thread.
+				UUID applicationId = TenantContext.get() != null ? TenantContext.get().applicationId() : null;
+				clientDashboardProjectionRefresher.scheduleRefreshAfterCommit(
+						req.getInvoiceId(), req.getClientRoleId(), applicationId);
 
 				if (effectiveClientAgreementId != null) {
 					// Fully async: agreement lookup + webhook HTTP never touch the finalize request thread.

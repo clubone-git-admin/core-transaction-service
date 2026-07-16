@@ -1415,10 +1415,11 @@ public class TransactionDAOImpl implements TransactionDAO {
 	}
 
 	@Override
-	public Optional<UUID> findClientRoleIdByInvoiceId(UUID invoiceId) {
+	public Optional<UUID> findClientRoleIdByInvoiceId(UUID invoiceId, UUID applicationId) {
 		if (invoiceId == null) {
 			return Optional.empty();
 		}
+		UUID appId = applicationId != null ? applicationId : AccessContext.applicationId();
 		try {
 			UUID id = cluboneJdbcTemplate.queryForObject("""
 					SELECT ca.client_role_id
@@ -1428,7 +1429,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 					WHERE i.invoice_id = ?
 					  AND i.application_id = ?
 					LIMIT 1
-					""", UUID.class, invoiceId, AccessContext.applicationId());
+					""", UUID.class, invoiceId, appId);
 			return Optional.ofNullable(id);
 		} catch (EmptyResultDataAccessException ex) {
 			return Optional.empty();
