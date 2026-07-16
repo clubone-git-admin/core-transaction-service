@@ -4,6 +4,7 @@ import org.springframework.jdbc.core.BatchPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import io.clubone.transaction.security.AccessContext;
 import io.clubone.transaction.subscription.billing.dao.SubscriptionBillingScheduleDAO;
 import io.clubone.transaction.subscription.billing.model.CyclePriceProjection;
 import io.clubone.transaction.subscription.billing.model.SubscriptionBillingScheduleRow;
@@ -44,6 +45,7 @@ public class SubscriptionBillingScheduleDAOImpl implements SubscriptionBillingSc
 
     @Override
     public int[] batchInsertBillingSchedule(List<SubscriptionBillingScheduleRow> rows) {
+        UUID appId = AccessContext.applicationId();
         String sql = """
             insert into client_subscription_billing.subscription_billing_schedule (
                 billing_schedule_id,
@@ -72,12 +74,13 @@ public class SubscriptionBillingScheduleDAOImpl implements SubscriptionBillingSc
                 notes,
                 invoice_id,
                 billed_on,
-                created_by
+                created_by,
+                application_id
             ) values (
                 ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?::uuid,
                 ?, ?::uuid, ?, ?::uuid, ?, ?, ?, ?, ?,
-                ?, ?::uuid, ?, ?::uuid
+                ?, ?::uuid, ?, ?::uuid, ?::uuid
             )
             on conflict (subscription_instance_id, cycle_number) do nothing
             """;
@@ -127,6 +130,7 @@ public class SubscriptionBillingScheduleDAOImpl implements SubscriptionBillingSc
                 }
 
                 ps.setObject(27, r.getCreatedBy());
+                ps.setObject(28, appId);
             }
 
             @Override
@@ -144,6 +148,7 @@ public class SubscriptionBillingScheduleDAOImpl implements SubscriptionBillingSc
                 from client_subscription_billing.subscription_billing_schedule
                 where subscription_instance_id = ?::uuid
                   and cycle_number = ?
+                  and application_id = ?::uuid
             )
             """;
 
@@ -151,7 +156,8 @@ public class SubscriptionBillingScheduleDAOImpl implements SubscriptionBillingSc
                 sql,
                 Boolean.class,
                 subscriptionInstanceId,
-                cycleNumber
+                cycleNumber,
+                AccessContext.applicationId()
         );
         return Boolean.TRUE.equals(exists);
     }
@@ -164,13 +170,15 @@ public class SubscriptionBillingScheduleDAOImpl implements SubscriptionBillingSc
             where subscription_instance_id = ?::uuid
               and billing_date >= ?
               and invoice_id is null
+              and application_id = ?::uuid
             """;
 
         Integer count = cluboneJdbcTemplate.queryForObject(
                 sql,
                 Integer.class,
                 subscriptionInstanceId,
-                fromDate
+                fromDate,
+                AccessContext.applicationId()
         );
         return count == null ? 0 : count;
     }
@@ -179,14 +187,17 @@ public class SubscriptionBillingScheduleDAOImpl implements SubscriptionBillingSc
     public List<CyclePriceProjection> findCyclePrices(UUID subscriptionPlanId) {
         String sql = """
             select
-                subscription_plan_cycle_price_id,
-                price_cycle_band_id,
-                cycle_start,
-                cycle_end,
-                effective_unit_price
-            from client_subscription_billing.subscription_plan_cycle_price
-            where subscription_plan_id = ?::uuid
-            order by cycle_start asc
+                spcp.subscription_plan_cycle_price_id,
+                spcp.price_cycle_band_id,
+                spcp.cycle_start,
+                spcp.cycle_end,
+                spcp.effective_unit_price
+            from client_subscription_billing.subscription_plan_cycle_price spcp
+            join client_subscription_billing.subscription_plan sp
+              on sp.subscription_plan_id = spcp.subscription_plan_id
+            where spcp.subscription_plan_id = ?::uuid
+              and sp.application_id = ?::uuid
+            order by spcp.cycle_start asc
             """;
 
         return cluboneJdbcTemplate.query(sql, (rs, rowNum) -> {
@@ -199,7 +210,7 @@ public class SubscriptionBillingScheduleDAOImpl implements SubscriptionBillingSc
             p.setCycleEnd(rs.wasNull() ? null : cycleEndVal);
             p.setEffectiveUnitPrice(rs.getBigDecimal("effective_unit_price"));
             return p;
-        }, subscriptionPlanId);
+        }, subscriptionPlanId, AccessContext.applicationId());
     }
 
     private BigDecimal nz(BigDecimal v) {

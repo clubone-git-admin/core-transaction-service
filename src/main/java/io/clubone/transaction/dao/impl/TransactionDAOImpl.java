@@ -11,9 +11,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,7 +28,11 @@ import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+
 import io.clubone.transaction.dao.TransactionDAO;
+import io.clubone.transaction.security.AccessContext;
 import io.clubone.transaction.util.FrequencyUnit;
 import io.clubone.transaction.v2.vo.BundlePriceCycleBandDTO;
 import io.clubone.transaction.v2.vo.CalculationMode;
@@ -62,6 +68,24 @@ public class TransactionDAOImpl implements TransactionDAO {
 	private JdbcTemplate cluboneJdbcTemplate;
 
 	private static final Logger logger = LoggerFactory.getLogger(TransactionDAOImpl.class);
+
+	/** Lookup caches: expire after 1 hour (min TTL policy). */
+	private static final Cache<String, UUID> INVOICE_STATUS_ID_CACHE = Caffeine.newBuilder()
+			.maximumSize(256)
+			.expireAfterWrite(1, TimeUnit.HOURS)
+			.build();
+	private static final Cache<String, UUID> ENTITY_TYPE_ID_BY_NAME_CACHE = Caffeine.newBuilder()
+			.maximumSize(256)
+			.expireAfterWrite(1, TimeUnit.HOURS)
+			.build();
+	private static final Cache<UUID, EntityTypeDTO> ENTITY_TYPE_BY_ID_CACHE = Caffeine.newBuilder()
+			.maximumSize(256)
+			.expireAfterWrite(1, TimeUnit.HOURS)
+			.build();
+	private static final Cache<String, UUID> ACTIVATE_LOOKUP_CACHE = Caffeine.newBuilder()
+			.maximumSize(64)
+			.expireAfterWrite(1, TimeUnit.HOURS)
+			.build();
 
 	private static final String ENTITY_TYPE_SQL = """
 			SELECT entity_type
@@ -112,12 +136,14 @@ public class TransactionDAOImpl implements TransactionDAO {
 			    i.client_agreement_id
 			FROM "transactions".invoice i
 			WHERE i.invoice_id = ?
+			  AND i.application_id = ?
 			""";
 
 	private static final String UPDATE_TRANSACTION_CLIENT_AGREEMENT_SQL = """
 			UPDATE "transactions"."transaction"
 			SET client_agreement_id = ?
 			WHERE transaction_id = ?
+			  AND application_id = ?
 			""";
 
 	private static final String TAX_RATE_SQL = """
@@ -165,6 +191,11 @@ public class TransactionDAOImpl implements TransactionDAO {
 			    FROM "transactions"."transaction" t
 			    JOIN client_payments.client_payment_transaction cpt
 			      ON cpt.client_payment_transaction_id = t.client_payment_transaction_id
+			    JOIN "transactions".invoice i_pay
+			      ON i_pay.invoice_id = t.invoice_id
+			    WHERE i_pay.client_role_id = ?
+			      AND i_pay.application_id = ?
+			      AND COALESCE(i_pay.is_active, true) = true
 			    GROUP BY t.invoice_id
 			)
 			SELECT
@@ -186,26 +217,28 @@ public class TransactionDAOImpl implements TransactionDAO {
 			LEFT JOIN pay p
 			  ON p.invoice_id = i.invoice_id
 			WHERE i.client_role_id = ?
+			  AND i.application_id = ?
 			  AND COALESCE(i.is_active, true) = true
 			ORDER BY i.invoice_date DESC, i.invoice_number
-			LIMIT COALESCE(?, 100)
-			OFFSET COALESCE(?, 0)
+			LIMIT ?
+			OFFSET ?
 			""";
 
 	@Override
 	public UUID saveInvoice(InvoiceDTO dto) {
 		UUID invoiceId = UUID.randomUUID();
+		UUID appId = AccessContext.applicationId();
 		String sql = """
 				INSERT INTO transactions.invoice (
 				    invoice_id, invoice_number, invoice_date, client_role_id, billing_address,
 				    invoice_status_id, total_amount, sub_total, tax_amount, discount_amount,
-				    is_paid, created_on
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+				    is_paid, application_id, created_on
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
 				""";
 
 		cluboneJdbcTemplate.update(sql, invoiceId, dto.getInvoiceNumber(), dto.getInvoiceDate(), dto.getClientRoleId(),
 				dto.getBillingAddress(), dto.getInvoiceStatusId(), dto.getTotalAmount(), dto.getSubTotal(),
-				dto.getTaxAmount(), dto.getDiscountAmount(), dto.isPaid());
+				dto.getTaxAmount(), dto.getDiscountAmount(), dto.isPaid(), appId);
 
 		return invoiceId;
 	}
@@ -231,6 +264,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 		}
 
 		UUID invoiceId = UUID.randomUUID();
+		UUID appId = AccessContext.applicationId();
 
 		// 1) Insert invoice header (include created_by only if your table has it)
 		final String insertInvoiceSql = """
@@ -250,26 +284,19 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    client_agreement_id,
 				    billing_run_id,
 				    billing_collection_type_id,
+				    application_id,
 				    created_on,
 				    created_by
 				) VALUES (
-				    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?
+				    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?
 				);
 								""";
 
 		cluboneJdbcTemplate.update(insertInvoiceSql, invoiceId, dto.getInvoiceNumber(), dto.getInvoiceDate(),
 				dto.getClientRoleId(), dto.getLevelId(), dto.getBillingAddress(), dto.getInvoiceStatusId(), totalSum,
 				subtotal, taxSum, discountSum, Boolean.TRUE.equals(dto.isPaid()), dto.getClientAgreementId(),
-				dto.getBillingRunId(), dto.getBillingCollectionTypeId(), dto.getCreatedBy());
+				dto.getBillingRunId(), dto.getBillingCollectionTypeId(), appId, dto.getCreatedBy());
 
-		// 2) Resolve BUNDLE type id once (for parent/child grouping)
-		UUID bundleTypeId = cluboneJdbcTemplate.queryForObject(
-				"SELECT entity_type_id FROM transactions.lu_entity_type WHERE LOWER(entity_type) = LOWER('BUNDLE')",
-				UUID.class);
-
-		UUID lastBundleHeaderId = null;
-
-		// 3) Insert invoice entities
 		final String insertEntitySql = """
 				INSERT INTO transactions.invoice_entity (
 				    invoice_entity_id, parent_invoice_entity_id, invoice_id,
@@ -277,11 +304,11 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    quantity, unit_price, discount_amount, tax_amount, total_amount,
 				    created_on, created_by, price_plan_template_id, client_agreement_id,
 				    billing_schedule_id, subscription_instance_id, cycle_number,
-				    service_period_start, service_period_end, charge_line_kind_id, entity_version_id
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				    service_period_start, service_period_end, charge_line_kind_id, entity_version_id,
+				    application_id
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				""";
 
-		// 4) Insert taxes per entity
 		final String insertTaxSql = """
 				INSERT INTO transactions.invoice_entity_tax (
 				    invoice_entity_tax_id, invoice_entity_id, tax_rate_id, tax_rate_percentage, tax_amount,
@@ -289,7 +316,6 @@ public class TransactionDAOImpl implements TransactionDAO {
 				) VALUES (?, ?, ?, ?, ?, NOW(), ?,?)
 				""";
 
-		// 5b) Insert price bands per entity (after invoice_entity insert)
 		final String insertPriceBandSql = """
 				INSERT INTO transactions.invoice_entity_price_band (
 				    invoice_entity_price_band_id,
@@ -305,74 +331,64 @@ public class TransactionDAOImpl implements TransactionDAO {
 				) VALUES (?, ?, ?, ?, COALESCE(?, false), true, NOW(), ?, NOW(), ?)
 				""";
 
-		for (InvoiceEntityDTO li : dto.getLineItems()) {
-			UUID ieId = null;
-			if (li.getInvoiceEntityId() != null) {
-				ieId = li.getInvoiceEntityId();
-			} else {
-				ieId = UUID.randomUUID();				
-			}
+		List<InvoiceEntityDTO> lineItems = dto.getLineItems() != null ? dto.getLineItems() : List.of();
+		List<Object[]> entityBatch = new ArrayList<>(lineItems.size());
+		List<Object[]> taxBatch = new ArrayList<>();
+		List<Object[]> priceBandBatch = new ArrayList<>();
+
+		for (InvoiceEntityDTO li : lineItems) {
+			UUID ieId = li.getInvoiceEntityId() != null ? li.getInvoiceEntityId() : UUID.randomUUID();
 			li.setInvoiceEntityId(ieId);
 
-			// Attach to last bundle header if not explicitly given and this isn’t a bundle
-			// header
 			UUID parentId = li.getParentInvoiceEntityId();
-			boolean isBundleHeader = bundleTypeId.equals(li.getEntityTypeId());
-			System.out.println("isBundleHeader " + isBundleHeader);
-			System.out.println("lastBundleHeaderId " + lastBundleHeaderId);
-			/*
-			 * if (parentId == null) { if (lastBundleHeaderId != null && !isBundleHeader) {
-			 * parentId = lastBundleHeaderId; } } else { // Setting null for item purchase
-			 * parentId = null; }
-			 */
 
-			cluboneJdbcTemplate.update(insertEntitySql, ieId, parentId, invoiceId, li.getEntityTypeId(),
+			entityBatch.add(new Object[] {
+					ieId, parentId, invoiceId, li.getEntityTypeId(),
 					li.getEntityId(), li.getEntityDescription(), li.getQuantity(), li.getUnitPrice(),
 					li.getDiscountAmount(), li.getTaxAmount(), li.getTotalAmount(),
 					dto.getCreatedBy(), li.getPricePlanTemplateId(),
 					li.getClientAgreementId(),
 					li.getBillingScheduleId(), li.getSubscriptionInstanceId(), li.getCycleNumber(),
 					li.getServicePeriodStart(), li.getServicePeriodEnd(), li.getChargeLineKindId(),
-					li.getEntityVersionId());
-
-			if (isBundleHeader) {
-				lastBundleHeaderId = ieId;
-			}
+					li.getEntityVersionId(), appId
+			});
 
 			if (li.getTaxes() != null && !li.getTaxes().isEmpty()) {
 				for (InvoiceEntityTaxDTO t : li.getTaxes()) {
-					// Schema requires finance FKs; client-supplied tax (taxPct/taxAmount only) lives on invoice_entity.tax_amount
 					if (t.getTaxRateId() == null || t.getTaxRateAllocationId() == null) {
 						continue;
 					}
-					UUID ietId = UUID.randomUUID();
-					cluboneJdbcTemplate.update(insertTaxSql, ietId, ieId, t.getTaxRateId(), t.getTaxRate(),
-							t.getTaxAmount(), dto.getCreatedBy(), t.getTaxRateAllocationId());
+					taxBatch.add(new Object[] {
+							UUID.randomUUID(), ieId, t.getTaxRateId(), t.getTaxRate(),
+							t.getTaxAmount(), dto.getCreatedBy(), t.getTaxRateAllocationId()
+					});
 				}
 			}
 
-			// Discount amounts are stored on invoice_entity.discount_amount; no separate discount line table.
-
-			// [NEW] Insert price bands tied to this invoice_entity line
 			if (li.getPriceBands() != null && !li.getPriceBands().isEmpty()) {
 				for (InvoiceEntityPriceBandDTO pb : li.getPriceBands()) {
 					UUID iepbId = UUID.randomUUID();
-					UUID priceCycleBandId = pb.getPriceCycleBandId(); // must not be null
+					UUID priceCycleBandId = pb.getPriceCycleBandId();
 					BigDecimal unitPrice = pb.getUnitPrice() == null ? BigDecimal.ZERO : pb.getUnitPrice();
 					Boolean overridden = Boolean.TRUE.equals(pb.getIsPriceOverridden());
-
-					cluboneJdbcTemplate.update(insertPriceBandSql, iepbId, // invoice_entity_price_band_id
-							ieId, // invoice_entity_id (this line’s id)
-							priceCycleBandId, // price_cycle_band_id
-							unitPrice, // unit_price (numeric(12,3))
-							overridden, // is_price_overridden
-							dto.getCreatedBy(), // created_by
-							dto.getCreatedBy() // modified_by (you can use same user)
-					);
+					priceBandBatch.add(new Object[] {
+							iepbId, ieId, priceCycleBandId, unitPrice, overridden,
+							dto.getCreatedBy(), dto.getCreatedBy()
+					});
 				}
-			}			
-
+			}
 		}
+
+		if (!entityBatch.isEmpty()) {
+			cluboneJdbcTemplate.batchUpdate(insertEntitySql, entityBatch);
+		}
+		if (!taxBatch.isEmpty()) {
+			cluboneJdbcTemplate.batchUpdate(insertTaxSql, taxBatch);
+		}
+		if (!priceBandBatch.isEmpty()) {
+			cluboneJdbcTemplate.batchUpdate(insertPriceBandSql, priceBandBatch);
+		}
+
 		saveInvoiceEntityPromotions(dto.getLineItems(), dto.getCreatedBy());
 		return invoiceId;
 	}
@@ -391,17 +407,18 @@ public class TransactionDAOImpl implements TransactionDAO {
 		// Inside TransactionDAOImpl.saveTransaction(TransactionDTO dto)
 
 		UUID transactionId = UUID.randomUUID();
+		UUID appId = AccessContext.applicationId();
 
 		// 1) Insert transaction header (now also sets created_by)
 		String sql = """
 				    INSERT INTO transactions.transaction (
 				        transaction_id, client_agreement_id, client_payment_transaction_id,
-				        level_id, invoice_id, transaction_date, created_on, created_by
-				    ) VALUES (?, ?, ?, ?, ?, ?, NOW(), ?)
+				        level_id, invoice_id, transaction_date, application_id, created_on, created_by
+				    ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), ?)
 				""";
 
 		cluboneJdbcTemplate.update(sql, transactionId, dto.getClientAgreementId(), dto.getClientPaymentTransactionId(),
-				dto.getLevelId(), dto.getInvoiceId(), dto.getTransactionDate(), dto.getCreatedBy() // <-- added
+				dto.getLevelId(), dto.getInvoiceId(), dto.getTransactionDate(), appId, dto.getCreatedBy()
 		);
 
 		// 2) Resolve BUNDLE type id once (for header detection)
@@ -467,14 +484,16 @@ public class TransactionDAOImpl implements TransactionDAO {
 	@Override
 	public String findInvoiceNumber(UUID invoiceId) {
 		return cluboneJdbcTemplate.queryForObject(
-				"SELECT invoice_number FROM transactions.invoice WHERE invoice_id = ?", String.class, invoiceId);
+				"SELECT invoice_number FROM transactions.invoice WHERE invoice_id = ? AND application_id = ?",
+				String.class, invoiceId, AccessContext.applicationId());
 	}
 
 	@Override
 	public UUID findTransactionIdByInvoiceId(UUID invoiceId) {
 		List<UUID> ids = cluboneJdbcTemplate.query("""
-				    SELECT transaction_id FROM transactions.transaction WHERE invoice_id = ?
-				""", (rs, rn) -> UUID.fromString(rs.getString(1)), invoiceId);
+				    SELECT transaction_id FROM transactions.transaction
+				     WHERE invoice_id = ? AND application_id = ?
+				""", (rs, rn) -> UUID.fromString(rs.getString(1)), invoiceId, AccessContext.applicationId());
 		return ids.isEmpty() ? null : ids.get(0);
 	}
 
@@ -484,7 +503,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    SELECT client_payment_transaction_id
 				      FROM transactions.transaction
 				     WHERE transaction_id = ?
-				""", UUID.class, transactionId);
+				       AND application_id = ?
+				""", UUID.class, transactionId, AccessContext.applicationId());
 	}
 
 	@Override
@@ -492,14 +512,15 @@ public class TransactionDAOImpl implements TransactionDAO {
 		if (statusName == null || statusName.isBlank()) {
 			throw new IllegalArgumentException("invoice status name is required");
 		}
+		String key = statusName.trim().toLowerCase(Locale.ROOT);
 		try {
-			return cluboneJdbcTemplate.queryForObject("""
+			return INVOICE_STATUS_ID_CACHE.get(key, k -> cluboneJdbcTemplate.queryForObject("""
 					SELECT invoice_status_id
 					FROM transactions.lu_invoice_status
 					WHERE LOWER(TRIM(status_name)) = LOWER(TRIM(?))
 					  AND COALESCE(is_active, true) = true
 					LIMIT 1
-					""", UUID.class, statusName.trim());
+					""", UUID.class, statusName.trim()));
 		} catch (EmptyResultDataAccessException e) {
 			throw new IllegalStateException("No active lu_invoice_status row for status_name=" + statusName.trim(), e);
 		}
@@ -510,14 +531,23 @@ public class TransactionDAOImpl implements TransactionDAO {
 		if (statusName == null || statusName.isBlank()) {
 			return Optional.empty();
 		}
+		String key = statusName.trim().toLowerCase(Locale.ROOT);
+		UUID cached = INVOICE_STATUS_ID_CACHE.getIfPresent(key);
+		if (cached != null) {
+			return Optional.of(cached);
+		}
 		try {
-			return Optional.of(cluboneJdbcTemplate.queryForObject("""
+			UUID id = cluboneJdbcTemplate.queryForObject("""
 					SELECT invoice_status_id
 					FROM transactions.lu_invoice_status
 					WHERE LOWER(TRIM(status_name)) = LOWER(TRIM(?))
 					  AND COALESCE(is_active, true) = true
 					LIMIT 1
-					""", UUID.class, statusName.trim()));
+					""", UUID.class, statusName.trim());
+			if (id != null) {
+				INVOICE_STATUS_ID_CACHE.put(key, id);
+			}
+			return Optional.ofNullable(id);
 		} catch (EmptyResultDataAccessException e) {
 			return Optional.empty();
 		}
@@ -534,8 +564,10 @@ public class TransactionDAOImpl implements TransactionDAO {
 				  FROM transactions.transaction
 				 WHERE invoice_id = ?
 				   AND client_payment_transaction_id = ?
+				   AND application_id = ?
 				 LIMIT 1
-				""", (rs, rn) -> UUID.fromString(rs.getString(1)), invoiceId, clientPaymentTransactionId);
+				""", (rs, rn) -> UUID.fromString(rs.getString(1)), invoiceId, clientPaymentTransactionId,
+				AccessContext.applicationId());
 		return ids.isEmpty() ? null : ids.get(0);
 	}
 
@@ -545,7 +577,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    UPDATE transactions.invoice
 				       SET invoice_status_id = ?, is_paid = ?, modified_on = NOW(), modified_by = ?
 				     WHERE invoice_id = ?
-				""", statusId, paid, modifiedBy, invoiceId);
+				       AND application_id = ?
+				""", statusId, paid, modifiedBy, invoiceId, AccessContext.applicationId());
 	}
 
 	@Override
@@ -555,7 +588,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 				      FROM transactions.invoice i
 				      JOIN transactions.lu_invoice_status s ON s.invoice_status_id = i.invoice_status_id
 				     WHERE i.invoice_id = ?
-				""", String.class, invoiceId);
+				       AND i.application_id = ?
+				""", String.class, invoiceId, AccessContext.applicationId());
 	}
 
 	@Override
@@ -566,7 +600,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 	@Override
 	public UUID findEntityTypeIdByName(String name) {
-		System.out.println("name");
+		String key = name == null ? "" : name.trim().toLowerCase(Locale.ROOT);
 		String sql = """
 				    SELECT entity_type_id
 				    FROM transactions.lu_entity_type
@@ -574,7 +608,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 				      AND is_active = true
 				    LIMIT 1
 				""";
-		return cluboneJdbcTemplate.queryForObject(sql, UUID.class, name);
+		return ENTITY_TYPE_ID_BY_NAME_CACHE.get(key, k -> cluboneJdbcTemplate.queryForObject(sql, UUID.class, name));
 	}
 
 	private static final String SQL = """
@@ -670,7 +704,17 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 	@Override
 	public Optional<EntityTypeDTO> getEntityTypeById(UUID entityTypeId) {
-		return cluboneJdbcTemplate.query(ENTITY_TYPE_SQL, ENTITY_TYPE_ROW_MAPPER, entityTypeId).stream().findFirst();
+		if (entityTypeId == null) {
+			return Optional.empty();
+		}
+		EntityTypeDTO cached = ENTITY_TYPE_BY_ID_CACHE.getIfPresent(entityTypeId);
+		if (cached != null) {
+			return Optional.of(cached);
+		}
+		Optional<EntityTypeDTO> found = cluboneJdbcTemplate.query(ENTITY_TYPE_SQL, ENTITY_TYPE_ROW_MAPPER, entityTypeId)
+				.stream().findFirst();
+		found.ifPresent(dto -> ENTITY_TYPE_BY_ID_CACHE.put(entityTypeId, dto));
+		return found;
 	}
 
 	private static final RowMapper<ItemPriceDTO> ITEM_PRICE_ROW_MAPPER = new RowMapper<>() {
@@ -695,17 +739,18 @@ public class TransactionDAOImpl implements TransactionDAO {
 		// Inside TransactionDAOImpl.saveTransaction(TransactionDTO dto)
 
 		UUID transactionId = UUID.randomUUID();
+		UUID appId = AccessContext.applicationId();
 
 		// 1) Insert transaction header (now also sets created_by)
 		String sql = """
 				    INSERT INTO transactions.transaction (
 				        transaction_id,  client_payment_transaction_id,
-				         invoice_id, transaction_date, created_on, created_by
-				    ) VALUES (?,  ?,  ?, ?, NOW(), ?)
+				         invoice_id, transaction_date, application_id, created_on, created_by
+				    ) VALUES (?,  ?,  ?, ?, ?, NOW(), ?)
 				""";
 
 		cluboneJdbcTemplate.update(sql, transactionId, dto.getClientPaymentTransactionId(), dto.getInvoiceId(),
-				dto.getTransactionDate(), dto.getCreatedBy() // <-- added
+				dto.getTransactionDate(), appId, dto.getCreatedBy()
 		);
 
 		return transactionId;
@@ -725,13 +770,15 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 	@Override
 	public Optional<InvoiceSummaryDTO> getInvoiceSummaryById(UUID invoiceId) {
-		return cluboneJdbcTemplate.query(INVOICE_SUMMARY_SQL, INVOICE_SUMMARY_ROW_MAPPER, invoiceId).stream()
-				.findFirst();
+		return cluboneJdbcTemplate
+				.query(INVOICE_SUMMARY_SQL, INVOICE_SUMMARY_ROW_MAPPER, invoiceId, AccessContext.applicationId())
+				.stream().findFirst();
 	}
 
 	@Override
 	public int updateClientAgreementId(UUID transactionId, UUID clientAgreementId) {
-		return cluboneJdbcTemplate.update(UPDATE_TRANSACTION_CLIENT_AGREEMENT_SQL, clientAgreementId, transactionId);
+		return cluboneJdbcTemplate.update(UPDATE_TRANSACTION_CLIENT_AGREEMENT_SQL, clientAgreementId, transactionId,
+				AccessContext.applicationId());
 	}
 
 	private static final RowMapper<TaxRateAllocationDTO> TAX_RATE_ROW_MAPPER = new RowMapper<>() {
@@ -755,6 +802,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 	@Override
 	public List<InvoiceFlatRow> findInvoicesWithLatestTxnByClientRole(UUID clientRoleId) {
+		UUID appId = AccessContext.applicationId();
 		String sql = """
 				SELECT
 				    i.invoice_id,
@@ -777,12 +825,19 @@ public class TransactionDAOImpl implements TransactionDAO {
 				        t.client_payment_transaction_id,
 				        t.transaction_date
 				    FROM "transactions"."transaction" t
+				    JOIN "transactions".invoice i2 ON i2.invoice_id = t.invoice_id
+				    WHERE i2.client_role_id = ?
+				      AND i2.application_id = ?
 				    ORDER BY t.invoice_id, t.transaction_date DESC NULLS LAST
 				) lt ON lt.invoice_id = i.invoice_id
 				WHERE i.client_role_id = ?
+				  AND i.application_id = ?
+				ORDER BY i.invoice_date DESC NULLS LAST, i.invoice_number DESC NULLS LAST
+				LIMIT 200
 				""";
 
-		return cluboneJdbcTemplate.query(sql, (rs, rowNum) -> mapInvoiceFlatRow(rs), clientRoleId);
+		return cluboneJdbcTemplate.query(sql, (rs, rowNum) -> mapInvoiceFlatRow(rs), clientRoleId, appId,
+				clientRoleId, appId);
 	}
 
 	@Override
@@ -791,6 +846,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 			return Collections.emptyList();
 		}
 
+		UUID appId = AccessContext.applicationId();
 		// Build a dynamic IN clause (?, ?, ?, ...)
 		String inSql = String.join(",", Collections.nCopies(invoiceIds.size(), "?"));
 		String sql = """
@@ -807,10 +863,16 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    ie.total_amount
 				FROM "transactions".invoice_entity ie
 				WHERE ie.invoice_id IN (%s)
+				  AND ie.application_id = ?
 				ORDER BY ie.parent_invoice_entity_id NULLS FIRST, ie.invoice_entity_id
 				""".formatted(inSql);
 
-		return cluboneJdbcTemplate.query(sql, (rs, rowNum) -> mapInvoiceEntityRow(rs), invoiceIds.toArray());
+		Object[] args = new Object[invoiceIds.size() + 1];
+		for (int i = 0; i < invoiceIds.size(); i++) {
+			args[i] = invoiceIds.get(i);
+		}
+		args[invoiceIds.size()] = appId;
+		return cluboneJdbcTemplate.query(sql, (rs, rowNum) -> mapInvoiceEntityRow(rs), args);
 	}
 
 	private InvoiceFlatRow mapInvoiceFlatRow(ResultSet rs) throws SQLException {
@@ -1034,10 +1096,16 @@ public class TransactionDAOImpl implements TransactionDAO {
 	@Override
 	public List<io.clubone.transaction.v2.vo.InvoiceSummaryDTO> findByClientRole(UUID clientRoleId, Integer limit,
 			Integer offset) {
+		UUID appId = AccessContext.applicationId();
+		int safeLimit = Math.min(Math.max(limit != null ? limit : 100, 1), 200);
+		int safeOffset = Math.max(offset != null ? offset : 0, 0);
 		return cluboneJdbcTemplate.query(SQL_INVOICE_SUMMARY, ps -> {
 			ps.setObject(1, clientRoleId);
-			ps.setObject(2, limit);
-			ps.setObject(3, offset);
+			ps.setObject(2, appId);
+			ps.setObject(3, clientRoleId);
+			ps.setObject(4, appId);
+			ps.setInt(5, safeLimit);
+			ps.setInt(6, safeOffset);
 		}, (rs, rn) -> {
 			io.clubone.transaction.v2.vo.InvoiceSummaryDTO dto = new io.clubone.transaction.v2.vo.InvoiceSummaryDTO();
 			dto.setInvoiceId((UUID) rs.getObject("invoice_id"));
@@ -1115,6 +1183,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 				  select *
 				  from "transactions".invoice
 				  where invoice_id = ?
+				    and application_id = ?
 				),
 				sbh_pick as (
 				  select sbh.*
@@ -1131,6 +1200,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 				  select ie.*
 				  from "transactions".invoice_entity ie
 				  join inv i on ie.invoice_id = i.invoice_id
+				  where ie.application_id = i.application_id
 				  order by
 				    (ie.price_plan_template_id is not null) desc,
 				    ie.total_amount desc nulls last,
@@ -1246,7 +1316,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 																""";
 
 		try {
-			return Optional.ofNullable(cluboneJdbcTemplate.queryForObject(sql, RAW_MAPPER, invoiceId));
+			return Optional.ofNullable(
+					cluboneJdbcTemplate.queryForObject(sql, RAW_MAPPER, invoiceId, AccessContext.applicationId()));
 		} catch (EmptyResultDataAccessException ex) {
 			return Optional.empty();
 		}
@@ -1267,6 +1338,10 @@ public class TransactionDAOImpl implements TransactionDAO {
 				cycleNumber, cycleNumber);
 	}
 
+	private UUID resolveCachedLookupId(String cacheKey, String sql) {
+		return ACTIVATE_LOOKUP_CACHE.get(cacheKey, k -> cluboneJdbcTemplate.queryForObject(sql, UUID.class));
+	}
+
 	@Override
 	public void activateAgreementAndClientStatusForInvoice(UUID invoiceId, UUID actorId) {
 		if (invoiceId == null) {
@@ -1276,55 +1351,52 @@ public class TransactionDAOImpl implements TransactionDAO {
 			throw new IllegalArgumentException("actorId must not be null");
 		}
 
-		// 1) Update client_agreements.client_agreement status to ACTIVE
+		// Resolve lookup IDs once (process cache) instead of correlated subqueries per UPDATE.
+		UUID activeAgreementStatusId = resolveCachedLookupId("ca_status_ACTIVE", """
+				SELECT las.client_agreement_status_id
+				FROM client_agreements.lu_client_agreement_status las
+				WHERE las.code = 'ACTIVE'
+				  AND las.is_active = TRUE
+				LIMIT 1
+				""");
+		UUID activeClientStatusId = resolveCachedLookupId("client_status_Active", """
+				SELECT lcs.lu_client_status_id
+				FROM clients.lu_client_status lcs
+				WHERE lcs.client_status_type = 'Active'
+				  AND COALESCE(lcs.is_active, TRUE) = TRUE
+				LIMIT 1
+				""");
+		UUID activeAccountStatusId = resolveCachedLookupId("client_account_status_Active", """
+				SELECT lcas.lu_client_account_status_id
+				FROM clients.lu_client_account_status lcas
+				WHERE lcas.client_account_status_type = 'Active'
+				  AND COALESCE(lcas.is_active, TRUE) = TRUE
+				LIMIT 1
+				""");
+
 		final String updateClientAgreementSql = """
 				UPDATE client_agreements.client_agreement ca
 				SET
-				    client_agreement_status_id = (
-				        SELECT las.client_agreement_status_id
-				        FROM client_agreements.lu_client_agreement_status las
-				        WHERE las.code = 'ACTIVE'
-				          AND las.is_active = TRUE
-				        LIMIT 1
-				    ),
+				    client_agreement_status_id = ?,
 				    is_active = TRUE,
 				    modified_on = NOW(),
 				    modified_by = ?
 				FROM transactions.invoice i
 				WHERE i.invoice_id = ?
+				  AND i.application_id = ?
 				  AND i.client_agreement_id IS NOT NULL
 				  AND i.client_agreement_id = ca.client_agreement_id
 				""";
 
-		// order of args must match the ? placeholders: modified_by, invoice_id
-		cluboneJdbcTemplate.update(updateClientAgreementSql, actorId, invoiceId);
+		cluboneJdbcTemplate.update(updateClientAgreementSql, activeAgreementStatusId, actorId, invoiceId,
+				AccessContext.applicationId());
 
-		// 2) Update clients.client_role_status to ACTIVE values, again using joins &
-		// subqueries
 		final String updateClientRoleStatusSql = """
 				UPDATE clients.client_role_status crs
 				SET
-				    agreement_status_id = (
-				        SELECT las.client_agreement_status_id
-				        FROM client_agreements.lu_client_agreement_status las
-				        WHERE las.code = 'ACTIVE'
-				          AND las.is_active = TRUE
-				        LIMIT 1
-				    ),
-				    status_id = (
-				        SELECT lcs.lu_client_status_id
-				        FROM clients.lu_client_status lcs
-				        WHERE lcs.client_status_type = 'Active'
-				          AND COALESCE(lcs.is_active, TRUE) = TRUE
-				        LIMIT 1
-				    ),
-				    account_status_id = (
-				        SELECT lcas.lu_client_account_status_id
-				        FROM clients.lu_client_account_status lcas
-				        WHERE lcas.client_account_status_type = 'Active'
-				          AND COALESCE(lcas.is_active, TRUE) = TRUE
-				        LIMIT 1
-				    ),
+				    agreement_status_id = ?,
+				    status_id = ?,
+				    account_status_id = ?,
 				    is_active = TRUE,
 				    modified_on = NOW(),
 				    modified_by = ?
@@ -1332,12 +1404,14 @@ public class TransactionDAOImpl implements TransactionDAO {
 				JOIN client_agreements.client_agreement ca
 				  ON ca.client_agreement_id = i.client_agreement_id
 				WHERE i.invoice_id = ?
+				  AND i.application_id = ?
 				  AND i.client_agreement_id IS NOT NULL
 				  AND crs.client_role_id = ca.client_role_id
 				  AND COALESCE(crs.is_active, TRUE) = TRUE
 				""";
 
-		cluboneJdbcTemplate.update(updateClientRoleStatusSql, actorId, invoiceId);
+		cluboneJdbcTemplate.update(updateClientRoleStatusSql, activeAgreementStatusId, activeClientStatusId,
+				activeAccountStatusId, actorId, invoiceId, AccessContext.applicationId());
 	}
 
 	private static final class PromotionEffectValueRowMapper implements RowMapper<PromotionEffectValueDTO> {
@@ -1427,6 +1501,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 	          i.created_by
 	        from transactions.invoice i
 	        where i.invoice_id = ?
+	          and i.application_id = ?
 	    """;
 	    return cluboneJdbcTemplate.queryForObject(sql, (rs, rn) -> new InvoiceSeedRow(
 	        rs.getObject("invoice_id", UUID.class),
@@ -1435,7 +1510,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 	        rs.getString("billing_address"),
 	        rs.getObject("client_agreement_id", UUID.class),
 	        rs.getObject("created_by", UUID.class)
-	    ), invoiceId);
+	    ), invoiceId, AccessContext.applicationId());
 	}
 
 	public List<InvoiceBillableLineRow> fetchBillableLeafLines(UUID invoiceId, int cycleNumber,UUID clientAgreementId) {
@@ -1466,6 +1541,7 @@ public class TransactionDAOImpl implements TransactionDAO {
         ON bpcb.package_plan_template_id = ie.price_plan_template_id
        AND bpcb.cycle_range @> ?::int
     WHERE ie.invoice_id = ?
+      AND ie.application_id = ?
       AND ie.client_agreement_id = ?
       AND ie.is_active = true
       AND iepb.is_active = true
@@ -1493,6 +1569,7 @@ WHERE rn = 1;
 	        ),
 	        cycleNumber,
 	        invoiceId,
+	        AccessContext.applicationId(),
 	        clientAgreementId
 	    );
 	}
@@ -1545,6 +1622,7 @@ WHERE rn = 1;
 	@Override
 	public int resolveDefaultQtyFromEntitlement(UUID planTemplateId, UUID applicationId) {
 	    if (planTemplateId == null) return 1;
+	    UUID appId = applicationId != null ? applicationId : AccessContext.applicationId();
 
 	    // Entitlement rows hang off package_plan_template_term_config, not package_plan_template directly.
 	    final String sql = """
@@ -1554,7 +1632,7 @@ WHERE rn = 1;
 	          on tc.package_plan_template_term_config_id = e.package_plan_template_term_config_id
 	        where tc.package_plan_template_id = ?
 	          and coalesce(tc.is_active, true) = true
-	          and (? is null or e.application_id = ?)
+	          and e.application_id = ?
 	        order by e.created_on desc
 	        limit 1
 	    """;
@@ -1563,8 +1641,7 @@ WHERE rn = 1;
 	            sql,
 	            rs -> rs.next() ? rs.getInt("qty") : 1,
 	            planTemplateId,
-	            applicationId,
-	            applicationId);
+	            appId);
 
 	    return (q == null || q <= 0) ? 1 : q;
 	}
@@ -1679,10 +1756,12 @@ WHERE rn = 1;
 	        JOIN transactions.invoice_entity ie
 	          ON ie.invoice_entity_id = iep.invoice_entity_id
 	        WHERE ie.invoice_id = ?
+	          AND ie.application_id = ?
 	          AND iep.is_active = true
 	        LIMIT 1
 	    """;
-	    List<UUID> rows = cluboneJdbcTemplate.query(sql, (rs, i) -> rs.getObject(1, UUID.class), invoiceId);
+	    List<UUID> rows = cluboneJdbcTemplate.query(sql, (rs, i) -> rs.getObject(1, UUID.class), invoiceId,
+	            AccessContext.applicationId());
 	    return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
 	}
 

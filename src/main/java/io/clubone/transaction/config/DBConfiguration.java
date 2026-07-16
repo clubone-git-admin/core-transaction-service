@@ -11,6 +11,10 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
+import com.zaxxer.hikari.HikariDataSource;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.PlatformTransactionManager;
+
 @Configuration
 public class DBConfiguration {
 
@@ -18,7 +22,14 @@ public class DBConfiguration {
 	@Bean(name = "cluboneDb")
 	@ConfigurationProperties(prefix = "spring.datasource.clubone")
 	public DataSource cluboneDataSource() {
-		return DataSourceBuilder.create().build();
+		// Explicit Hikari so spring.datasource.clubone.hikari.* binds correctly
+		return DataSourceBuilder.create().type(HikariDataSource.class).build();
+	}
+
+	@Bean
+	@Primary
+	public PlatformTransactionManager transactionManager(@Qualifier("cluboneDb") DataSource cluboneDb) {
+		return new DataSourceTransactionManager(cluboneDb);
 	}
 
 	@Bean(name = "cluboneJdbcTemplate")

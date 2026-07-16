@@ -123,8 +123,7 @@ public class InvoiceNotificationHelper {
                 );
 
         sendInvoiceNotification(payload);
-        if(payload.isAccess()) {
-        	System.out.println("Welcome mail for employee ");
+        if (payload.isAccess()) {
         	payload.setTemplateCode("WELCOME_MSG");
         	sendInvoiceNotification(payload);
         }

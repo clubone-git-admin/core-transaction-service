@@ -870,9 +870,10 @@ public class BillingQuoteSubscriptionPersistenceService {
 				    term_total_cycles,
 				    is_active,
 				    created_on,
-				    created_by
+				    created_by,
+				    application_id
 				) VALUES (
-				    gen_random_uuid(), ?, ?, ?, ?, ?, true, now(), ?
+				    gen_random_uuid(), ?, ?, ?, ?, ?, true, now(), ?,'5949a200-82fb-4171-9001-0f77ac439011'
 				) RETURNING subscription_plan_id
 				""", UUID.class,
 				clientPaymentMethodId,
@@ -976,9 +977,10 @@ public class BillingQuoteSubscriptionPersistenceService {
 				    current_cycle_number,
 				    subscription_instance_status_id,
 				    created_on,
-				    created_by
+				    created_by,
+				    application_id
 				) VALUES (
-				    gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, now(), ?
+				    gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, now(), ?,'5949a200-82fb-4171-9001-0f77ac439011'
 				) RETURNING subscription_instance_id
 				""", UUID.class,
 				subscriptionPlanId,
@@ -1127,9 +1129,10 @@ public class BillingQuoteSubscriptionPersistenceService {
 					    invoice_sub_total,
 					    invoice_tax_amount,
 					    invoice_discount_amount,
-					    created_on
+					    created_on,
+					    application_id
 					) VALUES (
-					    gen_random_uuid(), ?, now(), ?, ?, ?, false, ?, ?, ?, ?, ?, now()
+					    gen_random_uuid(), ?, now(), ?, ?, ?, false, ?, ?, ?, ?, ?, now(),'5949a200-82fb-4171-9001-0f77ac439011'
 					)
 					""",
 					subscriptionInstanceId,
@@ -1495,9 +1498,10 @@ public class BillingQuoteSubscriptionPersistenceService {
 				    invoice_id,
 				    billed_on,
 				    billing_run_id,
-				    created_on
+				    created_on,
+				    application_id
 				) VALUES (
-				    gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now()
+				    gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(),'5949a200-82fb-4171-9001-0f77ac439011'
 				) RETURNING billing_schedule_id
 				""", UUID.class,
 				subscriptionInstanceId,

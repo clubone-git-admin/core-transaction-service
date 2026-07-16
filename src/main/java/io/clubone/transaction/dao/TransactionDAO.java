@@ -147,4 +147,5 @@ public interface TransactionDAO {
 	 */
 	Optional<UUID> resolveLevelIdForInvoice(UUID levelIdOrReferenceEntityId);
 
+	
 }
