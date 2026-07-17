@@ -1264,7 +1264,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 					(UUID) rs.getObject("entity_type_id"),
 
 					// frequency/terms
-					rs.getString("frequency_name"), (Integer) rs.getObject("remaining_cycles"),
+					rs.getString("frequency_name"), rs.getInt("remaining_cycles"),
 
 					// invoice_entity joins
 					(UUID) rs.getObject("child_entity_id"), (UUID) rs.getObject("child_entity_type_id"),
@@ -1358,15 +1358,18 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 				    COALESCE(bpu.code, bpu.display_name) AS frequency_name,
 
-				    CASE
-				        WHEN sp.term_total_cycles IS NOT NULL
-				         AND si.current_cycle_number IS NOT NULL
-				        THEN GREATEST(
-				            sp.term_total_cycles - si.current_cycle_number,
-				            0
-				        )
-				        ELSE NULL
-				    END AS remaining_cycles,
+				    COALESCE(
+				        CASE
+				            WHEN sp.term_total_cycles IS NOT NULL
+				             AND si.current_cycle_number IS NOT NULL
+				            THEN GREATEST(
+				                sp.term_total_cycles - si.current_cycle_number,
+				                0
+				            )
+				            ELSE 0
+				        END,
+				        0
+				    ) AS remaining_cycles,
 
 				    ie.entity_id AS child_entity_id,
 				    ie.entity_type_id AS child_entity_type_id,
