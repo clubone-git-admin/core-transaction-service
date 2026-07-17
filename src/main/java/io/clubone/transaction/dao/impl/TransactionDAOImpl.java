@@ -140,10 +140,17 @@ public class TransactionDAOImpl implements TransactionDAO {
 			""";
 
 	private static final String UPDATE_TRANSACTION_CLIENT_AGREEMENT_SQL = """
-			UPDATE "transactions"."transaction"
-			SET client_agreement_id = ?
-			WHERE transaction_id = ?
-			  AND application_id = ?
+			UPDATE transactions.invoice i
+			SET client_agreement_id = ?,
+			    modified_on = NOW()
+			WHERE i.application_id = ?
+			  AND i.invoice_id = (
+			      SELECT t.invoice_id
+			      FROM transactions."transaction" t
+			      WHERE t.transaction_id = ?
+			        AND t.application_id = ?
+			      LIMIT 1
+			  )
 			""";
 
 	private static final String TAX_RATE_SQL = """
@@ -162,27 +169,39 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 	private static final String SQL_TYPE_NAME_BY_BUNDLE_ITEM_ID = """
 			    SELECT lit.type_name
-			    FROM bundles_new.bundle_item bi
-			    JOIN items.item it          ON it.item_id = bi.item_id
-			    JOIN items.lu_itemtypes lit ON lit.item_type_id = it.item_type_id
-			    WHERE bi.bundle_item_id = ?
-			      AND COALESCE(bi.is_active, true) = true
+			    FROM package.package_item pi
+			    JOIN items.item_version iv
+			      ON iv.item_version_id = pi.item_version_id
+			    JOIN items.item it
+			      ON it.item_id = iv.item_id
+			    JOIN items.lu_itemtypes lit
+			      ON lit.item_type_id = it.item_type_id
+			    WHERE pi.package_item_id = ?
+			      AND COALESCE(pi.is_active, true) = true
+			      AND pi.application_id = ?
 			    LIMIT 1
 			""";
 
 	private static final String SQL_IS_PRORATE_APPLICABLE = """
 			    SELECT EXISTS (
 			        SELECT 1
-			        FROM bundles_new.bundle_plan_template          bpt
-			        JOIN bundles_new.lu_proration_strategy         ps  ON ps.proration_strategy_id = bpt.default_proration_strategy_id
-			        JOIN billing_config.billing_period_unit       bpu ON bpu.billing_period_unit_id = bpt.subscription_frequency_id
-			        WHERE bpt.plan_template_id = ?
-			          AND COALESCE(bpt.is_active, true) = true
-			          AND COALESCE(ps.is_active,  true) = true
+			        FROM package.package_plan_template ppt
+			        JOIN package.package_plan_template_term_config tc
+			          ON tc.package_plan_template_id = ppt.package_plan_template_id
+			        JOIN billing_config.proration_strategy ps
+			          ON ps.proration_strategy_id = tc.default_proration_strategy_id
+			        JOIN billing_config.billing_period_unit bpu
+			          ON bpu.billing_period_unit_id = tc.billing_period_unit_id
+			        WHERE ppt.package_plan_template_id = ?
+			          AND ppt.application_id = ?
+			          AND COALESCE(ppt.is_active, true) = true
+			          AND COALESCE(tc.is_active, true) = true
+			          AND COALESCE(ps.is_active, true) = true
 			          AND COALESCE(bpu.is_active, true) = true
 			          AND UPPER(ps.code) = 'DAILY'
-			          AND UPPER(COALESCE(bpu.code, bpu.display_name, '')) IN ('MONTHLY', 'MONTH', 'MON')
-			    );
+			          AND UPPER(COALESCE(bpu.code, bpu.display_name, ''))
+			              IN ('MONTHLY', 'MONTH', 'MON')
+			    )
 			""";
 
 	private static final String SQL_INVOICE_SUMMARY = """
@@ -411,14 +430,25 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 		// 1) Insert transaction header (now also sets created_by)
 		String sql = """
-				    INSERT INTO transactions.transaction (
-				        transaction_id, client_agreement_id, client_payment_transaction_id,
-				        level_id, invoice_id, transaction_date, application_id, created_on, created_by
-				    ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), ?)
+				    INSERT INTO transactions."transaction" (
+				        transaction_id,
+				        client_payment_transaction_id,
+				        invoice_id,
+				        transaction_date,
+				        application_id,
+				        created_on,
+				        created_by
+				    ) VALUES (?, ?, ?, ?, ?, NOW(), ?)
 				""";
 
-		cluboneJdbcTemplate.update(sql, transactionId, dto.getClientAgreementId(), dto.getClientPaymentTransactionId(),
-				dto.getLevelId(), dto.getInvoiceId(), dto.getTransactionDate(), appId, dto.getCreatedBy()
+		cluboneJdbcTemplate.update(
+				sql,
+				transactionId,
+				dto.getClientPaymentTransactionId(),
+				dto.getInvoiceId(),
+				dto.getTransactionDate(),
+				appId,
+				dto.getCreatedBy()
 		);
 
 		// 2) Resolve BUNDLE type id once (for header detection)
@@ -491,8 +521,14 @@ public class TransactionDAOImpl implements TransactionDAO {
 	@Override
 	public UUID findTransactionIdByInvoiceId(UUID invoiceId) {
 		List<UUID> ids = cluboneJdbcTemplate.query("""
-				    SELECT transaction_id FROM transactions.transaction
-				     WHERE invoice_id = ? AND application_id = ?
+				    SELECT transaction_id
+				    FROM transactions."transaction"
+				    WHERE invoice_id = ?
+				      AND application_id = ?
+				      AND COALESCE(is_active, true) = true
+				    ORDER BY transaction_date DESC NULLS LAST,
+				             created_on DESC NULLS LAST
+				    LIMIT 1
 				""", (rs, rn) -> UUID.fromString(rs.getString(1)), invoiceId, AccessContext.applicationId());
 		return ids.isEmpty() ? null : ids.get(0);
 	}
@@ -561,10 +597,13 @@ public class TransactionDAOImpl implements TransactionDAO {
 		}
 		List<UUID> ids = cluboneJdbcTemplate.query("""
 				SELECT transaction_id
-				  FROM transactions.transaction
+				  FROM transactions."transaction"
 				 WHERE invoice_id = ?
 				   AND client_payment_transaction_id = ?
 				   AND application_id = ?
+				   AND COALESCE(is_active, true) = true
+				 ORDER BY transaction_date DESC NULLS LAST,
+				          created_on DESC NULLS LAST
 				 LIMIT 1
 				""", (rs, rn) -> UUID.fromString(rs.getString(1)), invoiceId, clientPaymentTransactionId,
 				AccessContext.applicationId());
@@ -612,63 +651,91 @@ public class TransactionDAOImpl implements TransactionDAO {
 	}
 
 	private static final String SQL = """
-						WITH RECURSIVE ancestors AS (
-			  SELECT l.level_id, l.parent_level_id, 0 AS depth
-			  FROM location.levels l
-			  WHERE l.level_id = ?
-			  UNION ALL
-			  SELECT p.level_id, p.parent_level_id, a.depth + 1
-			  FROM location.levels p
-			  JOIN ancestors a ON a.parent_level_id = p.level_id
+			WITH RECURSIVE ancestors AS (
+			    SELECT l.level_id, l.parent_level_id, 0 AS depth
+			    FROM location.levels l
+			    WHERE l.level_id = ?
+			    UNION ALL
+			    SELECT p.level_id, p.parent_level_id, a.depth + 1
+			    FROM location.levels p
+			    JOIN ancestors a
+			      ON a.parent_level_id = p.level_id
 			),
 			level_candidates AS (
-			  SELECT level_id, depth FROM ancestors
-			  UNION ALL
-			  SELECT NULL::uuid AS level_id, 100000 AS depth
+			    SELECT level_id, depth
+			    FROM ancestors
+			    UNION ALL
+			    SELECT NULL::uuid AS level_id, 100000 AS depth
 			)
 			SELECT DISTINCT
-			  b.description,
-			  bi.item_id,
-			  i.item_description,
-			  bi.item_quantity,
-			  ip.price AS "itemPrice",
-			  i.tax_group_id,
-			  eff_bp.price,
-			  biro.is_continuous,
-			  birr.recurrence_count,
-			  eff_bp.price_level_id
-			FROM bundles_new.bundle b
-			JOIN bundles_new.bundle_location bl
-			  ON bl.bundle_id = b.bundle_id
-			JOIN bundles_new.bundle_item bi
-			  ON bi.bundle_id = b.bundle_id
-			LEFT JOIN bundles_new.bundle_item_recurring_option biro
-			  ON biro.bundle_item_id = bi.bundle_item_id
-			LEFT JOIN bundles_new.bundle_item_recurring_recurrence birr
-			  ON birr.recurring_option_id = biro.recurring_option_id
+			    p.description,
+			    i.item_id,
+			    i.item_description,
+			    pi.item_quantity,
+			    eff_ip.price AS "itemPrice",
+			    i.tax_group_id,
+			    eff_pp.price,
+			    NULL::boolean AS is_continuous,
+			    NULL::integer AS recurrence_count,
+			    eff_pp.price_level_id
+			FROM package.package p
+			JOIN package.package_version pv
+			  ON pv.package_version_id = p.current_version_id
+			 AND pv.package_id = p.package_id
+			 AND pv.application_id = p.application_id
+			 AND COALESCE(pv.is_active, true) = true
+			JOIN package.package_item pi
+			  ON pi.package_id = p.package_id
+			 AND pi.application_id = p.application_id
+			 AND COALESCE(pi.is_active, true) = true
+			JOIN items.item_version iv
+			  ON iv.item_version_id = pi.item_version_id
+			JOIN items.item i
+			  ON i.item_id = iv.item_id
 
 			LEFT JOIN LATERAL (
-			  SELECT bp.price,
-			         blp.level_id AS price_level_id
-			  FROM bundles_new.bundle_price bp
-			 JOIN bundles_new.bundle_location blp
-			    ON blp.bundle_location_id = bp.bundle_location_id
-			   AND blp.bundle_id = b.bundle_id           -- keep it within this bundle
-			  JOIN level_candidates lc
-			    ON (blp.level_id = lc.level_id) OR (blp.level_id IS NULL AND lc.level_id IS NULL)
-			  WHERE bp.bundle_item_id = bi.bundle_item_id
-			  ORDER BY lc.depth ASC
-			  LIMIT 1
-			) eff_bp ON TRUE
+			    SELECT ip.price
+			    FROM items.item_price ip
+			    JOIN level_candidates lc
+			      ON (ip.level_id = lc.level_id)
+			      OR (ip.level_id IS NULL AND lc.level_id IS NULL)
+			    WHERE ip.item_version_id = pi.item_version_id
+			      AND COALESCE(ip.is_active, true) = true
+			      AND (ip.start_at_local IS NULL OR ip.start_at_local <= NOW())
+			      AND (ip.end_at_local IS NULL OR ip.end_at_local >= NOW())
+			    ORDER BY lc.depth ASC, ip.created_on DESC
+			    LIMIT 1
+			) eff_ip ON TRUE
 
-			JOIN items.item i
-			  ON i.item_id = bi.item_id
-			JOIN items.item_price ip
-			  ON i.item_id = i.item_id
+			LEFT JOIN LATERAL (
+			    SELECT
+			        pp.price,
+			        pl.level_id AS price_level_id
+			    FROM package.package_location pl
+			    JOIN package.package_price pp
+			      ON pp.package_location_id = pl.package_location_id
+			     AND pp.package_item_id = pi.package_item_id
+			     AND pp.package_version_id = pv.package_version_id
+			     AND pp.application_id = p.application_id
+			     AND COALESCE(pp.is_active, true) = true
+			    JOIN level_candidates lc
+			      ON (pl.level_id = lc.level_id)
+			      OR (pl.level_id IS NULL AND lc.level_id IS NULL)
+			    WHERE pl.package_version_id = pv.package_version_id
+			      AND pl.application_id = p.application_id
+			      AND COALESCE(pl.is_active, true) = true
+			      AND pl.valid_from <= NOW()
+			      AND (pl.valid_to IS NULL OR pl.valid_to >= NOW())
+			    ORDER BY lc.depth ASC, pl.valid_from DESC
+			    LIMIT 1
+			) eff_pp ON TRUE
 
-			WHERE b.bundle_id = ?
-			  AND bl.level_id IN (SELECT level_id FROM ancestors);
-						""";
+			WHERE p.package_id = ?
+			  AND p.application_id = ?
+			  AND COALESCE(p.is_active, true) = true
+			  AND eff_pp.price IS NOT NULL
+			ORDER BY pi.display_order NULLS LAST, i.item_description
+			""";
 
 	private static final RowMapper<BundleItemPriceDTO> ROW_MAPPER = new RowMapper<>() {
 		@Override
@@ -692,7 +759,13 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 	@Override
 	public List<BundleItemPriceDTO> getBundleItemsWithPrices(UUID bundleId, UUID levelId) {
-		return cluboneJdbcTemplate.query(SQL, ROW_MAPPER, levelId, bundleId);
+		return cluboneJdbcTemplate.query(
+				SQL,
+				ROW_MAPPER,
+				levelId,
+				bundleId,
+				AccessContext.applicationId()
+		);
 	}
 
 	private static final RowMapper<EntityTypeDTO> ENTITY_TYPE_ROW_MAPPER = new RowMapper<>() {
@@ -777,8 +850,14 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 	@Override
 	public int updateClientAgreementId(UUID transactionId, UUID clientAgreementId) {
-		return cluboneJdbcTemplate.update(UPDATE_TRANSACTION_CLIENT_AGREEMENT_SQL, clientAgreementId, transactionId,
-				AccessContext.applicationId());
+		UUID appId = AccessContext.applicationId();
+		return cluboneJdbcTemplate.update(
+				UPDATE_TRANSACTION_CLIENT_AGREEMENT_SQL,
+				clientAgreementId,
+				appId,
+				transactionId,
+				appId
+		);
 	}
 
 	private static final RowMapper<TaxRateAllocationDTO> TAX_RATE_ROW_MAPPER = new RowMapper<>() {
@@ -812,32 +891,47 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    i.sub_total,
 				    i.tax_amount,
 				    i.discount_amount,
-				    lt.transaction_code,
-				    lt.client_agreement_id,
+				    lt.transaction_number AS transaction_code,
+				    i.client_agreement_id,
 				    lt.client_payment_transaction_id,
 				    lt.transaction_date
-				FROM "transactions".invoice i
+				FROM transactions.invoice i
 				LEFT JOIN (
 				    SELECT DISTINCT ON (t.invoice_id)
 				        t.invoice_id,
-				        t.transaction_code,
-				        t.client_agreement_id,
+				        t.transaction_number,
 				        t.client_payment_transaction_id,
-				        t.transaction_date
-				    FROM "transactions"."transaction" t
-				    JOIN "transactions".invoice i2 ON i2.invoice_id = t.invoice_id
+				        t.transaction_date,
+				        t.created_on
+				    FROM transactions."transaction" t
+				    JOIN transactions.invoice i2
+				      ON i2.invoice_id = t.invoice_id
+				     AND i2.application_id = t.application_id
 				    WHERE i2.client_role_id = ?
 				      AND i2.application_id = ?
-				    ORDER BY t.invoice_id, t.transaction_date DESC NULLS LAST
+				      AND COALESCE(t.is_active, true) = true
+				    ORDER BY
+				        t.invoice_id,
+				        t.transaction_date DESC NULLS LAST,
+				        t.created_on DESC NULLS LAST
 				) lt ON lt.invoice_id = i.invoice_id
 				WHERE i.client_role_id = ?
 				  AND i.application_id = ?
-				ORDER BY i.invoice_date DESC NULLS LAST, i.invoice_number DESC NULLS LAST
+				  AND COALESCE(i.is_active, true) = true
+				ORDER BY
+				    i.invoice_date DESC NULLS LAST,
+				    i.invoice_number DESC NULLS LAST
 				LIMIT 200
 				""";
 
-		return cluboneJdbcTemplate.query(sql, (rs, rowNum) -> mapInvoiceFlatRow(rs), clientRoleId, appId,
-				clientRoleId, appId);
+		return cluboneJdbcTemplate.query(
+				sql,
+				(rs, rowNum) -> mapInvoiceFlatRow(rs),
+				clientRoleId,
+				appId,
+				clientRoleId,
+				appId
+		);
 	}
 
 	@Override
@@ -1079,8 +1173,12 @@ public class TransactionDAOImpl implements TransactionDAO {
 	@Override
 	public Optional<String> findTypeNameByBundleItemId(UUID bundleItemId) {
 		try {
-			String name = cluboneJdbcTemplate.queryForObject(SQL_TYPE_NAME_BY_BUNDLE_ITEM_ID, String.class,
-					bundleItemId);
+			String name = cluboneJdbcTemplate.queryForObject(
+					SQL_TYPE_NAME_BY_BUNDLE_ITEM_ID,
+					String.class,
+					bundleItemId,
+					AccessContext.applicationId()
+			);
 			return Optional.ofNullable(name);
 		} catch (EmptyResultDataAccessException e) {
 			return Optional.empty();
@@ -1089,7 +1187,12 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 	@Override
 	public boolean isProrateApplicable(UUID planTemplateId) {
-		Boolean ok = cluboneJdbcTemplate.queryForObject(SQL_IS_PRORATE_APPLICABLE, Boolean.class, planTemplateId);
+		Boolean ok = cluboneJdbcTemplate.queryForObject(
+				SQL_IS_PRORATE_APPLICABLE,
+				Boolean.class,
+				planTemplateId,
+				AccessContext.applicationId()
+		);
 		return ok != null && ok;
 	}
 
@@ -1177,147 +1280,155 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 	@Override
 	public Optional<InvoiceDetailRaw> loadInvoiceAggregate(UUID invoiceId) {
-		// TODO: adjust schema/table names for the invoice table if different
 		final String sql = """
-																with inv as (
-				  select *
-				  from "transactions".invoice
-				  where invoice_id = ?
-				    and application_id = ?
+				WITH inv AS (
+				    SELECT i.*
+				    FROM transactions.invoice i
+				    WHERE i.invoice_id = ?
+				      AND i.application_id = ?
 				),
-				sbh_pick as (
-				  select sbh.*
-				  from client_subscription_billing.subscription_billing_history sbh
-				  join inv i on sbh.invoice_id = i.invoice_id
-				  order by
-				    sbh.billing_attempt_on desc nulls last,
-				    sbh.payment_due_date   desc nulls last,
-				    sbh.cycle_number       desc nulls last
-				  limit 1
+				sbh_pick AS (
+				    SELECT sbh.*
+				    FROM client_subscription_billing.subscription_billing_history sbh
+				    JOIN inv i
+				      ON i.invoice_id = sbh.invoice_id
+				    ORDER BY
+				        sbh.billing_attempt_on DESC NULLS LAST,
+				        sbh.created_on DESC NULLS LAST
+				    LIMIT 1
 				),
-				-- pick ONE invoice_entity row for this invoice (prefer items tied to a plan template)
-				ie_pick as (
-				  select ie.*
-				  from "transactions".invoice_entity ie
-				  join inv i on ie.invoice_id = i.invoice_id
-				  where ie.application_id = i.application_id
-				  order by
-				    (ie.price_plan_template_id is not null) desc,
-				    ie.total_amount desc nulls last,
-				    ie.created_on  desc nulls last
-				  limit 1
+				ie_pick AS (
+				    SELECT ie.*
+				    FROM transactions.invoice_entity ie
+				    JOIN inv i
+				      ON i.invoice_id = ie.invoice_id
+				     AND i.application_id = ie.application_id
+				    WHERE COALESCE(ie.is_active, true) = true
+				    ORDER BY
+				        (ie.price_plan_template_id IS NOT NULL) DESC,
+				        ie.total_amount DESC NULLS LAST,
+				        ie.created_on DESC NULLS LAST
+				    LIMIT 1
+				),
+				payment_totals AS (
+				    SELECT
+				        t.invoice_id,
+				        COALESCE(SUM(cpt.amount), 0)::numeric AS paid_amount
+				    FROM transactions."transaction" t
+				    JOIN client_payments.client_payment_transaction cpt
+				      ON cpt.client_payment_transaction_id =
+				         t.client_payment_transaction_id
+				    JOIN inv i
+				      ON i.invoice_id = t.invoice_id
+				     AND i.application_id = t.application_id
+				    WHERE COALESCE(t.is_active, true) = true
+				    GROUP BY t.invoice_id
 				)
-				select
-				  -- invoice
-				  i.invoice_id,
-				  i.invoice_number,
-				  i.invoice_date::date                        as invoice_date,
-				  coalesce(i.total_amount, 0)                 as amount,
-				  case when i.is_paid then 0 else coalesce(i.total_amount,0) end as balance_due,
-				  0::numeric                                  as write_off,
-				  coalesce(lis.status_name, 'UNKNOWN')        as status,
-				  null::text                                  as sales_rep,
-				  i.level_id                                  as level_id,
+				SELECT
+				    i.invoice_id,
+				    i.invoice_number,
+				    i.invoice_date::date AS invoice_date,
+				    COALESCE(i.total_amount, 0) AS amount,
+				    GREATEST(
+				        COALESCE(i.total_amount, 0) -
+				        COALESCE(pt.paid_amount, 0),
+				        0
+				    ) AS balance_due,
+				    0::numeric AS write_off,
+				    COALESCE(lis.status_name, 'UNKNOWN') AS status,
+				    NULL::text AS sales_rep,
+				    i.level_id,
 
-				  -- billing history
-				  sbh.subscription_instance_id,
-				  sbh.amount_gross_incl_tax                   as amount_gross_incl_tax,
+				    sbh.subscription_instance_id,
+				    sbh.invoice_total_amount AS amount_gross_incl_tax,
 
-				  -- instance
-				  si.subscription_plan_id,
-				  si.start_date,
-				  si.next_billing_date,
-				  si.last_billed_on,
-				  si.end_date,
-				  si.current_cycle_number,
+				    si.subscription_plan_id,
+				    si.billing_start_date AS start_date,
+				    si.next_billing_date,
+				    si.last_billed_on,
+				    si.billing_end_date AS end_date,
+				    si.current_cycle_number,
 
-				  -- plan
-				  sp.interval_count,
-				  sbcs.billing_period_unit_id                 AS subscription_frequency_id,
-				  sp.contract_start_date,
-				  sp.contract_end_date,
-				  sp.entity_id,
-				  sp.entity_type_id,
+				    sbcs.interval_count,
+				    sbcs.billing_period_unit_id AS subscription_frequency_id,
+				    si.billing_start_date AS contract_start_date,
+				    si.billing_end_date AS contract_end_date,
+				    ie.entity_id,
+				    ie.entity_type_id,
 
-				  -- frequency (billing_period_unit: code/display_name)
-				  COALESCE(lf.code, lf.display_name)          AS frequency_name,
+				    COALESCE(bpu.code, bpu.display_name) AS frequency_name,
 
-				  -- terms
-				  spt.remaining_cycles,
+				    CASE
+				        WHEN sp.term_total_cycles IS NOT NULL
+				         AND si.current_cycle_number IS NOT NULL
+				        THEN GREATEST(
+				            sp.term_total_cycles - si.current_cycle_number,
+				            0
+				        )
+				        ELSE NULL
+				    END AS remaining_cycles,
 
-				  -- NEW: parent entity info from the picked invoice_entity
-				  ie.entity_id                                 as child_entity_id,
-				  ie.entity_type_id                            as child_entity_type_id,
-				  iep.entity_id                                as parent_entity_id,
-				  iep.entity_type_id                           as parent_entity_type_id,
+				    ie.entity_id AS child_entity_id,
+				    ie.entity_type_id AS child_entity_type_id,
+				    iep.entity_id AS parent_entity_id,
+				    iep.entity_type_id AS parent_entity_type_id,
 
-				  -- NEW: template fields
-				  bpt.total_cycles                             as template_total_cycles,
-				  bpt.level_id                                 as template_level_id,
+				    tc.total_cycles AS template_total_cycles,
+				    ppt.level_id AS template_level_id,
 
-				  -- NEW: final total_cycles preference: template -> computed from instance/term
-				  coalesce(
-				    bpt.total_cycles,
-				    case
-				      when si.current_cycle_number is not null and spt.remaining_cycles is not null
-				        then si.current_cycle_number + spt.remaining_cycles
-				      else null
-				    end
-				  )                                            as total_cycles
-
-				from inv i
-				join sbh_pick sbh on true
-				join client_subscription_billing.subscription_instance si
-				  on si.subscription_instance_id = sbh.subscription_instance_id
-				join client_subscription_billing.subscription_plan sp
-				  on sp.subscription_plan_id = si.subscription_plan_id
-				left join lateral (
-				  select sps0.*
-				  from client_subscription_billing.subscription_purchase_snapshot sps0
-				  where sps0.subscription_plan_id = sp.subscription_plan_id
-				  order by sps0.captured_on desc nulls last
-				  limit 1
-				) sps on true
-				left join lateral (
-				  select l.subscription_billing_config_snapshot_id as sbcs_id
-				  from client_subscription_billing.subscription_purchase_snapshot_line l
-				  where l.subscription_purchase_snapshot_id = sps.subscription_purchase_snapshot_id
-				    and l.subscription_billing_config_snapshot_id is not null
-				  order by l.line_sequence
-				  limit 1
-				) spsl_sbcs on true
-				left join client_subscription_billing.subscription_billing_config_snapshot sbcs
-				  on sbcs.subscription_billing_config_snapshot_id = spsl_sbcs.sbcs_id
-				left join billing_config.billing_period_unit lf
-				  on lf.billing_period_unit_id = sbcs.billing_period_unit_id
-
-				-- latest plan term (if any)
-				left join lateral (
-				  select spt.*
-				  from client_subscription_billing.subscription_plan_term spt
-				  where spt.subscription_plan_id = sp.subscription_plan_id
-				  order by spt.modified_on desc nulls last
-				  limit 1
-				) spt on true
-
-				-- pick one invoice_entity and its parent
-				left join ie_pick ie on true
-				left join "transactions".invoice_entity iep
-				  on iep.invoice_entity_id = ie.parent_invoice_entity_id
-
-				-- link to bundle plan template for cycles/level
-				left join bundles_new.bundle_plan_template bpt
-				  on bpt.plan_template_id = ie.price_plan_template_id
-
-				left join "transactions".lu_invoice_status lis
-				  on lis.invoice_status_id = i.invoice_status_id;
-
-
-																""";
+				    COALESCE(
+				        tc.total_cycles,
+				        sp.term_total_cycles
+				    ) AS total_cycles
+				FROM inv i
+				LEFT JOIN sbh_pick sbh
+				  ON TRUE
+				LEFT JOIN client_subscription_billing.subscription_instance si
+				  ON si.subscription_instance_id = sbh.subscription_instance_id
+				LEFT JOIN client_subscription_billing.subscription_plan sp
+				  ON sp.subscription_plan_id = si.subscription_plan_id
+				LEFT JOIN LATERAL (
+				    SELECT sbcs0.*
+				    FROM client_subscription_billing.subscription_billing_config_snapshot sbcs0
+				    WHERE sbcs0.subscription_plan_id = sp.subscription_plan_id
+				    ORDER BY sbcs0.created_on DESC NULLS LAST
+				    LIMIT 1
+				) sbcs ON TRUE
+				LEFT JOIN billing_config.billing_period_unit bpu
+				  ON bpu.billing_period_unit_id = sbcs.billing_period_unit_id
+				LEFT JOIN ie_pick ie
+				  ON TRUE
+				LEFT JOIN transactions.invoice_entity iep
+				  ON iep.invoice_entity_id = ie.parent_invoice_entity_id
+				 AND iep.application_id = i.application_id
+				LEFT JOIN package.package_plan_template ppt
+				  ON ppt.package_plan_template_id = ie.price_plan_template_id
+				 AND ppt.application_id = i.application_id
+				LEFT JOIN LATERAL (
+				    SELECT tc0.*
+				    FROM package.package_plan_template_term_config tc0
+				    WHERE tc0.package_plan_template_id =
+				          ppt.package_plan_template_id
+				      AND tc0.application_id = i.application_id
+				      AND COALESCE(tc0.is_active, true) = true
+				    ORDER BY tc0.created_on DESC NULLS LAST
+				    LIMIT 1
+				) tc ON TRUE
+				LEFT JOIN transactions.lu_invoice_status lis
+				  ON lis.invoice_status_id = i.invoice_status_id
+				LEFT JOIN payment_totals pt
+				  ON pt.invoice_id = i.invoice_id
+				""";
 
 		try {
 			return Optional.ofNullable(
-					cluboneJdbcTemplate.queryForObject(sql, RAW_MAPPER, invoiceId, AccessContext.applicationId()));
+					cluboneJdbcTemplate.queryForObject(
+							sql,
+							RAW_MAPPER,
+							invoiceId,
+							AccessContext.applicationId()
+					)
+			);
 		} catch (EmptyResultDataAccessException ex) {
 			return Optional.empty();
 		}
@@ -1326,16 +1437,30 @@ public class TransactionDAOImpl implements TransactionDAO {
 	@Override
 	public BigDecimal findEffectivePriceForCycle(UUID subscriptionPlanId, int cycleNumber) {
 		final String sql = """
-				select spcp.effective_unit_price
-				from client_subscription_billing.subscription_plan_cycle_price spcp
-				where spcp.subscription_plan_id = ?
-				  and spcp.cycle_start <= ?
-				  and (spcp.cycle_end is null or spcp.cycle_end >= ?)
-				order by spcp.cycle_start desc
-				limit 1
+				SELECT pscp.unit_price
+				FROM client_subscription_billing.subscription_purchase_snapshot sps
+				JOIN client_subscription_billing.subscription_purchase_snapshot_cycle_price pscp
+				  ON pscp.subscription_purchase_snapshot_id =
+				     sps.subscription_purchase_snapshot_id
+				WHERE sps.subscription_plan_id = ?
+				  AND pscp.cycle_start <= ?
+				  AND (
+				      pscp.cycle_end IS NULL
+				      OR pscp.cycle_end >= ?
+				  )
+				ORDER BY
+				    sps.captured_on DESC NULLS LAST,
+				    pscp.cycle_start DESC
+				LIMIT 1
 				""";
-		return cluboneJdbcTemplate.query(sql, rs -> rs.next() ? rs.getBigDecimal(1) : null, subscriptionPlanId,
-				cycleNumber, cycleNumber);
+
+		return cluboneJdbcTemplate.query(
+				sql,
+				rs -> rs.next() ? rs.getBigDecimal("unit_price") : null,
+				subscriptionPlanId,
+				cycleNumber,
+				cycleNumber
+		);
 	}
 
 	private UUID resolveCachedLookupId(String cacheKey, String sql) {
@@ -1575,8 +1700,14 @@ public class TransactionDAOImpl implements TransactionDAO {
     FROM transactions.invoice_entity ie
     JOIN transactions.invoice_entity_price_band iepb
         ON iepb.invoice_entity_id = ie.invoice_entity_id
+    JOIN package.package_plan_template_term_config tc
+        ON tc.package_plan_template_id = ie.price_plan_template_id
+       AND tc.application_id = ie.application_id
+       AND COALESCE(tc.is_active, true) = true
     JOIN package.package_price_cycle_band bpcb
-        ON bpcb.package_plan_template_id = ie.price_plan_template_id
+        ON bpcb.package_plan_template_term_config_id =
+           tc.package_plan_template_term_config_id
+       AND bpcb.application_id = ie.application_id
        AND bpcb.cycle_range @> ?::int
     WHERE ie.invoice_id = ?
       AND ie.application_id = ?
@@ -1624,17 +1755,29 @@ WHERE rn = 1;
             select
                 b.package_price_cycle_band_id,
                 b.unit_price
-            from package.package_price_cycle_band b
-            where b.package_plan_template_id = ?
+            from package.package_plan_template_term_config tc
+            join package.package_price_cycle_band b
+              on b.package_plan_template_term_config_id =
+                 tc.package_plan_template_term_config_id
+             and b.application_id = tc.application_id
+            where tc.package_plan_template_id = ?
+              and tc.application_id = ?
+              and coalesce(tc.is_active, true) = true
               and b.start_cycle <= ?
               and (b.end_cycle is null or b.end_cycle >= ?)
-            order by b.start_cycle desc
+            order by tc.created_on desc nulls last,
+                     b.start_cycle desc
             limit 1
         """;
 
         List<CycleBandRef> rows = cluboneJdbcTemplate.query(
             sql,
-            new Object[]{packagePlanTemplateId, cycleNumber, cycleNumber},
+            new Object[]{
+                packagePlanTemplateId,
+                AccessContext.applicationId(),
+                cycleNumber,
+                cycleNumber
+            },
             (rs, rn) -> new CycleBandRef(
                 (UUID) rs.getObject("package_price_cycle_band_id"),
                 rs.getBigDecimal("unit_price")
@@ -1652,8 +1795,24 @@ WHERE rn = 1;
 		) {}
 	@Override
 	public BigDecimal findUnitPriceByCycleBandId(UUID newBandId) {
-		// TODO Auto-generated method stub
-		return null;
+		if (newBandId == null) {
+			return null;
+		}
+
+		final String sql = """
+				SELECT unit_price
+				FROM package.package_price_cycle_band
+				WHERE package_price_cycle_band_id = ?
+				  AND application_id = ?
+				LIMIT 1
+				""";
+
+		return cluboneJdbcTemplate.query(
+				sql,
+				rs -> rs.next() ? rs.getBigDecimal("unit_price") : null,
+				newBandId,
+				AccessContext.applicationId()
+		);
 	}
 
 
