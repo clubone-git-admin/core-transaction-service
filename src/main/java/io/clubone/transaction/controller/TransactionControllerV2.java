@@ -47,8 +47,8 @@ public class TransactionControllerV2 {
 		return ResponseEntity.ok(response);
 	}
 
-	@GetMapping
-	public ResponseEntity<List<InvoiceSummaryDTO>> listByClientRole(@RequestParam UUID clientRoleId,
+	@GetMapping("/invoices/client/{clientRoleId}")
+	public ResponseEntity<List<InvoiceSummaryDTO>> listByClientRole(@PathVariable UUID clientRoleId,
 			@RequestParam(required = false) Integer limit, @RequestParam(required = false) Integer offset) {
 		return ResponseEntity.ok(transactionService.listInvoicesByClientRole(clientRoleId, limit, offset));
 	}
