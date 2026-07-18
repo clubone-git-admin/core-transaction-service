@@ -41,7 +41,7 @@ public class TransactionControllerV2 {
 	private InvoiceService invoiceService;
 
 	@PostMapping("/invoice")
-	@PreAuthorize("@perm.canOperatePos()")
+	@PreAuthorize("@perm.canOperatePosOrRemote()")
 	public ResponseEntity<CreateInvoiceResponse> createInvoice(@RequestBody InvoiceRequest request) {
 		CreateInvoiceResponse response = transactionService.createInvoice(request);
 		return ResponseEntity.ok(response);

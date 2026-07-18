@@ -2,6 +2,8 @@ package io.clubone.transaction.security;
 
 import java.util.Locale;
 
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 
 /**
@@ -63,5 +65,25 @@ public class PermissionEvaluator {
 
   public boolean canManageRefunds() {
     return canManageBilling() || hasAnyRole("REFUND","REFUND_ADMIN","SUPPORT");
+  }
+
+  /**
+   * POS checkout writes OR the public remote-close / join portal flow.
+   *
+   * <p>Staff calls (with tenant headers) resolve a {@link TenantContext} and pass via
+   * {@link #canOperatePos()}. Header-less public calls from a remote sale link are authenticated
+   * by {@code ActorOnlyContextFilter} as the optional {@code ROLE_POS_OPTIONAL} principal (see
+   * {@link TenantOptionalApiPaths}); allow those too so a customer can complete their own purchase.
+   */
+  public boolean canOperatePosOrRemote() {
+    if (canOperatePos()) {
+      return true;
+    }
+    Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+    if (auth == null) {
+      return false;
+    }
+    return auth.getAuthorities().stream()
+        .anyMatch(a -> "ROLE_POS_OPTIONAL".equals(a.getAuthority()));
   }
 }

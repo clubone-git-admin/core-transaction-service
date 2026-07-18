@@ -90,7 +90,7 @@ public class TransactionController {
 	}
 
 	@PostMapping("v3/finalize")
-	@PreAuthorize("@perm.canOperatePos()")
+	@PreAuthorize("@perm.canOperatePosOrRemote()")
 	@Operation(summary = "Finalize transaction v3 after payment")
 	public ResponseEntity<FinalizeTransactionResponse> finalizeTransactionv3(
 			@RequestBody FinalizeTransactionRequest request) {
