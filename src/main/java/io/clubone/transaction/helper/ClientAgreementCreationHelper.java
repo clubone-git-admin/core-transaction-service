@@ -171,6 +171,8 @@ public class ClientAgreementCreationHelper {
             caReq.setPromotions(Collections.emptyList());
         }
         caReq.setUpsellItems(Collections.emptyList());
+        // Public remote-close has no X-Actor-Id; persist audit using invoice createdBy.
+        caReq.setCreatedBy(invoice.getCreatedBy());
 
         // 3) Prefer same-DB insert under high load (skips gateway + agreement pool).
         return createClientAgreement(caReq);
@@ -667,6 +669,12 @@ public class ClientAgreementCreationHelper {
 
         private Boolean isSigned;
         private OffsetDateTime signedOnUtc;
+
+        /**
+         * Audit actor for public / remote-close purchases when TenantContext is absent.
+         * Staff POS continues to prefer TenantContext.applicationUserId().
+         */
+        private UUID createdBy;
 
         private List<PromotionCreateDto> promotions;
         private List<UpsellItemCreateDto> upsellItems;

@@ -50,6 +50,7 @@ import io.clubone.transaction.helper.OrganizationAgreementLinkService;
 import io.clubone.transaction.helper.OrganizationContractLinkResult;
 import io.clubone.transaction.helper.TransactionUtils;
 import io.clubone.transaction.response.CreateInvoiceResponse;
+import io.clubone.transaction.security.AccessContext;
 import io.clubone.transaction.security.TenantContext;
 import io.clubone.transaction.service.CorporateAgreementSplitService;
 import io.clubone.transaction.service.CorporateAgreementSplitService.AmountSplit;
@@ -163,6 +164,23 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	    agreementPurchaseEligibilityValidator.validate(
 	            request
 	    );
+
+		// Public remote-close / join portal: no staff TenantContext. Scope application_id from
+		// the request body so DAO writes (saveInvoiceV3, status lookups) still tenant-filter.
+		final boolean publicRemotePurchase = TenantContext.get() == null;
+		if (publicRemotePurchase && request.getCreatedBy() == null) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+					"createdBy is required for remote/public invoice create when X-Actor-Id is absent");
+		}
+		if (publicRemotePurchase) {
+			return AccessContext.callWithApplicationIdOverride(
+					request.getApplicationId(),
+					() -> createInvoiceCore(request));
+		}
+		return createInvoiceCore(request);
+	}
+
+	private CreateInvoiceResponse createInvoiceCore(InvoiceRequest request) {
 
 		final UUID agreementTypeId = requireEntityTypeId("Agreement");
 		final UUID bundleTypeId = requireEntityTypeId("Bundle");

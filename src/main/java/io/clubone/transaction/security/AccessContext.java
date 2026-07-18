@@ -1,8 +1,15 @@
 package io.clubone.transaction.security;
 
 import java.util.UUID;
+import java.util.function.Supplier;
 
 public final class AccessContext {
+
+  /**
+   * Used only for public / remote-close invoice flows where {@link TenantContext} is intentionally
+   * absent (customer has no staff {@code X-Actor-Id}). Staff paths always prefer TenantContext.
+   */
+  private static final ThreadLocal<UUID> APPLICATION_ID_OVERRIDE = new ThreadLocal<>();
 
   private AccessContext() {
   }
@@ -49,6 +56,35 @@ public final class AccessContext {
   }
 
   public static UUID applicationId() {
-    return require().applicationId();
+    TenantContext ctx = TenantContext.get();
+    if (ctx != null) {
+      return ctx.applicationId();
+    }
+    UUID override = APPLICATION_ID_OVERRIDE.get();
+    if (override != null) {
+      return override;
+    }
+    throw new UnauthorizedException("Actor context is required");
+  }
+
+  /**
+   * Runs {@code action} with a temporary application-id override when the caller is a public
+   * remote-close purchaser (no TenantContext). No-op override when {@code applicationId} is null.
+   */
+  public static <T> T callWithApplicationIdOverride(UUID applicationId, Supplier<T> action) {
+    if (applicationId == null) {
+      return action.get();
+    }
+    UUID previous = APPLICATION_ID_OVERRIDE.get();
+    APPLICATION_ID_OVERRIDE.set(applicationId);
+    try {
+      return action.get();
+    } finally {
+      if (previous != null) {
+        APPLICATION_ID_OVERRIDE.set(previous);
+      } else {
+        APPLICATION_ID_OVERRIDE.remove();
+      }
+    }
   }
 }

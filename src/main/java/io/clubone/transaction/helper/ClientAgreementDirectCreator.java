@@ -53,7 +53,7 @@ public class ClientAgreementDirectCreator {
 
 	public UUID create(ClientAgreementCreateRequest req) {
 		long t0 = System.nanoTime();
-		UUID createdBy = requireActorId();
+		UUID createdBy = resolveCreatedBy(req);
 		UUID statusId = resolveStatusId(req.getClientAgreementStatusId(), req.getClientAgreementStatusCode());
 
 		UUID clientAgreementId = tx.execute(status -> {
@@ -267,13 +267,22 @@ public class ClientAgreementDirectCreator {
 		});
 	}
 
-	private static UUID requireActorId() {
+	/**
+	 * Staff POS: prefer authenticated {@link TenantContext} actor.
+	 * Public remote-close / join portal: no X-Actor-Id — use invoice {@code createdBy}
+	 * (system/POS fallback actor already present on the request body).
+	 */
+	private static UUID resolveCreatedBy(ClientAgreementCreateRequest req) {
 		TenantContext ctx = TenantContext.get();
-		if (ctx == null || ctx.applicationUserId() == null) {
-			throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-					"X-Actor-Id / tenant context is required for direct client-agreement create");
+		if (ctx != null && ctx.applicationUserId() != null) {
+			return ctx.applicationUserId();
 		}
-		return ctx.applicationUserId();
+		if (req != null && req.getCreatedBy() != null) {
+			return req.getCreatedBy();
+		}
+		throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+				"X-Actor-Id / tenant context is required for direct client-agreement create "
+						+ "(or supply createdBy on the invoice request for remote/public purchase)");
 	}
 
 	private static <T> T required(T value, String name) {
