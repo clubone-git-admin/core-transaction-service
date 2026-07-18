@@ -36,6 +36,7 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.web.server.ResponseStatusException;
 
 import io.clubone.transaction.request.BillingQuoteFinalizeSpec;
+import io.clubone.transaction.security.AccessContext;
 import io.clubone.transaction.security.TenantContext;
 import io.clubone.transaction.config.LoadPressureGuard;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -780,7 +781,7 @@ public class TransactionServiceImpl implements TransactionService {
 								+ "invoiceId={} clientPaymentTransactionId={} correlationId={}",
 						req.getInvoiceId(), cptId, inventoryCorrelationId);
 				// Fully async: resolve + refresh_client_dashboard_proj never touch the finalize request thread.
-				UUID applicationId = TenantContext.get() != null ? TenantContext.get().applicationId() : null;
+				UUID applicationId = AccessContext.applicationId();
 				clientDashboardProjectionRefresher.scheduleRefreshAfterCommit(
 						req.getInvoiceId(), req.getClientRoleId(), applicationId);
 

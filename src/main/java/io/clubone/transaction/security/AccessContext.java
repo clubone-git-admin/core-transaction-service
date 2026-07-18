@@ -87,4 +87,12 @@ public final class AccessContext {
       }
     }
   }
+
+  static void setApplicationIdOverride(UUID applicationId) {
+    APPLICATION_ID_OVERRIDE.set(applicationId);
+  }
+
+  static void clearApplicationIdOverride() {
+    APPLICATION_ID_OVERRIDE.remove();
+  }
 }

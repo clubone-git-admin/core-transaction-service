@@ -64,7 +64,19 @@ public class ActorOnlyContextFilter extends OncePerRequestFilter {
 
     if (TenantOptionalApiPaths.isOptional(path, method) && !hasAllTenantHeaders(actorHeader, locationHeader, appHeader)) {
       log.debug("Optional tenant headers for {} {} (partial or missing headers)", method, path);
-      proceedWithoutTenantContext(req, res, chain);
+      final UUID publicApplicationId;
+      if (appHeader == null || appHeader.isBlank()) {
+        FilterErrorWriter.write(res, 400, "bad_request",
+            "application-id header is required for public transaction requests");
+        return;
+      }
+      try {
+        publicApplicationId = UUID.fromString(appHeader.trim());
+      } catch (IllegalArgumentException e) {
+        FilterErrorWriter.write(res, 400, "bad_request", "Invalid application-id header");
+        return;
+      }
+      proceedWithoutTenantContext(req, res, chain, publicApplicationId);
       return;
     }
 
@@ -148,14 +160,20 @@ public class ActorOnlyContextFilter extends OncePerRequestFilter {
     }
   }
 
-  private void proceedWithoutTenantContext(HttpServletRequest req, HttpServletResponse res, FilterChain chain)
+  private void proceedWithoutTenantContext(
+      HttpServletRequest req,
+      HttpServletResponse res,
+      FilterChain chain,
+      UUID applicationId)
       throws IOException, ServletException {
     var auth = new UsernamePasswordAuthenticationToken("pos-optional", null,
         List.of(new SimpleGrantedAuthority("ROLE_POS_OPTIONAL")));
     SecurityContextHolder.getContext().setAuthentication(auth);
+    AccessContext.setApplicationIdOverride(applicationId);
     try {
       chain.doFilter(req, res);
     } finally {
+      AccessContext.clearApplicationIdOverride();
       TenantContext.clear();
       SecurityContextHolder.clearContext();
     }
