@@ -403,6 +403,7 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 				  t.invoice_id                     AS invoiceId,
 				  t.transaction_number             AS transactionCode,
 				  t.transaction_date               AS transactionDate,
+				  t.subscription_billing_history_id AS subscriptionBillingHistoryId,
 				  t.created_by                     AS createdBy
 				FROM "transactions"."transaction" t
 				JOIN "transactions".invoice i ON i.invoice_id = t.invoice_id

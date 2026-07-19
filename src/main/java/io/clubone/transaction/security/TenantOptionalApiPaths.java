@@ -24,6 +24,12 @@ public final class TenantOptionalApiPaths {
             || path.equals("/api/transactions/v3/finalize"))) {
       return true;
     }
+    // The post-payment receipt is fetched by the same header-less join portal.
+    // It remains application-scoped through AccessContext's application-id override.
+    if ("GET".equalsIgnoreCase(method)
+        && path.matches("/api/transactions/v3/invoices/[^/]+/receipt")) {
+      return true;
+    }
     return false;
   }
 }

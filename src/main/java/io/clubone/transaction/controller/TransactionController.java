@@ -23,6 +23,8 @@ import io.clubone.transaction.request.InvoiceResponseDTO;
 import io.clubone.transaction.response.CreateInvoiceResponse;
 import io.clubone.transaction.response.CreateTransactionResponse;
 import io.clubone.transaction.response.FinalizeTransactionResponse;
+import io.clubone.transaction.response.InvoiceFullDetailResponse;
+import io.clubone.transaction.service.InvoiceService;
 import io.clubone.transaction.service.TransactionService;
 import io.clubone.transaction.vo.InvoiceDTO;
 import io.clubone.transaction.vo.TransactionDTO;
@@ -37,6 +39,7 @@ import lombok.RequiredArgsConstructor;
 public class TransactionController {
 
 	private final TransactionService transactionService;
+	private final InvoiceService invoiceService;
 
 	@PostMapping("/invoice")
 	@PreAuthorize("@perm.canOperatePos()")
@@ -99,6 +102,17 @@ public class TransactionController {
 			return ResponseEntity.ok(response);
 		else
 			return ResponseEntity.badRequest().body(response);
+	}
+
+	@GetMapping("v3/invoices/{invoiceId}/receipt")
+	@PreAuthorize("@perm.canOperatePosOrRemote()")
+	@Operation(summary = "Get a printable receipt for a finalized invoice")
+	public ResponseEntity<InvoiceFullDetailResponse> getInvoiceReceipt(@PathVariable UUID invoiceId) {
+		InvoiceFullDetailResponse receipt = invoiceService.getInvoiceFullDetail(invoiceId, null);
+		if (receipt == null || receipt.getInvoice() == null) {
+			return ResponseEntity.notFound().build();
+		}
+		return ResponseEntity.ok(receipt);
 	}
 
 	@PutMapping("/{transactionId}/client-agreement/{clientAgreementId}")
