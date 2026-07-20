@@ -68,6 +68,7 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 			  i.level_id            AS levelId,
 			  i.created_by          AS createdBy,
 			  i.client_agreement_id AS clientAgreementId,
+			  ca.client_agreement_code AS clientAgreementCode,
 			  i.billing_run_id      AS billingRunId,
 			  i.billing_collection_type_id AS billingCollectionTypeId,
 			  lbct.code             AS billingCollectionTypeCode,
@@ -78,6 +79,8 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 			LEFT JOIN "transactions".lu_billing_collection_type lbct
 			  ON lbct.billing_collection_type_id = i.billing_collection_type_id
 			 AND COALESCE(lbct.is_active, true) = true
+			LEFT JOIN client_agreements.client_agreement ca
+			  ON ca.client_agreement_id = i.client_agreement_id
 			WHERE i.invoice_id = ?
 			  AND i.application_id = ?
 			  AND COALESCE(i.is_active, true) = true

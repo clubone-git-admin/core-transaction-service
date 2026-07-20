@@ -23,6 +23,8 @@ public class InvoiceDTO {
     private UUID levelId;
     private UUID createdBy;
     private UUID clientAgreementId;
+    /** Friendly code from client_agreements.client_agreement (e.g. CTR-2026-000123). */
+    private String clientAgreementCode;
     private UUID billingRunId;
     private UUID billingCollectionTypeId;
     /** From lu_billing_collection_type when header has billing_collection_type_id */
