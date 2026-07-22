@@ -30,10 +30,13 @@ import jakarta.servlet.http.HttpServletResponse;
 public class SecurityConfig {
 
   private final ActorOnlyContextFilter actorOnlyContextFilter;
+  private final ExternalContextFilter externalContextFilter;
   private final ObjectMapper objectMapper;
 
-  public SecurityConfig(ActorOnlyContextFilter actorOnlyContextFilter, ObjectMapper objectMapper) {
+  public SecurityConfig(ActorOnlyContextFilter actorOnlyContextFilter,
+      ExternalContextFilter externalContextFilter, ObjectMapper objectMapper) {
     this.actorOnlyContextFilter = actorOnlyContextFilter;
+    this.externalContextFilter = externalContextFilter;
     this.objectMapper = objectMapper;
   }
 
@@ -71,7 +74,8 @@ public class SecurityConfig {
         .authorizeHttpRequests(auth -> auth
             .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
             .anyRequest().authenticated())
-        .addFilterBefore(actorOnlyContextFilter, UsernamePasswordAuthenticationFilter.class)
+        .addFilterBefore(externalContextFilter, UsernamePasswordAuthenticationFilter.class)
+        .addFilterAfter(actorOnlyContextFilter, ExternalContextFilter.class)
         .build();
   }
 
@@ -81,7 +85,7 @@ public class SecurityConfig {
     response.setContentType(MediaType.APPLICATION_JSON_VALUE);
     objectMapper.writeValue(response.getWriter(), Map.of(
         "error", "unauthorized",
-        "message", "Authentication required — provide X-Actor-Id and X-Location-Id headers",
+        "message", "Authentication required â€” provide X-Actor-Id and X-Location-Id headers",
         "path", request.getRequestURI(),
         "timestamp", Instant.now().toString()));
   }
