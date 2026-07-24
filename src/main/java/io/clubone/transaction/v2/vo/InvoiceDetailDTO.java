@@ -1,4 +1,5 @@
 package io.clubone.transaction.v2.vo;
+
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
@@ -6,7 +7,10 @@ import java.util.UUID;
 
 public record InvoiceDetailDTO(
 
-        // invoice header
+        // =====================================================
+        // Invoice header
+        // =====================================================
+
         UUID invoiceId,
         String invoiceNumber,
         LocalDate invoiceDate,
@@ -16,31 +20,108 @@ public record InvoiceDetailDTO(
         BigDecimal writeOff,
         String salesRep,
 
-        // summary strip
-        String contractBadge,            // e.g., "CONTRACT"
-        String subscriptionStatusBadge,  // e.g., "ACTIVE"
-        String title,                    // e.g., "All Access Fitness"
-        String subtitle,                 // e.g., "Flatiron · SUB10238"
-        BigDecimal amountPerMonth,       // effective price for the current cycle
+        // =====================================================
+        // Summary strip
+        // =====================================================
 
-        // info cards
-        Integer commitmentPaidNumerator,     // current cycle number
-        Integer commitmentPaidDenominator,   // current + remaining (if available)
-        String billingFrequencyLabel,        // "Monthly on the 22nd"
+        String contractBadge,
+        String subscriptionStatusBadge,
+        String title,
+        String subtitle,
+        BigDecimal amountPerMonth,
+
+        // =====================================================
+        // Information cards
+        // =====================================================
+
+        Integer commitmentPaidNumerator,
+        Integer commitmentPaidDenominator,
+        String billingFrequencyLabel,
         LocalDate contractEnd,
         LocalDate nextBillingDate,
         LocalDate startDate,
-        LocalDate signUpDate,                // optional (can be null)
-        Boolean autoPay,                     // optional (can be null)
-        String primaryPaymentMethodMasked,   // optional (can be null)
+        LocalDate signUpDate,
+        Boolean autoPay,
+        String primaryPaymentMethodMasked,
 
-        // product strip
-        String productLabel,                 // "Membership · Base Membership"
-        Boolean recurring,                   // true/false
-        String availableSessionsLabel,       // "—" or number-as-string
-        String sessionOwner,                 // optional
+        // =====================================================
+        // Product strip
+        // =====================================================
 
-        // timeline
-        List<PaymentTimelineItemDTO> paymentTimeline
-) {}
+        String productLabel,
+        Boolean recurring,
+        String availableSessionsLabel,
+        String sessionOwner,
 
+        // =====================================================
+        // Payment timeline
+        // =====================================================
+
+        List<PaymentTimelineItemDTO> paymentTimeline,
+
+        // =====================================================
+        // Transaction details
+        // FE: ClientInvoiceTransaction
+        // JSON: transactions
+        // =====================================================
+
+        List<InvoiceTransactionDetailDTO> transactions,
+
+        // =====================================================
+        // Refund details
+        // FE: ClientInvoiceRefund
+        // JSON: refunds
+        // =====================================================
+
+        List<InvoiceRefundDetailDTO> refunds,
+
+        // =====================================================
+        // Refund allocations
+        // FE: ClientInvoiceRefundAllocation
+        // JSON: refundAllocations
+        // =====================================================
+
+        List<InvoiceRefundAllocationDTO> refundAllocations,
+
+        // =====================================================
+        // Billing adjustments
+        // FE: ClientInvoiceAdjustment
+        // JSON: adjustments
+        // =====================================================
+
+        List<InvoiceAdjustmentDetailDTO> adjustments
+
+) {
+
+    /*
+     * Prevent null collection values in the API response.
+     *
+     * The frontend can safely iterate over:
+     * - paymentTimeline
+     * - transactions
+     * - refunds
+     * - refundAllocations
+     * - adjustments
+     */
+    public InvoiceDetailDTO {
+        paymentTimeline = paymentTimeline == null
+                ? List.of()
+                : List.copyOf(paymentTimeline);
+
+        transactions = transactions == null
+                ? List.of()
+                : List.copyOf(transactions);
+
+        refunds = refunds == null
+                ? List.of()
+                : List.copyOf(refunds);
+
+        refundAllocations = refundAllocations == null
+                ? List.of()
+                : List.copyOf(refundAllocations);
+
+        adjustments = adjustments == null
+                ? List.of()
+                : List.copyOf(adjustments);
+    }
+}

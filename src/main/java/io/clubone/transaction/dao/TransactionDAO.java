@@ -10,8 +10,12 @@ import io.clubone.transaction.dao.impl.TransactionDAOImpl.InvoiceBillableLineRow
 import io.clubone.transaction.v2.vo.BundlePriceCycleBandDTO;
 import io.clubone.transaction.v2.vo.CycleBandRef;
 import io.clubone.transaction.v2.vo.DiscountDetailDTO;
+import io.clubone.transaction.v2.vo.InvoiceAdjustmentDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailRaw;
+import io.clubone.transaction.v2.vo.InvoiceRefundAllocationDTO;
+import io.clubone.transaction.v2.vo.InvoiceRefundDetailDTO;
+import io.clubone.transaction.v2.vo.InvoiceTransactionDetailDTO;
 import io.clubone.transaction.v2.vo.PromotionEffectValueDTO;
 import io.clubone.transaction.vo.BundleComponent;
 import io.clubone.transaction.vo.BundleItemPriceDTO;
@@ -159,5 +163,13 @@ public interface TransactionDAO {
 	 */
 	Optional<UUID> resolveLevelIdForInvoice(UUID levelIdOrReferenceEntityId);
 
-	
+	List<InvoiceTransactionDetailDTO> findInvoiceTransactions(UUID invoiceId);
+
+	List<InvoiceRefundDetailDTO> findInvoiceRefunds(UUID invoiceId);
+
+	List<InvoiceRefundAllocationDTO> findInvoiceRefundAllocations(
+	        UUID invoiceId
+	);
+
+	List<InvoiceAdjustmentDetailDTO> findInvoiceAdjustments(UUID invoiceId);
 }

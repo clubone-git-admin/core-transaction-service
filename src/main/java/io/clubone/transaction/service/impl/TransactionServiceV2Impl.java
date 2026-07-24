@@ -217,8 +217,8 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		inv.setInvoiceDate(Timestamp.from(Instant.now()));
 		inv.setClientRoleId(request.getClientRoleId());
 
-		// invoice.level_id FK → locations.levels.level_id.
-		// Clients often send locations.levels.reference_entity_id as levelId — resolve
+		// invoice.level_id FK â†’ locations.levels.level_id.
+		// Clients often send locations.levels.reference_entity_id as levelId â€” resolve
 		// to level_id.
 		if (request.getLevelId() == null) {
 			throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
@@ -235,7 +235,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		inv.setPaid(false);
 		inv.setCreatedBy(request.getCreatedBy());
 
-		// ✅ Always use invoice level id consistently
+		// âœ… Always use invoice level id consistently
 		final UUID invoiceLevelId = inv.getLevelId();
 
 		inv.setBillingRunId(request.getBillingRunId());
@@ -320,7 +320,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 				if (e.getItems() != null) {
 					for (Item it : e.getItems()) {
 
-						// ✅ No proration for package
+						// âœ… No proration for package
 						InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, pkgBusinessEntityId, itemTypeId,
 								e.getStartDate(), false, e, invoiceLevelId);
 
@@ -333,7 +333,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 						itemLine.setQuantity(finalQty);
 
 
-						// ✅ 1) discountIds FIRST (ADD, not overwrite)
+						// âœ… 1) discountIds FIRST (ADD, not overwrite)
 						List<UUID> pkgDiscountIds = mergeDiscountIds(e, it);
 						if (!pkgDiscountIds.isEmpty()) {
 							Optional<DiscountDetailDTO> best = transactionDAO
@@ -370,14 +370,14 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 							});
 						}
 
-						// ✅ 2) promotion SECOND
+						// âœ… 2) promotion SECOND
 						if (pkgPromotionId != null) {
 							PromotionItemEffectDTO eff = pkgFx.get(it.getEntityId());
 							applyPromotionEffectOnLeafLine(itemLine, eff);
 						}
 
 
-						// ✅ 3) TAX THIRD (NET)
+						// âœ… 3) TAX THIRD (NET)
 						computeTaxesFromItemOnly(itemLine, it, invoiceLevelId);
 
 						// 4) finalize
@@ -530,7 +530,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 								itemLine.setQuantity(finalQty);
 
 
-								// ✅ 1) discountIds FIRST
+								// âœ… 1) discountIds FIRST
 								List<UUID> agrDiscountIds = mergeDiscountIds(e, it);
 								if (!agrDiscountIds.isEmpty()) {
 									Optional<DiscountDetailDTO> best = transactionDAO.findBestDiscountForItemByIds(
@@ -568,14 +568,14 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 									});
 								}
 
-								// ✅ 2) promotion SECOND
+								// âœ… 2) promotion SECOND
 								if (agreementPromotionId != null) {
 									PromotionItemEffectDTO eff = agreementFx.get(it.getEntityId());
 									applyPromotionEffectOnLeafLine(itemLine, eff);
 								}
 
 								// ==========================================================
-								// ✅ AGREEMENT PRORATION RULES (supports Monthly/Weekly/Quarterly/Yearly)
+								// âœ… AGREEMENT PRORATION RULES (supports Monthly/Weekly/Quarterly/Yearly)
 								//
 								// RULES:
 								// 1) If Fee item => charge CURRENT only, FULL (no proration), no next line.
@@ -630,7 +630,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 									continue;
 								}
 
-								// POS / checkout: final unit price + tax on each line — do not split across
+								// POS / checkout: final unit price + tax on each line â€” do not split across
 								// billing periods (avoids duplicate lines and double-applying client
 								// taxAmount).
 								if (it.getTaxAmount() != null && it.getPrice() != null) {
@@ -1088,10 +1088,10 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			}
 		}
 
-		inv.setSubTotal(scale2(subTotal)); // ✅ NET
+		inv.setSubTotal(scale2(subTotal)); // âœ… NET
 		inv.setTaxAmount(scale2(taxTotal));
 		inv.setDiscountAmount(scale2(discountTotal)); // informational
-		inv.setTotalAmount(scale2(subTotal.add(taxTotal)));// ✅ discount already applied
+		inv.setTotalAmount(scale2(subTotal.add(taxTotal)));// âœ… discount already applied
 
 		inv.setLineItems(lines);
 
@@ -1455,8 +1455,8 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		BigDecimal perUnitAfter = grossAfter.divide(qty, 6, RoundingMode.HALF_UP);
 		perUnitAfter = scale2(perUnitAfter);
 
-		line.setQuantity(qtyInt); // ✅ KEEP entitlement qty (2)
-		line.setUnitPrice(perUnitAfter); // ✅ per-unit price so totals remain correct
+		line.setQuantity(qtyInt); // âœ… KEEP entitlement qty (2)
+		line.setUnitPrice(perUnitAfter); // âœ… per-unit price so totals remain correct
 		line.setDiscountAmount(scale2(discBefore));// total discount remains same
 
 	}
@@ -1993,9 +1993,14 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 				null, null,
 
-				"Membership · Base Membership", true, "—", null,
+				"Membership Â· Base Membership", true, "â€”", null,
 
-				timeline);
+				timeline,
+
+				transactionDAO.findInvoiceTransactions(invoiceId),
+				transactionDAO.findInvoiceRefunds(invoiceId),
+				transactionDAO.findInvoiceRefundAllocations(invoiceId),
+				transactionDAO.findInvoiceAdjustments(invoiceId));
 	}
 
 	private static List<PaymentTimelineItemDTO> buildTimeline(FrequencyUnit unit, int interval, InvoiceDetailRaw raw,
@@ -2097,7 +2102,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 			InvoiceEntityPriceBandDTO bandRef = new InvoiceEntityPriceBandDTO();
 			bandRef.setPriceCycleBandId(band.bandId());
-			bandRef.setUnitPrice(band.unitPrice()); // ✅ from DB
+			bandRef.setUnitPrice(band.unitPrice()); // âœ… from DB
 			it.setPriceBands(List.of(bandRef));
 
 			items.add(it);

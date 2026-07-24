@@ -103,7 +103,7 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 		int[] pmx = dao.batchInsertPromos(planId, nz(request.getPromos()), createdBy);
 		int term = dao.insertPlanTerm(planId, request.getTerm(), createdBy, request.getAgreementTermId(),
 				request.getTotalCycles());
-		// ✅ NEW: insert subscription_plan_promo rows (if present)
+		// âœ… NEW: insert subscription_plan_promo rows (if present)
 		if (request.getSubscriptionPlanPromos() != null && !request.getSubscriptionPlanPromos().isEmpty()) {
 			subscriptionPromoBillingDAO.insertSubscriptionPlanPromos(planId, createdBy,
 					request.getSubscriptionPlanPromos());
@@ -124,7 +124,7 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 			Integer interval = request.getIntervalCount();
 			UUID dayRuleId = request.getSubscriptionBillingDayRuleId();
 
-			// ✅ these are the same values you store in billing history
+			// âœ… these are the same values you store in billing history
 			// Integer cycleNumber = request.getCyclePrices().get(0).getCycleStart(); //
 			// e.g. 3
 			Integer cycleNumber = request.getCurrentCycle();
@@ -153,7 +153,7 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 
 			long chargedMinor = 0; // keep as your current behavior
 
-			// ✅ Create future invoice FIRST and store returned invoiceId in billing history
+			// âœ… Create future invoice FIRST and store returned invoiceId in billing history
 			UUID futureInvoiceId = null;
 
 			// old invoice id = the invoice you are using as seed (from request)
@@ -168,7 +168,7 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 						billingDate, createdBy, request.getClientAgreementId(), request.getApplicationId(),
 						request.getLevelId());
 
-				futureInvoiceId = futureInvResp.getInvoiceId(); // ✅ use new invoice id
+				futureInvoiceId = futureInvResp.getInvoiceId(); // âœ… use new invoice id
 				System.out.println(
 						"[SUBSCRIPTION] Future invoice created: seedInvoiceId=" + seedInvoiceId + " cycleNumber="
 								+ cycleNumber + " billingDate=" + billingDate + " newInvoiceId=" + futureInvoiceId);
@@ -179,9 +179,9 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 			/*
 			 * SubscriptionPlanDao.BillingHistoryRow row = new
 			 * SubscriptionPlanDao.BillingHistoryRow( instanceId, chargedMinor, cycleNumber,
-			 * // ✅ cycle number stored in history billingDate, // ✅ billing date stored in
+			 * // âœ… cycle number stored in history billingDate, // âœ… billing date stored in
 			 * history billingStatusScheduledId, priceCycleBandId, null, null,
-			 * futureInvoiceId, // ✅ store the NEW invoiceId (not the seed one) netExTax,
+			 * futureInvoiceId, // âœ… store the NEW invoiceId (not the seed one) netExTax,
 			 * taxTotal, null, null, null, null, Boolean.FALSE, null, null, null, null );
 			 * 
 			 * UUID historyId = dao.insertSubscriptionBillingHistoryReturningId(row);
@@ -196,7 +196,7 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 
 			UUID scheduleId = dao.insertSubscriptionInvoiceScheduleReturningId(row);
 
-			// ✅ NEW: insert subscription_billing_promotion rows (if present)
+			// âœ… NEW: insert subscription_billing_promotion rows (if present)
 			if (request.getSubscriptionBillingPromotions() != null
 					&& !request.getSubscriptionBillingPromotions().isEmpty()) {
 				subscriptionPromoBillingDAO.insertSubscriptionBillingPromotions(scheduleId,
@@ -245,7 +245,7 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 	 * request.getIntervalCount(); UUID dayRuleId =
 	 * request.getSubscriptionBillingDayRuleId();
 	 * 
-	 * // ✅ these are the same values you store in billing history //Integer
+	 * // âœ… these are the same values you store in billing history //Integer
 	 * cycleNumber = request.getCyclePrices().get(0).getCycleStart(); // e.g. 3
 	 * Integer cycleNumber=request.getCurrentCycle()+1; LocalDate billingDate =
 	 * computeNextBillingDate(start, freqId, interval, dayRuleId, cycleNumber);
@@ -266,7 +266,7 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 	 * 
 	 * long chargedMinor = 0; // keep as your current behavior
 	 * 
-	 * // ✅ Create future invoice FIRST and store returned invoiceId in billing
+	 * // âœ… Create future invoice FIRST and store returned invoiceId in billing
 	 * history UUID futureInvoiceId = null;
 	 * 
 	 * // old invoice id = the invoice you are using as seed (from request) UUID
@@ -276,7 +276,7 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 	 * tranServiceV2.createFutureInvoice(seedInvoiceId, cycleNumber, billingDate,
 	 * createdBy,request.getClientAgreementId());
 	 * 
-	 * futureInvoiceId = futureInvResp.getInvoiceId(); // ✅ use new invoice id
+	 * futureInvoiceId = futureInvResp.getInvoiceId(); // âœ… use new invoice id
 	 * System.out.println("[SUBSCRIPTION] Future invoice created: seedInvoiceId=" +
 	 * seedInvoiceId + " cycleNumber=" + cycleNumber + " billingDate=" + billingDate
 	 * + " newInvoiceId=" + futureInvoiceId); } else { System.out.
@@ -285,9 +285,9 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 	 * 
 	 * SubscriptionPlanDao.BillingHistoryRow row = new
 	 * SubscriptionPlanDao.BillingHistoryRow( instanceId, chargedMinor, cycleNumber,
-	 * // ✅ cycle number stored in history billingDate, // ✅ billing date stored in
+	 * // âœ… cycle number stored in history billingDate, // âœ… billing date stored in
 	 * history billingStatusScheduledId, priceCycleBandId, null, null,
-	 * futureInvoiceId, // ✅ store the NEW invoiceId (not the seed one) netExTax,
+	 * futureInvoiceId, // âœ… store the NEW invoiceId (not the seed one) netExTax,
 	 * taxTotal, null, null, null, null, Boolean.FALSE, null, null, null, null );
 	 * 
 	 * dao.insertSubscriptionBillingHistory(row);
@@ -348,7 +348,7 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 						results.add(success(detail));
 						ok++;
 					} catch (DataAccessException ex) {
-						// ✅ print actual DB error + SQL
+						// âœ… print actual DB error + SQL
 						Throwable root = ex.getMostSpecificCause();
 						if (root instanceof SQLException sql) {
 							String badSql = (ex instanceof BadSqlGrammarException b) ? b.getSql() : "<n/a>";
@@ -702,7 +702,7 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 		// Build timeline (reuses your existing helper)
 		final List<PaymentTimelineItemDTO> timeline = buildTimeline(unit, interval, raw, priceForCurrentCycle);
 
-		// Resolve display entity (prefer parent; fallback to child) — FIXED bug:
+		// Resolve display entity (prefer parent; fallback to child) â€” FIXED bug:
 		// fallback should use childEntityId()
 		final UUID parentEntityId = raw.parentEntityId() != null ? raw.parentEntityId() : raw.childEntityId();
 		final UUID parentEntityTypeId = raw.parentEntityTypeId() != null ? raw.parentEntityTypeId()
@@ -736,11 +736,19 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 				null, // autoPay (TODO: fetch from payment settings)
 				null, // primaryPaymentMethodMasked (TODO)
 
-				"Membership · Base Membership", // TODO derive from plan/entity
+				"Membership Â· Base Membership", // TODO derive from plan/entity
 				true, // recurring
-				"—", null,
+				"â€”", null,
 
-				timeline);
+				timeline,
+
+				// This endpoint is loaded by subscriptionPlanId rather than invoiceId.
+				// Keep the existing subscription-detail behavior unchanged and return
+				// empty collections for the newly added invoice activity sections.
+				List.of(),
+				List.of(),
+				List.of(),
+				List.of());
 	}
 
 	private static <T> T nvl(T v, T fallback) {

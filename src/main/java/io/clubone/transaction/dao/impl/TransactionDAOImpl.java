@@ -38,10 +38,14 @@ import io.clubone.transaction.v2.vo.BundlePriceCycleBandDTO;
 import io.clubone.transaction.v2.vo.CalculationMode;
 import io.clubone.transaction.v2.vo.CycleBandRef;
 import io.clubone.transaction.v2.vo.DiscountDetailDTO;
+import io.clubone.transaction.v2.vo.InvoiceAdjustmentDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailRaw;
 import io.clubone.transaction.v2.vo.InvoiceEntityPriceBandDTO;
 import io.clubone.transaction.v2.vo.InvoiceEntityPromotionDTO;
+import io.clubone.transaction.v2.vo.InvoiceRefundAllocationDTO;
+import io.clubone.transaction.v2.vo.InvoiceRefundDetailDTO;
+import io.clubone.transaction.v2.vo.InvoiceTransactionDetailDTO;
 import io.clubone.transaction.v2.vo.PaymentTimelineItemDTO;
 import io.clubone.transaction.v2.vo.PromotionEffectValueDTO;
 import io.clubone.transaction.vo.BundleComponent;
@@ -490,7 +494,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 				lastBundleHeaderId = teId;
 			}
 
-			// 3) Taxes (null-safe) — also include created_by
+			// 3) Taxes (null-safe) â€” also include created_by
 			if (entity.getTaxes() != null && !entity.getTaxes().isEmpty()) {
 				for (TransactionEntityTaxDTO tax : entity.getTaxes()) {
 					UUID taxId = UUID.randomUUID();
@@ -2110,7 +2114,7 @@ WHERE rn = 1;
 					levelIdOrReferenceEntityId);
 			return Optional.ofNullable(byPk);
 		} catch (EmptyResultDataAccessException ignored) {
-			// not a level_id — try reference_entity_id
+			// not a level_id â€” try reference_entity_id
 		}
 		try {
 			UUID byRef = cluboneJdbcTemplate.queryForObject(
@@ -2123,4 +2127,353 @@ WHERE rn = 1;
 		}
 	}
 
+	@Override
+	public List<InvoiceTransactionDetailDTO> findInvoiceTransactions(
+	        UUID invoiceId
+	) {
+	    final String sql = """
+	            SELECT
+	                t.transaction_id,
+	                t.transaction_number,
+
+	                cpt.client_payment_transaction_id,
+	                cpt.client_payment_transaction_number,
+	                cpt.client_payment_intent_id,
+
+	                pis.payment_intent_status,
+
+	                pg.name AS gateway_name,
+
+	                cpt.payment_gateway_payment_id,
+	                cpt.payment_gateway_order_id,
+
+	                pgts.status_code AS gateway_status_code,
+
+	                pgmt.method_type_code,
+	                pgmt.method_type_name,
+
+	                pgpt.payment_type_code,
+	                pgpt.payment_type_name,
+
+	                cpm.card_last4,
+	                cpm.card_type,
+	                cpm.card_network,
+
+	                ROUND(
+	                    COALESCE(cpt.amount, 0)::numeric / 100.0,
+	                    2
+	                ) AS amount,
+
+	                cpt.failure_reason,
+	                cpt.created_on
+
+	            FROM transactions."transaction" t
+
+	            JOIN client_payments.client_payment_transaction cpt
+	              ON cpt.client_payment_transaction_id =
+	                 t.client_payment_transaction_id
+	             AND cpt.application_id =
+	                 t.application_id
+
+	            LEFT JOIN client_payments.client_payment_intent cpi
+	              ON cpi.client_payment_intent_id =
+	                 cpt.client_payment_intent_id
+	             AND cpi.application_id =
+	                 t.application_id
+
+	            LEFT JOIN client_payments.lu_payment_intent_status pis
+	              ON pis.payment_intent_status_id =
+	                 cpi.intent_status_id
+
+	            LEFT JOIN client_payments.client_payment_method cpm
+	              ON cpm.client_payment_method_id =
+	                 cpt.client_payment_method_id
+	             AND cpm.application_id =
+	                 t.application_id
+
+	            LEFT JOIN payment_gateway.payment_gateway pg
+	              ON pg.payment_gateway_id =
+	                 cpm.payment_gateway_id
+
+	            LEFT JOIN payment_gateway.lu_payment_gateway_transaction_status pgts
+	              ON pgts.payment_gateway_transaction_status_id =
+	                 cpt.payment_gateway_transaction_status_id
+
+	            LEFT JOIN payment_gateway.lu_payment_gateway_method_type pgmt
+	              ON pgmt.payment_gateway_method_type_id =
+	                 cpm.payment_gateway_method_type_id
+
+	            LEFT JOIN payment_gateway.lu_payment_gateway_payment_type pgpt
+	              ON pgpt.payment_gateway_payment_type_id =
+	                 cpt.payment_type_id
+
+	            WHERE t.invoice_id = ?
+	              AND t.application_id = ?
+	              AND COALESCE(t.is_active, true) = true
+
+	            ORDER BY cpt.created_on DESC NULLS LAST
+	            """;
+
+	    return cluboneJdbcTemplate.query(
+	            sql,
+	            (rs, rowNum) -> new InvoiceTransactionDetailDTO(
+	                    rs.getObject("transaction_id", UUID.class),
+	                    rs.getString("transaction_number"),
+
+	                    rs.getObject(
+	                            "client_payment_transaction_id",
+	                            UUID.class
+	                    ),
+	                    rs.getString("client_payment_transaction_number"),
+
+	                    rs.getObject(
+	                            "client_payment_intent_id",
+	                            UUID.class
+	                    ),
+	                    rs.getString("payment_intent_status"),
+
+	                    rs.getString("gateway_name"),
+	                    rs.getString("payment_gateway_payment_id"),
+	                    rs.getString("payment_gateway_order_id"),
+	                    rs.getString("gateway_status_code"),
+
+	                    rs.getString("method_type_code"),
+	                    rs.getString("method_type_name"),
+
+	                    rs.getString("payment_type_code"),
+	                    rs.getString("payment_type_name"),
+
+	                    rs.getString("card_last4"),
+	                    rs.getString("card_type"),
+	                    rs.getString("card_network"),
+
+	                    rs.getBigDecimal("amount"),
+	                    rs.getString("failure_reason"),
+
+	                    rs.getObject(
+	                            "created_on",
+	                            OffsetDateTime.class
+	                    )
+	            ),
+	            invoiceId,
+	            AccessContext.applicationId()
+	    );
+	}
+	
+	@Override
+	public List<InvoiceRefundDetailDTO> findInvoiceRefunds(
+	        UUID invoiceId
+	) {
+	    final String sql = """
+	            SELECT
+	                r.client_payment_refund_id,
+	                r.client_payment_transaction_id,
+	                r.invoice_id,
+
+	                ROUND(
+	                    COALESCE(r.refund_amount, 0)::numeric / 100.0,
+	                    2
+	                ) AS refund_amount,
+
+	                r.currency_code,
+	                pg.name AS gateway_name,
+	                pgmt.method_type_name,
+
+	                r.refund_status_code,
+	                r.refund_reason_code,
+	                r.comments,
+	                r.failure_reason,
+	                r.idempotency_key,
+	                r.gateway_refund_id,
+	                r.webhook_reconciled,
+	                r.webhook_reconciled_on,
+	                r.created_on
+
+	            FROM client_payments.client_payment_refund r
+
+	            LEFT JOIN payment_gateway.payment_gateway pg
+	              ON pg.payment_gateway_id =
+	                 r.payment_gateway_id
+
+	            LEFT JOIN payment_gateway.lu_payment_gateway_method_type pgmt
+	              ON pgmt.payment_gateway_method_type_id =
+	                 r.payment_gateway_method_type_id
+
+	            WHERE r.invoice_id = ?
+	              AND r.application_id = ?
+
+	            ORDER BY r.created_on DESC
+	            """;
+
+	    return cluboneJdbcTemplate.query(
+	            sql,
+	            (rs, rowNum) -> new InvoiceRefundDetailDTO(
+	                    rs.getObject(
+	                            "client_payment_refund_id",
+	                            UUID.class
+	                    ),
+	                    rs.getObject(
+	                            "client_payment_transaction_id",
+	                            UUID.class
+	                    ),
+	                    rs.getObject("invoice_id", UUID.class),
+	                    rs.getBigDecimal("refund_amount"),
+	                    rs.getString("currency_code"),
+	                    rs.getString("gateway_name"),
+	                    rs.getString("method_type_name"),
+	                    rs.getString("refund_status_code"),
+	                    rs.getString("refund_reason_code"),
+	                    rs.getString("comments"),
+	                    rs.getString("failure_reason"),
+	                    rs.getString("idempotency_key"),
+	                    rs.getString("gateway_refund_id"),
+	                    rs.getBoolean("webhook_reconciled"),
+	                    rs.getObject(
+	                            "webhook_reconciled_on",
+	                            OffsetDateTime.class
+	                    ),
+	                    rs.getObject(
+	                            "created_on",
+	                            OffsetDateTime.class
+	                    )
+	            ),
+	            invoiceId,
+	            AccessContext.applicationId()
+	    );
+	}
+	
+	@Override
+	public List<InvoiceRefundAllocationDTO> findInvoiceRefundAllocations(
+	        UUID invoiceId
+	) {
+	    final String sql = """
+	            SELECT
+	                ra.client_payment_refund_allocation_id,
+	                ra.client_payment_refund_id,
+	                ra.invoice_id,
+	                ROUND(
+	                    COALESCE(ra.allocated_amount, 0)::numeric / 100.0,
+	                    2
+	                ) AS allocated_amount,
+	                ra.created_on
+	            FROM client_payments.client_payment_refund_allocation ra
+	            WHERE ra.invoice_id = ?
+	              AND ra.application_id = ?
+	            ORDER BY ra.created_on DESC
+	            """;
+
+	    return cluboneJdbcTemplate.query(
+	            sql,
+	            (rs, rowNum) -> new InvoiceRefundAllocationDTO(
+	                    rs.getObject(
+	                            "client_payment_refund_allocation_id",
+	                            UUID.class
+	                    ),
+	                    rs.getObject(
+	                            "client_payment_refund_id",
+	                            UUID.class
+	                    ),
+	                    rs.getObject("invoice_id", UUID.class),
+	                    rs.getBigDecimal("allocated_amount"),
+	                    rs.getObject("created_on", OffsetDateTime.class)
+	            ),
+	            invoiceId,
+	            AccessContext.applicationId()
+	    );
+	}
+	
+	@Override
+	public List<InvoiceAdjustmentDetailDTO> findInvoiceAdjustments(
+	        UUID invoiceId
+	) {
+	    final String sql = """
+	            SELECT DISTINCT
+	                bsa.billing_schedule_adjustment_id,
+	                bsa.billing_schedule_id,
+
+	                bsa.billing_adjustment_type_id::text
+	                    AS adjustment_type_code,
+
+	                NULL::text AS adjustment_type_name,
+	                NULL::text AS sign_behavior,
+
+	                COALESCE(bsa.amount, 0) AS amount,
+
+	                COALESCE(
+	                    bsa.is_system_generated,
+	                    false
+	                ) AS system_generated,
+
+	                bsa.reference_entity_type_id::text
+	                    AS reference_entity_type,
+
+	                bsa.reference_entity_id,
+	                bsa.notes,
+
+	                COALESCE(
+	                    bsa.is_active,
+	                    true
+	                ) AS active,
+
+	                bsa.created_on,
+	                bsa.reversed_on,
+	                bsa.reversal_reason
+
+	            FROM transactions.invoice_entity ie
+
+	            JOIN client_subscription_billing.subscription_billing_schedule sbs
+	              ON sbs.billing_schedule_id =
+	                 ie.billing_schedule_id
+	             AND sbs.application_id =
+	                 ie.application_id
+
+	            JOIN client_subscription_billing
+	                    .subscription_billing_schedule_adjustment bsa
+	              ON bsa.billing_schedule_id =
+	                 sbs.billing_schedule_id
+
+	            WHERE ie.invoice_id = ?
+	              AND ie.application_id = ?
+	              AND COALESCE(ie.is_active, true) = true
+
+	            ORDER BY bsa.created_on DESC
+	            """;
+
+	    return cluboneJdbcTemplate.query(
+	            sql,
+	            (rs, rowNum) -> new InvoiceAdjustmentDetailDTO(
+	                    rs.getObject(
+	                            "billing_schedule_adjustment_id",
+	                            UUID.class
+	                    ),
+	                    rs.getObject(
+	                            "billing_schedule_id",
+	                            UUID.class
+	                    ),
+	                    rs.getString("adjustment_type_code"),
+	                    rs.getString("adjustment_type_name"),
+	                    rs.getString("sign_behavior"),
+	                    rs.getBigDecimal("amount"),
+	                    rs.getBoolean("system_generated"),
+	                    rs.getString("reference_entity_type"),
+	                    rs.getObject(
+	                            "reference_entity_id",
+	                            UUID.class
+	                    ),
+	                    rs.getString("notes"),
+	                    rs.getBoolean("active"),
+	                    rs.getObject(
+	                            "created_on",
+	                            OffsetDateTime.class
+	                    ),
+	                    rs.getObject(
+	                            "reversed_on",
+	                            OffsetDateTime.class
+	                    ),
+	                    rs.getString("reversal_reason")
+	            ),
+	            invoiceId,
+	            AccessContext.applicationId()
+	    );
+	}
 }
