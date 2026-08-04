@@ -29,7 +29,6 @@ public class PosAgreementCatalogController {
 	@GetMapping("/catalog")
 	public ResponseEntity<PosCatalogResponseDTO> catalog(@RequestParam UUID levelId,
 			@RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate asOf) {
-		LocalDate effective = asOf != null ? asOf : LocalDate.now();
-		return ResponseEntity.ok(posAgreementCatalogService.buildCatalog(levelId, effective));
+		return ResponseEntity.ok(posAgreementCatalogService.buildCatalog(levelId, asOf));
 	}
 }

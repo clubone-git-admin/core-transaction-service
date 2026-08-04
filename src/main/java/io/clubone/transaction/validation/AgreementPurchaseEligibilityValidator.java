@@ -1,7 +1,9 @@
 package io.clubone.transaction.validation;
 
 import java.sql.Types;
+import java.time.DateTimeException;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -81,7 +83,7 @@ public class AgreementPurchaseEligibilityValidator {
                 loadPurchaserProfile(
                         applicationId,
                         clientRoleId,
-                        LocalDate.now()
+                        resolveEligibilityDate(request)
                 );
 
         List<AgreementProfile> agreements =
@@ -111,6 +113,42 @@ public class AgreementPurchaseEligibilityValidator {
                 purchaser.purchaserType(),
                 agreements.size()
         );
+    }
+
+    private LocalDate resolveEligibilityDate(InvoiceRequest request) {
+        String tz = request.getTimezone();
+        if (tz != null && !tz.isBlank()) {
+            try {
+                return LocalDate.now(ZoneId.of(tz.trim()));
+            } catch (DateTimeException ex) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        "Invalid invoice timezone: " + tz
+                );
+            }
+        }
+        if (request.getLevelId() == null) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "levelId or timezone is required to resolve eligibility date"
+            );
+        }
+        String levelTz = transactionDAO.resolveTimezoneCodeForLevel(request.getLevelId())
+                .orElse(null);
+        if (levelTz == null || levelTz.isBlank()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Location timezone is not configured for levelId=" + request.getLevelId()
+            );
+        }
+        try {
+            return LocalDate.now(ZoneId.of(levelTz.trim()));
+        } catch (DateTimeException ex) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Invalid location timezone for levelId=" + request.getLevelId() + ": " + levelTz
+            );
+        }
     }
 
     private List<AgreementRequestRef> findAgreementEntities(

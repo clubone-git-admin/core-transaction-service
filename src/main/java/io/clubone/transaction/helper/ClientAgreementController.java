@@ -352,6 +352,27 @@ public class ClientAgreementController {
                     "obligationEndUtc cannot be before obligationStartUtc");
         }
 
+        if (req.startDateLocal == null || req.startDateLocalTz == null || req.startDateLocalTz.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "startDateLocal and startDateLocalTz are required (club calendar day + IANA zone)");
+        }
+        try {
+            java.time.ZoneId.of(req.startDateLocalTz.trim());
+        } catch (Exception ex) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Invalid startDateLocalTz: " + req.startDateLocalTz, ex);
+        }
+        if (req.purchasedOnLocal != null
+                && (req.purchasedOnLocalTz == null || req.purchasedOnLocalTz.isBlank())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "purchasedOnLocalTz is required when purchasedOnLocal is provided");
+        }
+        if (req.endDateLocal != null
+                && (req.endDateLocalTz == null || req.endDateLocalTz.isBlank())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "endDateLocalTz is required when endDateLocal is provided");
+        }
+
         // Insert client_agreement
         UUID clientAgreementId;
         try {

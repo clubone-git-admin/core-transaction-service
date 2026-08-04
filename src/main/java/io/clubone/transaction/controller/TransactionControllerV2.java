@@ -109,7 +109,8 @@ public class TransactionControllerV2 {
 	      @RequestParam UUID clientAgreementId
 	  ) {
 	    int cycleNumber = body.getCycleNumber();
-	    LocalDate billingDate = body.getBillingDate() != null ? body.getBillingDate() : LocalDate.now();
+	    // null billingDate → today in location TZ (resolved inside createFutureInvoice)
+	    LocalDate billingDate = body.getBillingDate();
 
 	    CreateInvoiceResponse resp = transactionService.createFutureInvoice(invoiceId, cycleNumber, billingDate,
 			    actorId, clientAgreementId, body.getApplicationId(), body.getLevelId());

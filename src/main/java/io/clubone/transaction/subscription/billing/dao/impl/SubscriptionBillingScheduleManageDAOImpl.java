@@ -566,6 +566,31 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
     }
 
     @Override
+    public String findTimezoneForClientAgreement(UUID clientAgreementId) {
+        String sql = """
+            SELECT COALESCE(
+                NULLIF(TRIM(si.timezone), ''),
+                NULLIF(TRIM(ca.start_date_local_tz), ''),
+                NULLIF(TRIM(ca.purchased_on_local_tz), '')
+            )
+            FROM client_subscription_billing.subscription_plan sp
+            LEFT JOIN client_subscription_billing.subscription_instance si
+              ON si.subscription_plan_id = sp.subscription_plan_id
+             AND si.application_id = sp.application_id
+            LEFT JOIN client_agreements.client_agreement ca
+              ON ca.client_agreement_id = sp.client_agreement_id
+            WHERE sp.client_agreement_id = ?::uuid
+              AND sp.application_id = ?::uuid
+            ORDER BY si.created_on DESC NULLS LAST
+            LIMIT 1
+            """;
+        List<String> rows = cluboneJdbcTemplate.query(sql,
+                (rs, i) -> rs.getString(1),
+                clientAgreementId, AccessContext.applicationId());
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    @Override
     public List<SubscriptionBillingScheduleItemDTO> getEditableFutureRows(UUID clientAgreementId,
                                                                           java.time.LocalDate fromBillingDate) {
         String sql = """

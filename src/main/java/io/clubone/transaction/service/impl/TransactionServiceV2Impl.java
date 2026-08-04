@@ -3,9 +3,13 @@ package io.clubone.transaction.service.impl;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.sql.Timestamp;
+import java.time.DateTimeException;
 import java.time.DayOfWeek;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
 import java.time.temporal.TemporalAdjusters;
 import java.util.ArrayList;
@@ -214,7 +218,11 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		final Map<UUID, UUID> agreementBusinessIdToRootInvoiceEntityId = new HashMap<>();
 
 		InvoiceDTO inv = new InvoiceDTO();
-		inv.setInvoiceDate(Timestamp.from(Instant.now()));
+		ZoneId invoiceZone = resolveInvoiceZoneId(request);
+		ZonedDateTime clubNow = ZonedDateTime.now(invoiceZone);
+		inv.setInvoiceDate(Timestamp.from(clubNow.toInstant()));
+		inv.setBusinessDate(clubNow.toLocalDate());
+		inv.setBusinessTimezone(invoiceZone.getId());
 		inv.setClientRoleId(request.getClientRoleId());
 
 		// invoice.level_id FK â†’ locations.levels.level_id.
@@ -322,7 +330,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 						// âœ… No proration for package
 						InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, pkgBusinessEntityId, itemTypeId,
-								e.getStartDate(), false, e, invoiceLevelId);
+								e.getStartDate(), false, e, invoiceLevelId, invoiceZone);
 
 						itemLine.setParentInvoiceEntityId(pkgInvoiceEntityId);
 						final int parentQty = def(e.getQuantity(), 1); // package qty
@@ -515,7 +523,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 								// Build FULL (no proration). Proration applied AFTER discount+promo (and NOT
 								// for FEE items)
 								InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, bundleBusinessEntityId,
-										itemTypeId, e.getStartDate(), false, e, invoiceLevelId);
+										itemTypeId, e.getStartDate(), false, e, invoiceLevelId, invoiceZone);
 
 								itemLine.setParentInvoiceEntityId(bundleInvoiceEntityId);
 
@@ -592,7 +600,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 								// ==========================================================
 
 								final LocalDate startDate = e.getStartDate() != null ? e.getStartDate()
-										: LocalDate.now();
+										: LocalDate.now(invoiceZone);
 								final int billedQty = def(itemLine.getQuantity(), 1);
 
 								boolean isFee = false;
@@ -709,7 +717,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 									LocalDate nextStart = ctx.periodEndExclusive;
 
 									InvoiceEntityDTO nextLine = buildItemLineFromPayload(it, bundleBusinessEntityId,
-											itemTypeId, nextStart, false, e, invoiceLevelId);
+											itemTypeId, nextStart, false, e, invoiceLevelId, invoiceZone);
 
 									nextLine.setParentInvoiceEntityId(bundleInvoiceEntityId);
 									nextLine.setQuantity(billedQty);
@@ -827,7 +835,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 					for (Item it : e.getItems()) {
 
 						InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, bundleBusinessEntityId, itemTypeId,
-								e.getStartDate(), false, e, invoiceLevelId);
+								e.getStartDate(), false, e, invoiceLevelId, invoiceZone);
 
 						itemLine.setParentInvoiceEntityId(bundleInvoiceEntityId);
 						final int parentQty = def(e.getQuantity(), 1); // bundle qty
@@ -934,7 +942,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 					for (Item it : e.getItems()) {
 
 						InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, null, itemTypeId, e.getStartDate(),
-								false, e, invoiceLevelId);
+								false, e, invoiceLevelId, invoiceZone);
 						final int parentQty = def(e.getQuantity(), 1);
 						final int entQty = transactionDAO.resolveDefaultQtyFromEntitlement(it.getPricePlanTemplateId(),
 								applicationId);
@@ -1015,7 +1023,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 					it.setTaxRateAllocationId(e.getTaxRateAllocationId());
 
 					InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, null, itemTypeId, e.getStartDate(), false,
-							e, invoiceLevelId);
+							e, invoiceLevelId, invoiceZone);
 
 					final int parentQty = def(e.getQuantity(), 1);
 					final int entQty = transactionDAO.resolveDefaultQtyFromEntitlement(it.getPricePlanTemplateId(),
@@ -1251,7 +1259,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			if (corporateInvoiceContexts != null && !corporateInvoiceContexts.isEmpty()) {
 				saveCorporatePaymentAllocations(
 						invoiceId, applicationId, request.getClientRoleId(), request.getCurrencyCode(),
-						request.getCreatedBy(), corporateInvoiceContexts);
+						request.getCreatedBy(), corporateInvoiceContexts, invoiceZone);
 
 				postCorporateAmountsToOrganization(
 						invoiceId, invoiceNumber, applicationId, request.getCurrencyCode(),
@@ -1704,7 +1712,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	 */
 
 	private InvoiceEntityDTO buildItemLineFromPayload(Item it, UUID parentId, UUID itemTypeId, LocalDate startDate,
-			boolean prorateEnabled, Entity lineContextParent, UUID invoiceLevelId) {
+			boolean prorateEnabled, Entity lineContextParent, UUID invoiceLevelId, ZoneId clubZone) {
 		InvoiceEntityDTO line = new InvoiceEntityDTO();
 
 		line.setInvoiceEntityId(UUID.randomUUID());
@@ -1740,7 +1748,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 				unitPrice = fullUnit;
 
 				if (isProrateApplicable) {
-					LocalDate prorationDate = (lineStart != null) ? lineStart : LocalDate.now();
+					LocalDate prorationDate = (lineStart != null) ? lineStart : LocalDate.now(clubZone);
 
 					BigDecimal prorationFactor = transactionUtils.prorateFactorForCurrentMonth(prorationDate);
 					unitPrice = scale2(fullUnit.multiply(prorationFactor));
@@ -1753,7 +1761,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			unitPrice = scale2(bd(it.getPrice()));
 
 			if (isProrateApplicable) {
-				LocalDate prorationDate2 = (lineStart != null) ? lineStart : LocalDate.now();
+				LocalDate prorationDate2 = (lineStart != null) ? lineStart : LocalDate.now(clubZone);
 				BigDecimal prorationFactorNb = transactionUtils.prorateFactorForCurrentMonth(prorationDate2);
 				unitPrice = scale2(unitPrice.multiply(prorationFactorNb));
 
@@ -1894,6 +1902,35 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		BigDecimal sub = nz(line.getUnitPrice()).multiply(q);
 		BigDecimal total = sub.add(nz(line.getTaxAmount())).subtract(nz(line.getDiscountAmount()));
 		line.setTotalAmount(scale2(total));
+	}
+
+	/**
+	 * Prefer request.timezone; else location timezone for the invoice level.
+	 * Never falls back to a hardcoded region (e.g. Asia/Kolkata).
+	 */
+	private ZoneId resolveInvoiceZoneId(InvoiceRequest request) {
+		String explicit = request != null ? request.getTimezone() : null;
+		if (StringUtils.hasText(explicit)) {
+			try {
+				return ZoneId.of(explicit.trim());
+			} catch (DateTimeException ex) {
+				throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid timezone: " + explicit, ex);
+			}
+		}
+		UUID levelHint = request != null ? request.getLevelId() : null;
+		Optional<String> fromLevel = levelHint == null
+				? Optional.empty()
+				: transactionDAO.resolveTimezoneCodeForLevel(levelHint);
+		if (fromLevel.isPresent()) {
+			try {
+				return ZoneId.of(fromLevel.get());
+			} catch (DateTimeException ex) {
+				throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+						"Invalid location timezone: " + fromLevel.get(), ex);
+			}
+		}
+		throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+				"timezone is required when the invoice level has no location timezone configured");
 	}
 
 	private UUID requireEntityTypeId(String entityTypeName) {
@@ -2061,8 +2098,19 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			throw new IllegalArgumentException("invoiceId is required");
 		if (cycleNumber <= 0)
 			throw new IllegalArgumentException("cycleNumber must be >= 1");
-		if (billingDate == null)
-			billingDate = LocalDate.now();
+		if (billingDate == null) {
+			String tz = transactionDAO.resolveTimezoneCodeForLevel(levelId).orElse(null);
+			if (tz == null || tz.isBlank()) {
+				throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+						"billingDate is required when location timezone cannot be resolved for levelId=" + levelId);
+			}
+			try {
+				billingDate = LocalDate.now(ZoneId.of(tz.trim()));
+			} catch (DateTimeException ex) {
+				throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+						"Invalid location timezone for levelId=" + levelId + ": " + tz);
+			}
+		}
 		if (applicationId == null)
 			throw new IllegalArgumentException("applicationId is required");
 		if (levelId == null)
@@ -2188,8 +2236,21 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
 					"levelId is required in request body (JSON may use locationId)");
 		}
-		InvoiceRequest req = buildFutureInvoiceRequest(invoiceId, cycleNumber, billingDate, actorId, clientAgreementId,
-				applicationId, levelId);
+		LocalDate effectiveBillingDate = billingDate;
+		if (effectiveBillingDate == null) {
+			String tz = transactionDAO.resolveTimezoneCodeForLevel(levelId).orElse(null);
+			if (!StringUtils.hasText(tz)) {
+				throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+						"billingDate is required when the level has no location timezone configured");
+			}
+			try {
+				effectiveBillingDate = LocalDate.now(ZoneId.of(tz.trim()));
+			} catch (DateTimeException ex) {
+				throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid location timezone: " + tz, ex);
+			}
+		}
+		InvoiceRequest req = buildFutureInvoiceRequest(invoiceId, cycleNumber, effectiveBillingDate, actorId,
+				clientAgreementId, applicationId, levelId);
 		return createInvoice(req);
 	}
 	
@@ -2281,7 +2342,8 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			UUID memberClientRoleId,
 			String currencyCode,
 			UUID actorId,
-			List<CorporateInvoiceContext> contexts) {
+			List<CorporateInvoiceContext> contexts,
+			ZoneId invoiceZone) {
 
 		UUID memberPayerRoleId = requiredLookupId(
 				"agreements.lu_agreement_group_payer_role", "payer_role_id", "MEMBER");
@@ -2385,7 +2447,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 						rule, amount.memberPercentage(), amount.memberSubtotal(), amount.memberDiscount(),
 						amount.memberTax(), amount.memberTotal(), memberPayerRoleId,
 						memberClientRoleId, null, null, null,
-						"IMMEDIATE", LocalDate.now(), true, "MEMBER"));
+						"IMMEDIATE", LocalDate.now(invoiceZone != null ? invoiceZone : ZoneOffset.UTC), true, "MEMBER"));
 
 				if (amount.corporateTotal().compareTo(BigDecimal.ZERO) > 0) {
 					jdbc.update(sql, allocationParams(

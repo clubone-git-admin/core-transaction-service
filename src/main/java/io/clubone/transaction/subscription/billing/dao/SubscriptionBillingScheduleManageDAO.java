@@ -38,6 +38,11 @@ public interface SubscriptionBillingScheduleManageDAO {
                                   java.time.LocalDate fromBillingDate,
                                   boolean preserveManualOverrides);
 
+    /**
+     * Resolves IANA timezone for regenerate defaults: subscription instance first, then CA local tz.
+     */
+    String findTimezoneForClientAgreement(UUID clientAgreementId);
+
     List<SubscriptionBillingScheduleItemDTO> getEditableFutureRows(UUID clientAgreementId,
                                                                    java.time.LocalDate fromBillingDate);
 

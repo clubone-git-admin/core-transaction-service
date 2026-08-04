@@ -11,6 +11,10 @@ public class InvoiceDTO {
     private UUID invoiceId;
     private String invoiceNumber;
     private Timestamp invoiceDate;
+    /** Club calendar date for the invoice (location timezone). */
+    private java.time.LocalDate businessDate;
+    /** IANA zone used when {@link #businessDate} was derived. */
+    private String businessTimezone;
     private UUID clientRoleId;
     private String billingAddress;
     private UUID invoiceStatusId;

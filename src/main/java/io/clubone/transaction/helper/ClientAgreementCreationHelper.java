@@ -112,14 +112,20 @@ public class ClientAgreementCreationHelper {
         UUID clientRoleId = invoice.getClientRoleId();
         UUID levelRefOrId = invoice.getLevelId();  // accepts levels.level_id or levels.reference_entity_id
 
-        // Use primary entity startDate as as-of date; fallback to today UTC
+        // Meta as-of: use requested start, else UTC instant's calendar only for version validity lookup
+        LocalDate metaAsOf = primary.getStartDate() != null
+                ? primary.getStartDate()
+                : OffsetDateTime.now(ZoneOffset.UTC).toLocalDate();
+
+        AgreementMeta meta = resolveAgreementMeta(agreementId, requestedAgreementVersionId, levelRefOrId, metaAsOf);
+        ZoneId zoneId = requireZoneId(meta.getLocationTimeZone());
         LocalDate startDate = primary.getStartDate() != null
                 ? primary.getStartDate()
-                : LocalDate.now(ZoneOffset.UTC);
-
-        // 1) Resolve agreement_version_id, agreement_location_id, classification, purchased_level_id
-        AgreementMeta meta = resolveAgreementMeta(agreementId, requestedAgreementVersionId, levelRefOrId, startDate);
-        ZoneId zoneId = resolveZoneId(meta.getLocationTimeZone());
+                : LocalDate.now(zoneId);
+        if (primary.getStartDate() == null && !startDate.equals(metaAsOf)) {
+            meta = resolveAgreementMeta(agreementId, requestedAgreementVersionId, levelRefOrId, startDate);
+            zoneId = requireZoneId(meta.getLocationTimeZone());
+        }
         OffsetDateTime purchasedOnUtc = OffsetDateTime.now(ZoneOffset.UTC);
         LocalDateTime purchasedOnLocal = LocalDateTime.now(zoneId);
         String purchasedOnLocalTz = zoneId.getId();
@@ -531,14 +537,17 @@ public class ClientAgreementCreationHelper {
         return "'" + value.replace("'", "'\"'\"'") + "'";
     }
 
-    private ZoneId resolveZoneId(String tz) {
+    private ZoneId requireZoneId(String tz) {
         if (tz == null || tz.isBlank()) {
-            return ZoneOffset.UTC;
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Location timezone is missing for the purchased club. "
+                            + "Configure timezone on the location before creating a client agreement.");
         }
         try {
             return ZoneId.of(tz.trim());
         } catch (DateTimeException ex) {
-            return ZoneOffset.UTC;
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Invalid location timezone: " + tz, ex);
         }
     }
 

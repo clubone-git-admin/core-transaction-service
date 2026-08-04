@@ -295,6 +295,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    invoice_id,
 				    invoice_number,
 				    invoice_date,
+				    business_date,
+				    business_timezone,
 				    client_role_id,
 				    level_id,
 				    billing_address,
@@ -311,11 +313,13 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    created_on,
 				    created_by
 				) VALUES (
-				    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?
+				    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?
 				);
 								""";
 
 		cluboneJdbcTemplate.update(insertInvoiceSql, invoiceId, dto.getInvoiceNumber(), dto.getInvoiceDate(),
+				dto.getBusinessDate() != null ? java.sql.Date.valueOf(dto.getBusinessDate()) : null,
+				dto.getBusinessTimezone(),
 				dto.getClientRoleId(), dto.getLevelId(), dto.getBillingAddress(), dto.getInvoiceStatusId(), totalSum,
 				subtotal, taxSum, discountSum, Boolean.TRUE.equals(dto.isPaid()), dto.getClientAgreementId(),
 				dto.getBillingRunId(), dto.getBillingCollectionTypeId(), appId, dto.getCreatedBy());
@@ -2122,6 +2126,32 @@ WHERE rn = 1;
 					UUID.class,
 					levelIdOrReferenceEntityId);
 			return Optional.ofNullable(byRef);
+		} catch (EmptyResultDataAccessException e) {
+			return Optional.empty();
+		}
+	}
+
+	@Override
+	public Optional<String> resolveTimezoneCodeForLevel(UUID levelIdOrReferenceEntityId) {
+		if (levelIdOrReferenceEntityId == null) {
+			return Optional.empty();
+		}
+		String sql = """
+				SELECT tz.timezone_code
+				  FROM locations.levels lv
+				  JOIN locations.location loc ON loc.location_id = lv.reference_entity_id
+				  JOIN locations.lu_timezone tz ON tz.timezone_id = loc.timezone_id
+				 WHERE (lv.level_id = ? OR lv.reference_entity_id = ?)
+				   AND COALESCE(tz.is_active, true) = true
+				 LIMIT 1
+				""";
+		try {
+			String code = cluboneJdbcTemplate.queryForObject(sql, String.class, levelIdOrReferenceEntityId,
+					levelIdOrReferenceEntityId);
+			if (code == null || code.isBlank()) {
+				return Optional.empty();
+			}
+			return Optional.of(code.trim());
 		} catch (EmptyResultDataAccessException e) {
 			return Optional.empty();
 		}

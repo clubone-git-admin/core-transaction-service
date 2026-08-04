@@ -3,8 +3,11 @@ package io.clubone.transaction.service.impl;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.sql.SQLException;
+import java.time.DateTimeException;
 import java.time.DayOfWeek;
 import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -134,7 +137,7 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 			UUID priceCycleBandId = request.getCyclePrices().get(0).getPriceCycleBandId();
 
 			UUID instanceStatusId = dao
-					.subscriptionInstanceStatusId(start.isAfter(LocalDate.now()) ? "FUTURE" : "ACTIVE");
+					.subscriptionInstanceStatusId(start.isAfter(resolveTodayForPlan(request)) ? "FUTURE" : "ACTIVE");
 		//	UUID billingStatusScheduledId = dao.billingStatusId("PENDING");
 
 			UUID instanceId = dao.insertSubscriptionInstance(planId, start, end, billingDate, instanceStatusId,
@@ -438,7 +441,8 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 		cycleStart = cycleStart - 1;
 
 		if (start == null)
-			start = LocalDate.now();
+			// Last resort for non-POS paths with no contract start: UTC calendar (prefer callers to pass start).
+			start = LocalDate.now(ZoneOffset.UTC);
 		int effInterval = (interval != null && interval > 0) ? interval : 1;
 		int skip = Math.max(0, (cycleStart == null ? 1 : cycleStart) - 1); // skip (cycleStart-1)
 
@@ -781,6 +785,25 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 				break;
 		}
 		return list;
+	}
+
+	/**
+	 * Club "today" for FUTURE vs ACTIVE: request level timezone when available;
+	 * otherwise UTC calendar as last resort for non-POS paths.
+	 */
+	private LocalDate resolveTodayForPlan(SubscriptionPlanCreateRequest request) {
+		if (request != null && request.getLevelId() != null) {
+			String tz = transactionDAO.resolveTimezoneCodeForLevel(request.getLevelId()).orElse(null);
+			if (tz != null && !tz.isBlank()) {
+				try {
+					return LocalDate.now(ZoneId.of(tz.trim()));
+				} catch (DateTimeException ignored) {
+					// fall through to UTC
+				}
+			}
+		}
+		// Last resort: no location TZ on request (non-POS path)
+		return LocalDate.now(ZoneOffset.UTC);
 	}
 
 	private static LocalDate addCycles(LocalDate date, FrequencyUnit unit, int interval, int count) {

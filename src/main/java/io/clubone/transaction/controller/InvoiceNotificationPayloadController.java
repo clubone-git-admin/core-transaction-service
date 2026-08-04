@@ -567,7 +567,7 @@ public class InvoiceNotificationPayloadController {
     private String formatInvoiceDate(Timestamp ts) {
         if (ts == null) return "";
         DateTimeFormatter fmt = DateTimeFormatter.ofPattern("MMMM dd, yyyy", Locale.ENGLISH);
-        LocalDate d = ts.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+        LocalDate d = ts.toInstant().atZone(ZoneOffset.UTC).toLocalDate();
         return fmt.format(d).toUpperCase(Locale.ENGLISH);
     }
 

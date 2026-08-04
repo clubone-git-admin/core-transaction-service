@@ -65,16 +65,30 @@ public class ClientAgreementOrchestrator {
         UUID clientRoleId = UUID.fromString(purchase.clientRoleId);
         UUID levelRefId = UUID.fromString(purchase.levelId);
 
-        // Use primary entity startDate as "as of" for version/location resolution
+        // Meta as-of: use requested start at UTC midnight, else current UTC instant for version validity only
+        OffsetDateTime provisionalAsOfUtc = (primaryEntity.startDate != null)
+                ? primaryEntity.startDate.atStartOfDay(ZoneOffset.UTC).toOffsetDateTime()
+                : OffsetDateTime.now(ZoneOffset.UTC);
+
+        AgreementMeta meta = resolveAgreementMeta(agreementId, levelRefId, provisionalAsOfUtc);
+        ZoneId zoneId = requireZoneId(meta.locationTimeZone);
         LocalDate startDate = (primaryEntity.startDate != null)
                 ? primaryEntity.startDate
-                : LocalDate.now(ZoneOffset.UTC);
+                : LocalDate.now(zoneId);
+        if (primaryEntity.startDate == null) {
+            LocalDate provisionalCalendarInZone = provisionalAsOfUtc.atZoneSameInstant(zoneId).toLocalDate();
+            if (!startDate.equals(provisionalCalendarInZone)) {
+                OffsetDateTime refinedAsOf = startDate.atStartOfDay(zoneId).toOffsetDateTime()
+                        .withOffsetSameInstant(ZoneOffset.UTC);
+                meta = resolveAgreementMeta(agreementId, levelRefId, refinedAsOf);
+                zoneId = requireZoneId(meta.locationTimeZone);
+            }
+        }
 
-        OffsetDateTime startAsOfUtc = startDate
-                .atStartOfDay(ZoneOffset.UTC)
-                .toOffsetDateTime();
-
-        AgreementMeta meta = resolveAgreementMeta(agreementId, levelRefId, startAsOfUtc);
+        OffsetDateTime startAsOfUtc = startDate.atStartOfDay(zoneId).toOffsetDateTime()
+                .withOffsetSameInstant(ZoneOffset.UTC);
+        LocalDateTime startDateLocal = startDate.atStartOfDay();
+        EndDateBlock endDateBlock = computeEndDateBlock(startDate, zoneId, meta);
 
         // Build downstream create request
         ClientAgreementCreateRequest caReq = new ClientAgreementCreateRequest();
@@ -87,9 +101,18 @@ public class ClientAgreementOrchestrator {
         // purchased_level_id from the resolved level_id (based on reference_entity_id)
         caReq.purchasedLevelId = meta.purchasedLevelId;
 
-        // Purchased + Start dates
+        // Purchased + Start + End + Obligation (same dual-write model as POS CreationHelper)
         caReq.purchasedOnUtc = OffsetDateTime.now(ZoneOffset.UTC);
+        caReq.purchasedOnLocal = LocalDateTime.now(zoneId);
+        caReq.purchasedOnLocalTz = zoneId.getId();
         caReq.startDateUtc = startAsOfUtc;
+        caReq.startDateLocal = startDateLocal;
+        caReq.startDateLocalTz = zoneId.getId();
+        caReq.endDateUtc = endDateBlock.endDateUtc();
+        caReq.endDateLocal = endDateBlock.endDateLocal();
+        caReq.endDateLocalTz = endDateBlock.endDateLocalTz();
+        caReq.obligationStartUtc = startAsOfUtc;
+        caReq.obligationEndUtc = endDateBlock.obligationEndUtc();
 
         // Status: let downstream default to ACTIVE (code), but we can choose to set explicitly
         caReq.clientAgreementStatusCode = "ACTIVE";
@@ -148,10 +171,19 @@ public class ClientAgreementOrchestrator {
                 a.agreement_classification_id,
                 av_choice.agreement_version_id,
                 al_choice.agreement_location_id,
-                (SELECT level_id FROM lvl) AS purchased_level_id
+                (SELECT level_id FROM lvl) AS purchased_level_id,
+                tz.timezone_code AS location_timezone,
+                at.duration_value AS term_duration_value,
+                ut.code AS term_duration_unit_code
             FROM agreements.agreement a
             JOIN av_choice ON av_choice.agreement_id = a.agreement_id
             JOIN al_choice ON al_choice.agreement_version_id = av_choice.agreement_version_id
+            LEFT JOIN locations.levels purchased_lvl ON purchased_lvl.level_id = (SELECT level_id FROM lvl)
+            LEFT JOIN locations.location loc ON loc.location_id = purchased_lvl.reference_entity_id
+            LEFT JOIN locations.lu_timezone tz ON tz.timezone_id = loc.timezone_id
+                AND COALESCE(tz.is_active, true) = true
+            LEFT JOIN agreements.agreement_term at ON at.agreement_term_id = a.agreement_term_id
+            LEFT JOIN agreements.lu_duration_unit_type ut ON ut.duration_unit_type_id = at.duration_unit_type_id
             WHERE a.agreement_id = :agreementId
             """;
 
@@ -211,6 +243,9 @@ public class ClientAgreementOrchestrator {
         UUID agreementVersionId;
         UUID agreementLocationId;
         UUID purchasedLevelId;
+        String locationTimeZone;
+        Integer termDurationValue;
+        String termDurationUnitCode;
     }
 
     private static class AgreementMetaRowMapper implements RowMapper<AgreementMeta> {
@@ -222,8 +257,79 @@ public class ClientAgreementOrchestrator {
             m.agreementVersionId = getUuid(rs, "agreement_version_id");
             m.agreementLocationId = getUuid(rs, "agreement_location_id");
             m.purchasedLevelId = getUuid(rs, "purchased_level_id");
+            m.locationTimeZone = rs.getString("location_timezone");
+            Object termDuration = rs.getObject("term_duration_value");
+            m.termDurationValue = termDuration == null ? null : ((Number) termDuration).intValue();
+            m.termDurationUnitCode = rs.getString("term_duration_unit_code");
             return m;
         }
+    }
+
+    private ZoneId requireZoneId(String tz) {
+        if (tz == null || tz.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Location timezone is missing for the purchased club. "
+                            + "Configure timezone on the location before creating a client agreement.");
+        }
+        try {
+            return ZoneId.of(tz.trim());
+        } catch (DateTimeException ex) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Invalid location timezone: " + tz, ex);
+        }
+    }
+
+    /**
+     * Contract end is the last inclusive instant before the exclusive end date
+     * (same semantics as {@code ClientAgreementCreationHelper}).
+     */
+    private EndDateBlock computeEndDateBlock(LocalDate startDate, ZoneId zoneId, AgreementMeta meta) {
+        boolean isContinuous = meta.termDurationValue == null
+                || meta.termDurationUnitCode == null
+                || "CONTINUOUS".equalsIgnoreCase(meta.termDurationUnitCode)
+                || "CONTINUE".equalsIgnoreCase(meta.termDurationUnitCode);
+
+        if (isContinuous) {
+            LocalDate exclusiveEnd = startDate.plusYears(1);
+            TermEndInstant obligation = lastInclusiveEndBeforeExclusiveEnd(exclusiveEnd, zoneId);
+            return new EndDateBlock(null, null, null, obligation.utc());
+        }
+
+        LocalDate exclusiveEnd = addTermDuration(startDate, meta.termDurationValue, meta.termDurationUnitCode);
+        if (exclusiveEnd == null) {
+            return new EndDateBlock(null, null, null, null);
+        }
+        TermEndInstant end = lastInclusiveEndBeforeExclusiveEnd(exclusiveEnd, zoneId);
+        return new EndDateBlock(end.utc(), end.local(), end.tzId(), end.utc());
+    }
+
+    private static TermEndInstant lastInclusiveEndBeforeExclusiveEnd(LocalDate exclusiveEndDate, ZoneId zoneId) {
+        LocalDate lastInclusiveLocalDate = exclusiveEndDate.minusDays(1);
+        LocalDateTime lastInclusiveLocal = lastInclusiveLocalDate.atTime(23, 59, 59);
+        OffsetDateTime utc = lastInclusiveLocal.atZone(zoneId).toOffsetDateTime().withOffsetSameInstant(ZoneOffset.UTC);
+        return new TermEndInstant(utc, lastInclusiveLocal, zoneId.getId());
+    }
+
+    private LocalDate addTermDuration(LocalDate startDate, Integer duration, String unitCode) {
+        if (startDate == null || duration == null || unitCode == null) {
+            return null;
+        }
+        return switch (unitCode.toUpperCase(Locale.ROOT)) {
+            case "DAY", "DAYS" -> startDate.plusDays(duration);
+            case "WEEK", "WEEKS" -> startDate.plusWeeks(duration);
+            case "MONTH", "MONTHS" -> startDate.plusMonths(duration);
+            case "YEAR", "YEARS" -> startDate.plusYears(duration);
+            default -> startDate.plusMonths(duration);
+        };
+    }
+
+    private record TermEndInstant(OffsetDateTime utc, LocalDateTime local, String tzId) {
+    }
+
+    private record EndDateBlock(OffsetDateTime endDateUtc,
+                                LocalDateTime endDateLocal,
+                                String endDateLocalTz,
+                                OffsetDateTime obligationEndUtc) {
     }
 
     private static UUID getUuid(ResultSet rs, String col) throws SQLException {

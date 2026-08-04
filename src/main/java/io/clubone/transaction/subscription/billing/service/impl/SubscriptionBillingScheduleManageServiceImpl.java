@@ -230,8 +230,19 @@ public class SubscriptionBillingScheduleManageServiceImpl implements Subscriptio
 			throw new IllegalArgumentException("clientAgreementId is required");
 		}
 
-		java.time.LocalDate fromDate = request.getFromBillingDate() == null ? java.time.LocalDate.now()
-				: request.getFromBillingDate();
+		java.time.LocalDate fromDate = request.getFromBillingDate();
+		if (fromDate == null) {
+			String tz = scheduleDAO.findTimezoneForClientAgreement(request.getClientAgreementId());
+			if (tz == null || tz.isBlank()) {
+				throw new IllegalArgumentException(
+						"fromBillingDate is required when subscription/agreement timezone is missing");
+			}
+			try {
+				fromDate = java.time.LocalDate.now(java.time.ZoneId.of(tz.trim()));
+			} catch (Exception e) {
+				throw new IllegalArgumentException("Invalid timezone for regenerate fromDate: " + tz, e);
+			}
+		}
 
 		boolean preserveManualOverrides = Boolean.TRUE.equals(request.getPreserveManualOverrides());
 

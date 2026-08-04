@@ -7,6 +7,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.Locale;
@@ -885,7 +886,7 @@ public class BillingQuoteSubscriptionPersistenceService {
 		log.info("[billing-quote/persist] step=insert_subscription_plan outcome=ok subscriptionPlanId={}",
 				subscriptionPlanId);
 
-		ZoneId zone = parseZone(quote.getTimezone());
+		ZoneId zone = requireZone(quote.getTimezone());
 		Instant triggerAt = contractStart != null
 				? contractStart.atStartOfDay(zone).toInstant()
 				: Instant.now();
@@ -956,7 +957,7 @@ public class BillingQuoteSubscriptionPersistenceService {
 					pos.getLuPlanCode());
 		}
 
-		ZoneId quoteZone = parseZone(quote.getTimezone());
+		ZoneId quoteZone = requireZone(quote.getTimezone());
 		LocalDate todayInQuoteTz = LocalDate.now(quoteZone);
 		LocalDate nextBillingDate = resolveFirstCycleBillingDate(quote, subscriptionLines, contractStart);
 		LocalDate lastBilledOn = resolveLastBilledOn(subscriptionLines, invoicePaid, todayInQuoteTz);
@@ -986,7 +987,7 @@ public class BillingQuoteSubscriptionPersistenceService {
 				subscriptionPlanId,
 				contractStart,
 				contractEnd,
-				nzStr(quote.getTimezone(), "UTC"),
+				quoteZone.getId(),
 				nextBillingDate,
 				lastBilledOn,
 				1,
@@ -1013,7 +1014,7 @@ public class BillingQuoteSubscriptionPersistenceService {
 
 		List<RecurringForecastRow> recurringRows = readRecurringForecastRows(quote);
 
-		ScheduleAgg agg = aggregateSchedule(subscriptionLines, contractStart, contractEnd);
+		ScheduleAgg agg = aggregateSchedule(subscriptionLines, contractStart, contractEnd, quoteZone);
 		boolean anyLineProrated = subscriptionLines.stream()
 				.anyMatch(li -> li != null && Boolean.TRUE.equals(li.getIsProrated()));
 		boolean aggregateChargeBelowFullCycle = aggregateChargeLessThanFullCycleUnitTotal(subscriptionLines);
@@ -1025,7 +1026,7 @@ public class BillingQuoteSubscriptionPersistenceService {
 
 		boolean paidFirstCycle = invoicePaid && invoiceId != null;
 		UUID firstCycleScheduleStatusId = paidFirstCycle ? paidScheduleStatusId : plannedScheduleStatusId;
-		Timestamp billedOnPaidCycle = paidFirstCycle ? Timestamp.valueOf(LocalDateTime.now(quoteZone)) : null;
+		Timestamp billedOnPaidCycle = paidFirstCycle ? Timestamp.from(Instant.now()) : null;
 		UUID invoiceIdForPaidCycle = paidFirstCycle ? invoiceId : null;
 
 		List<PendingSchedule> pending = buildPendingSchedules(subscriptionLines, recurringRows);
@@ -1085,7 +1086,8 @@ public class BillingQuoteSubscriptionPersistenceService {
 					prSource,
 					invId,
 					billedOn,
-					billingRunId);
+					billingRunId,
+					createdBy);
 			if (primaryBillingScheduleId == null) {
 				primaryBillingScheduleId = sid;
 			}
@@ -1130,9 +1132,10 @@ public class BillingQuoteSubscriptionPersistenceService {
 					    invoice_tax_amount,
 					    invoice_discount_amount,
 					    created_on,
+					    created_by,
 					    application_id
 					) VALUES (
-					    gen_random_uuid(), ?, now(), ?, ?, ?, false, ?, ?, ?, ?, ?, now(),'5949a200-82fb-4171-9001-0f77ac439011'
+					    gen_random_uuid(), ?, now(), ?, ?, ?, false, ?, ?, ?, ?, ?, now(), ?,'5949a200-82fb-4171-9001-0f77ac439011'
 					)
 					""",
 					subscriptionInstanceId,
@@ -1143,7 +1146,8 @@ public class BillingQuoteSubscriptionPersistenceService {
 					primaryBillingScheduleId,
 					invHdr.subTotal(),
 					invHdr.taxAmount(),
-					invHdr.discountAmount());
+					invHdr.discountAmount(),
+					createdBy);
 			log.info("[billing-quote/persist] step=insert_billing_history outcome=ok");
 		} else {
 			log.info("[billing-quote/persist] step=insert_billing_history skipped=true reason=null_invoice_id");
@@ -1396,7 +1400,7 @@ public class BillingQuoteSubscriptionPersistenceService {
 		}
 		String left = inner.substring(0, dash).trim();
 		String right = inner.substring(dash + 1).trim();
-		int y = anchorHint != null ? anchorHint.getYear() : LocalDate.now().getYear();
+		int y = anchorHint != null ? anchorHint.getYear() : LocalDate.now(ZoneOffset.UTC).getYear();
 		LocalDate s = parseEnglishMonthDayWithYear(left, y);
 		LocalDate e = parseEnglishMonthDayWithYear(right, y);
 		if (s == null || e == null) {
@@ -1468,7 +1472,7 @@ public class BillingQuoteSubscriptionPersistenceService {
 			BigDecimal unitPriceBeforeDiscount, BigDecimal baseAmount, BigDecimal discountAmount, BigDecimal taxAmount,
 			BigDecimal taxPct, BigDecimal subtotalBeforeTax, boolean isProrated, boolean isOneTime, boolean isFinalCycle,
 			UUID billingScheduleStatusId, String prorationCaseCode, String prorationStrategyCode, String prorationSource,
-			UUID invoiceId, Timestamp billedOn, UUID billingRunId) {
+			UUID invoiceId, Timestamp billedOn, UUID billingRunId, UUID createdBy) {
 		return jdbc.queryForObject("""
 				INSERT INTO client_subscription_billing.subscription_billing_schedule (
 				    billing_schedule_id,
@@ -1499,9 +1503,10 @@ public class BillingQuoteSubscriptionPersistenceService {
 				    billed_on,
 				    billing_run_id,
 				    created_on,
+				    created_by,
 				    application_id
 				) VALUES (
-				    gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(),'5949a200-82fb-4171-9001-0f77ac439011'
+				    gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), ?,'5949a200-82fb-4171-9001-0f77ac439011'
 				) RETURNING billing_schedule_id
 				""", UUID.class,
 				subscriptionInstanceId,
@@ -1529,7 +1534,8 @@ public class BillingQuoteSubscriptionPersistenceService {
 				trunc(prorationSource, 50),
 				invoiceId,
 				billedOn,
-				billingRunId);
+				billingRunId,
+				createdBy);
 	}
 
 private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
@@ -2403,7 +2409,7 @@ private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 		UUID billingAlignmentId = billingLookup.requireBillingAlignmentId(billing.getBillingAlignmentCode());
 		UUID prorationStrategyId = billingLookup.requireProrationStrategyId(billing.getProrationStrategyCode());
 		UUID dayRuleId = billingLookup.findSubscriptionBillingDayRuleIdByTermConfig(pos.getPackagePlanTemplateTermConfigId());
-		ZoneId zone = parseZone(quote.getTimezone());
+		ZoneId zone = requireZone(quote.getTimezone());
 		LocalDate contractStart = nzDate(pos.getBillingStartDate(), quote.getStartDate());
 		LocalDate contractEnd = nzDate(pos.getBillingEndDate(), contractStart);
 		Instant triggerAt = contractStart != null ? contractStart.atStartOfDay(zone).toInstant() : Instant.now();
@@ -2759,9 +2765,10 @@ private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 			BigDecimal baseAmount, BigDecimal taxAmount, BigDecimal taxPct, BigDecimal subtotalBeforeTax) {
 	}
 
-	private ScheduleAgg aggregateSchedule(List<QuoteLineItemRow> lines, LocalDate contractStart, LocalDate contractEnd) {
+	private ScheduleAgg aggregateSchedule(List<QuoteLineItemRow> lines, LocalDate contractStart, LocalDate contractEnd,
+			ZoneId quoteZone) {
+		LocalDate today = LocalDate.now(quoteZone);
 		if (lines.isEmpty()) {
-			LocalDate today = LocalDate.now();
 			LocalDate cs = nzDate(contractStart, today);
 			LocalDate ce = nzDate(contractEnd, cs);
 			String pl = trunc(formatIsoPeriodLabel(cs, ce), 100);
@@ -2813,7 +2820,7 @@ private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 		}
 		QuoteLineItemRow first = lines.get(0);
 		if (pStart == null) {
-			pStart = nzDate(first.getStartDate(), LocalDate.now());
+			pStart = nzDate(first.getStartDate(), today);
 		}
 		if (pEnd == null) {
 			pEnd = nzDate(first.getEndDate(), pStart);
@@ -2872,14 +2879,16 @@ private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 		return s.length() <= max ? s : s.substring(0, max);
 	}
 
-	private static ZoneId parseZone(String tz) {
+	private static ZoneId requireZone(String tz) {
 		if (tz == null || tz.isBlank()) {
-			return ZoneId.of("UTC");
+			throw new IllegalArgumentException(
+					"Quote timezone is required to persist subscription billing dates. "
+							+ "Pass the location IANA timezone on the quote.");
 		}
 		try {
 			return ZoneId.of(tz.trim());
 		} catch (Exception e) {
-			return ZoneId.of("UTC");
+			throw new IllegalArgumentException("Invalid quote timezone: " + tz, e);
 		}
 	}
 }

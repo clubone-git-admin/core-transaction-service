@@ -163,6 +163,9 @@ public interface TransactionDAO {
 	 */
 	Optional<UUID> resolveLevelIdForInvoice(UUID levelIdOrReferenceEntityId);
 
+	/** IANA timezone for a level (or location reference) from {@code locations.lu_timezone}. */
+	Optional<String> resolveTimezoneCodeForLevel(UUID levelIdOrReferenceEntityId);
+
 	List<InvoiceTransactionDetailDTO> findInvoiceTransactions(UUID invoiceId);
 
 	List<InvoiceRefundDetailDTO> findInvoiceRefunds(UUID invoiceId);

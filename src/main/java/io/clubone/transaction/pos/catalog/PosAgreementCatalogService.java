@@ -1,6 +1,8 @@
 package io.clubone.transaction.pos.catalog;
 
+import java.time.DateTimeException;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -27,13 +29,24 @@ public class PosAgreementCatalogService {
 		if (levelIdOrReference == null) {
 			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "levelId is required");
 		}
-		if (asOf == null) {
-			asOf = LocalDate.now();
-		}
 		UUID levelId = transactionDAO.resolveLevelIdForInvoice(levelIdOrReference)
 				.orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST,
 						"Unknown levelId (expected locations.levels.level_id or reference_entity_id): "
 								+ levelIdOrReference));
+
+		if (asOf == null) {
+			String tz = transactionDAO.resolveTimezoneCodeForLevel(levelId).orElse(null);
+			if (tz == null || tz.isBlank()) {
+				throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+						"Location timezone is not configured for levelId=" + levelId);
+			}
+			try {
+				asOf = LocalDate.now(ZoneId.of(tz.trim()));
+			} catch (DateTimeException ex) {
+				throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+						"Invalid location timezone for levelId=" + levelId + ": " + tz);
+			}
+		}
 
 		List<PosCatalogAgreementDTO> agreements = new ArrayList<>();
 		for (PosAgreementCatalogDao.AgreementCatalogRow ar : posAgreementCatalogDao.findAgreementsForLevel(levelId,

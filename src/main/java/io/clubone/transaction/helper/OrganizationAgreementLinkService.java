@@ -179,9 +179,13 @@ public class OrganizationAgreementLinkService {
 
                     ELSE 'PENDING'
                 END,
-                ca.start_date_utc::date,
-                ca.end_date_utc::date,
-                ca.obligation_end_utc::date,
+                COALESCE(ca.start_date_local::date, ca.start_date_utc::date),
+                COALESCE(ca.end_date_local::date, ca.end_date_utc::date),
+                COALESCE(
+                    ca.end_date_local::date,
+                    (ca.obligation_end_utc AT TIME ZONE COALESCE(NULLIF(ca.end_date_local_tz, ''), NULLIF(ca.start_date_local_tz, ''), 'UTC'))::date,
+                    ca.obligation_end_utc::date
+                ),
                 COALESCE(
                     ca.purchased_level_id,
                     o.home_level_id
@@ -693,11 +697,15 @@ public class OrganizationAgreementLinkService {
                            ELSE 'PENDING'
                        END,
                    start_date =
-                       ca.start_date_utc::date,
+                       COALESCE(ca.start_date_local::date, ca.start_date_utc::date),
                    end_date =
-                       ca.end_date_utc::date,
+                       COALESCE(ca.end_date_local::date, ca.end_date_utc::date),
                    obligation_end_date =
-                       ca.obligation_end_utc::date,
+                       COALESCE(
+                           ca.end_date_local::date,
+                           (ca.obligation_end_utc AT TIME ZONE COALESCE(NULLIF(ca.end_date_local_tz, ''), NULLIF(ca.start_date_local_tz, ''), 'UTC'))::date,
+                           ca.obligation_end_utc::date
+                       ),
                    facility_level_id =
                        COALESCE(
                            ca.purchased_level_id,
