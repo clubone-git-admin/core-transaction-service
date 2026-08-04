@@ -1209,11 +1209,11 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			}
 
 			return persistInvoiceAfterClientAgreements(
-					request, inv, corporateInvoiceContexts, applicationId, createdClientAgreementIds);
+					request, inv, corporateInvoiceContexts, applicationId, createdClientAgreementIds, invoiceZone);
 		}
 
 		return persistInvoiceAfterClientAgreements(
-				request, inv, corporateInvoiceContexts, applicationId, List.of());
+				request, inv, corporateInvoiceContexts, applicationId, List.of(), invoiceZone);
 	}
 
 	/**
@@ -1226,7 +1226,8 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			InvoiceDTO inv,
 			List<CorporateInvoiceContext> corporateInvoiceContexts,
 			UUID applicationId,
-			List<UUID> createdClientAgreementIds) {
+			List<UUID> createdClientAgreementIds,
+			ZoneId invoiceZone) {
 
 		return invoicePersistTx.execute(status -> {
 			List<OrganizationContractLinkResult> organizationContractLinks = new ArrayList<>();
