@@ -15,14 +15,15 @@ public class FinalizedInvoiceInventoryListener {
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     public void provisionInventory(FinalizedInvoiceInventoryEvent event) {
-
         log.info(
                 "[inventory-provisioning] step=listener_received "
                         + "invoiceId={}, clientPaymentTransactionId={}, "
-                        + "actorId={}, correlationId={}",
+                        + "actorId={}, locationId={}, applicationId={}, correlationId={}",
                 event.invoiceId(),
                 event.clientPaymentTransactionId(),
                 event.actorId(),
+                event.locationId(),
+                event.applicationId(),
                 event.correlationId()
         );
 
@@ -32,6 +33,8 @@ public class FinalizedInvoiceInventoryListener {
                             event.invoiceId(),
                             event.clientPaymentTransactionId(),
                             event.actorId(),
+                            event.locationId(),
+                            event.applicationId(),
                             event.correlationId()
                     );
 
@@ -40,32 +43,17 @@ public class FinalizedInvoiceInventoryListener {
                             + "invoiceId={}, clientRoleId={}, "
                             + "invoiceEntityCount={}, entitlementCount={}, "
                             + "createdCount={}, skippedCount={}",
-                    result.invoiceId(),
-                    result.clientRoleId(),
-                    result.invoiceEntityCount(),
-                    result.entitlementCount(),
-                    result.createdCount(),
-                    result.skippedCount()
+                    result.invoiceId(), result.clientRoleId(),
+                    result.invoiceEntityCount(), result.entitlementCount(),
+                    result.createdCount(), result.skippedCount()
             );
-
         } catch (Exception exception) {
-            /*
-             * The payment and invoice have already committed.
-             * Therefore, do not throw this error back into the
-             * completed payment transaction.
-             *
-             * Production recommendation:
-             * persist an outbox/retry record here.
-             */
             log.error(
                     "Inventory provisioning failed after finalize "
                             + "invoiceId={}, clientPaymentTransactionId={}, "
                             + "correlationId={}, message={}",
-                    event.invoiceId(),
-                    event.clientPaymentTransactionId(),
-                    event.correlationId(),
-                    exception.getMessage(),
-                    exception
+                    event.invoiceId(), event.clientPaymentTransactionId(),
+                    event.correlationId(), exception.getMessage(), exception
             );
         }
     }

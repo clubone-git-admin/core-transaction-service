@@ -579,7 +579,11 @@ public class TransactionServiceImpl implements TransactionService {
 	 * fetch/persist run async after commit so the client is not blocked (~seconds of IO).
 	 */
 	@Override
-	public FinalizeTransactionResponse finalizeTransactionV3(FinalizeTransactionRequest req) {
+	public FinalizeTransactionResponse finalizeTransactionV3(
+			FinalizeTransactionRequest req,
+			UUID actorId,
+			UUID locationId,
+			UUID applicationId) {
 		final long t0 = System.nanoTime();
 		logger.info(
 				"[transactions/v3/finalize] step=start invoiceId={} paymentGatewayCode={} paymentMethodCode={} hasClientPaymentTransactionId={} amountToPayNow={} billingQuoteSpecCount={} clientAgreementId={}",
@@ -772,7 +776,9 @@ public class TransactionServiceImpl implements TransactionService {
 						new FinalizedInvoiceInventoryEvent(
 								req.getInvoiceId(),
 								cptId,
-								req.getCreatedBy(),
+								actorId,
+								locationId,
+								applicationId,
 								inventoryCorrelationId));
 
 				logger.info(
@@ -781,9 +787,9 @@ public class TransactionServiceImpl implements TransactionService {
 								+ "invoiceId={} clientPaymentTransactionId={} correlationId={}",
 						req.getInvoiceId(), cptId, inventoryCorrelationId);
 				// Fully async: resolve + refresh_client_dashboard_proj never touch the finalize request thread.
-				UUID applicationId = AccessContext.applicationId();
+				UUID dashboardApplicationId = AccessContext.applicationId();
 				clientDashboardProjectionRefresher.scheduleRefreshAfterCommit(
-						req.getInvoiceId(), req.getClientRoleId(), applicationId);
+						req.getInvoiceId(), req.getClientRoleId(), dashboardApplicationId);
 
 				if (effectiveClientAgreementId != null) {
 					// Fully async: agreement lookup + webhook HTTP never touch the finalize request thread.

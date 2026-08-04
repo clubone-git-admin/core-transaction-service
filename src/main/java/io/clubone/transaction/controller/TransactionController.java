@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -38,100 +39,99 @@ import lombok.RequiredArgsConstructor;
 @Tag(name = "Transactions", description = "Invoice create and transaction finalize APIs")
 public class TransactionController {
 
-	private final TransactionService transactionService;
-	private final InvoiceService invoiceService;
+    private final TransactionService transactionService;
+    private final InvoiceService invoiceService;
 
-	@PostMapping("/invoice")
-	@PreAuthorize("@perm.canOperatePos()")
-	@Operation(summary = "Create invoice (legacy)")
-	public ResponseEntity<Map<String, Object>> createInvoice(@RequestBody InvoiceDTO dto) {
-		UUID invoiceId = transactionService.createInvoice(dto);
-		return ResponseEntity.ok(Map.of("invoiceId", invoiceId));
-	}
+    @PostMapping("/invoice")
+    @PreAuthorize("@perm.canOperatePos()")
+    @Operation(summary = "Create invoice (legacy)")
+    public ResponseEntity<Map<String, Object>> createInvoice(@RequestBody InvoiceDTO dto) {
+        UUID invoiceId = transactionService.createInvoice(dto);
+        return ResponseEntity.ok(Map.of("invoiceId", invoiceId));
+    }
 
-	@PostMapping("/transaction")
-	@PreAuthorize("@perm.canOperatePos()")
-	@Operation(summary = "Create transaction (legacy)")
-	public ResponseEntity<Map<String, Object>> createTransaction(@RequestBody TransactionDTO dto) {
-		UUID txnId = transactionService.createTransaction(dto);
-		return ResponseEntity.ok(Map.of("transactionId", txnId));
-	}
+    @PostMapping("/transaction")
+    @PreAuthorize("@perm.canOperatePos()")
+    @Operation(summary = "Create transaction (legacy)")
+    public ResponseEntity<Map<String, Object>> createTransaction(@RequestBody TransactionDTO dto) {
+        UUID txnId = transactionService.createTransaction(dto);
+        return ResponseEntity.ok(Map.of("transactionId", txnId));
+    }
 
-	@PostMapping("/finalize")
-	@PreAuthorize("@perm.canOperatePos()")
-	@Operation(summary = "Create and finalize transaction")
-	public ResponseEntity<CreateTransactionResponse> createAndFinalizeTransaction(
-			@RequestBody CreateTransactionRequest request) {
+    @PostMapping("/finalize")
+    @PreAuthorize("@perm.canOperatePos()")
+    @Operation(summary = "Create and finalize transaction")
+    public ResponseEntity<CreateTransactionResponse> createAndFinalizeTransaction(
+            @RequestBody CreateTransactionRequest request) {
+        UUID transactionId = transactionService.createAndFinalizeTransaction(request);
+        return ResponseEntity.ok(new CreateTransactionResponse(transactionId));
+    }
 
-		UUID transactionId = transactionService.createAndFinalizeTransaction(request);
-		return ResponseEntity.ok(new CreateTransactionResponse(transactionId));
-	}
+    @PostMapping("v2/invoice")
+    @PreAuthorize("@perm.canOperatePos()")
+    @Operation(summary = "Create invoice v2 (PENDING_PAYMENT)")
+    public ResponseEntity<CreateInvoiceResponse> createInvoice(@RequestBody CreateInvoiceRequest request) {
+        return ResponseEntity.ok(transactionService.createInvoice(request));
+    }
 
-	@PostMapping("v2/invoice")
-	@PreAuthorize("@perm.canOperatePos()")
-	@Operation(summary = "Create invoice v2 (PENDING_PAYMENT)")
-	public ResponseEntity<CreateInvoiceResponse> createInvoice(@RequestBody CreateInvoiceRequest request) {
-		CreateInvoiceResponse response = transactionService.createInvoice(request);
-		return ResponseEntity.ok(response);
-	}
+    @PostMapping("v2/finalize")
+    @PreAuthorize("@perm.canOperatePos()")
+    @Operation(summary = "Finalize transaction v2 after payment")
+    public ResponseEntity<FinalizeTransactionResponse> finalizeTransaction(
+            @RequestBody FinalizeTransactionRequest request) {
+        return ResponseEntity.ok(transactionService.finalizeTransaction(request));
+    }
 
-	@PostMapping("v2/finalize")
-	@PreAuthorize("@perm.canOperatePos()")
-	@Operation(summary = "Finalize transaction v2 after payment")
-	public ResponseEntity<FinalizeTransactionResponse> finalizeTransaction(
-			@RequestBody FinalizeTransactionRequest request) {
-		FinalizeTransactionResponse response = transactionService.finalizeTransaction(request);
-		return ResponseEntity.ok(response);
-	}
+    @PostMapping("v3/invoice")
+    @PreAuthorize("@perm.canOperatePos()")
+    @Operation(summary = "Create invoice v3")
+    public ResponseEntity<CreateInvoiceResponse> createInvoiceV3(@RequestBody CreateInvoiceRequestV3 request) {
+        return ResponseEntity.ok(transactionService.createInvoiceV3(request));
+    }
 
-	@PostMapping("v3/invoice")
-	@PreAuthorize("@perm.canOperatePos()")
-	@Operation(summary = "Create invoice v3")
-	public ResponseEntity<CreateInvoiceResponse> createInvoiceV3(@RequestBody CreateInvoiceRequestV3 request) {
-		CreateInvoiceResponse response = transactionService.createInvoiceV3(request);
-		return ResponseEntity.ok(response);
-	}
+    @PostMapping("v3/finalize")
+    @PreAuthorize("@perm.canOperatePosOrRemote()")
+    @Operation(summary = "Finalize transaction v3 after payment")
+    public ResponseEntity<FinalizeTransactionResponse> finalizeTransactionv3(
+            @RequestHeader("X-Actor-Id") UUID actorId,
+            @RequestHeader("X-Location-Id") UUID locationId,
+            @RequestHeader("application-id") UUID applicationId,
+            @RequestBody FinalizeTransactionRequest request) {
+        FinalizeTransactionResponse response = transactionService.finalizeTransactionV3(
+                request, actorId, locationId, applicationId);
+        if (StringUtils.isEmpty(response.getMessage()))
+            return ResponseEntity.ok(response);
+        else
+            return ResponseEntity.badRequest().body(response);
+    }
 
-	@PostMapping("v3/finalize")
-	@PreAuthorize("@perm.canOperatePosOrRemote()")
-	@Operation(summary = "Finalize transaction v3 after payment")
-	public ResponseEntity<FinalizeTransactionResponse> finalizeTransactionv3(
-			@RequestBody FinalizeTransactionRequest request) {
-		FinalizeTransactionResponse response = transactionService.finalizeTransactionV3(request);
-		if (StringUtils.isEmpty(response.getMessage()))
-			return ResponseEntity.ok(response);
-		else
-			return ResponseEntity.badRequest().body(response);
-	}
+    @GetMapping("v3/invoices/{invoiceId}/receipt")
+    @PreAuthorize("@perm.canOperatePosOrRemote()")
+    @Operation(summary = "Get a printable receipt for a finalized invoice")
+    public ResponseEntity<InvoiceFullDetailResponse> getInvoiceReceipt(@PathVariable UUID invoiceId) {
+        InvoiceFullDetailResponse receipt = invoiceService.getInvoiceFullDetail(invoiceId, null);
+        if (receipt == null || receipt.getInvoice() == null) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(receipt);
+    }
 
-	@GetMapping("v3/invoices/{invoiceId}/receipt")
-	@PreAuthorize("@perm.canOperatePosOrRemote()")
-	@Operation(summary = "Get a printable receipt for a finalized invoice")
-	public ResponseEntity<InvoiceFullDetailResponse> getInvoiceReceipt(@PathVariable UUID invoiceId) {
-		InvoiceFullDetailResponse receipt = invoiceService.getInvoiceFullDetail(invoiceId, null);
-		if (receipt == null || receipt.getInvoice() == null) {
-			return ResponseEntity.notFound().build();
-		}
-		return ResponseEntity.ok(receipt);
-	}
+    @PutMapping("/{transactionId}/client-agreement/{clientAgreementId}")
+    @PreAuthorize("@perm.canOperatePos()")
+    @Operation(summary = "Link client agreement to transaction")
+    public ResponseEntity<?> updateClientAgreementPath(@PathVariable UUID transactionId,
+            @PathVariable UUID clientAgreementId) {
+        boolean updated = transactionService.setClientAgreement(transactionId, clientAgreementId);
+        if (!updated) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(Map.of("transactionId", transactionId,
+                "clientAgreementId", clientAgreementId, "status", "UPDATED"));
+    }
 
-	@PutMapping("/{transactionId}/client-agreement/{clientAgreementId}")
-	@PreAuthorize("@perm.canOperatePos()")
-	@Operation(summary = "Link client agreement to transaction")
-	public ResponseEntity<?> updateClientAgreementPath(@PathVariable UUID transactionId,
-			@PathVariable UUID clientAgreementId) {
-
-		boolean updated = transactionService.setClientAgreement(transactionId, clientAgreementId);
-		if (!updated) {
-			return ResponseEntity.notFound().build();
-		}
-		return ResponseEntity.ok(
-				Map.of("transactionId", transactionId, "clientAgreementId", clientAgreementId, "status", "UPDATED"));
-	}
-
-	@GetMapping("/invoice/{clientRoleId}")
-	@Operation(summary = "List invoices by client role")
-	public List<InvoiceResponseDTO> getInvoicesByClient(@PathVariable("clientRoleId") UUID clientRoleId) {
-		return transactionService.getInvoicesByClientRole(clientRoleId);
-	}
+    @GetMapping("/invoice/{clientRoleId}")
+    @Operation(summary = "List invoices by client role")
+    public List<InvoiceResponseDTO> getInvoicesByClient(@PathVariable("clientRoleId") UUID clientRoleId) {
+        return transactionService.getInvoicesByClientRole(clientRoleId);
+    }
 }

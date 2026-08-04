@@ -43,6 +43,8 @@ public class FinalizeInventoryProvisioningHelper {
             UUID invoiceId,
             UUID paymentTransactionId,
             UUID actorId,
+            UUID locationId,
+            UUID applicationId,
             String correlationId) {
 
         Objects.requireNonNull(
@@ -52,6 +54,14 @@ public class FinalizeInventoryProvisioningHelper {
         Objects.requireNonNull(
                 actorId,
                 "actorId is required"
+        );
+        Objects.requireNonNull(
+                locationId,
+                "locationId is required"
+        );
+        Objects.requireNonNull(
+                applicationId,
+                "applicationId is required"
         );
 
         InvoiceHeader invoice =
@@ -149,7 +159,8 @@ public class FinalizeInventoryProvisioningHelper {
                     apiClient.createInventory(
                             invoice.clientRoleId(),
                             actorId,
-                            invoice.levelId(),
+                            locationId,
+                            applicationId,
                             itemCorrelationId,
                             request
                     );

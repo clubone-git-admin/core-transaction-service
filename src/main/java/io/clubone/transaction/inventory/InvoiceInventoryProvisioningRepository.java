@@ -80,7 +80,7 @@ public class InvoiceInventoryProvisioningRepository {
                  AND coalesce(entity_type_lookup.is_active, true) = true
                 WHERE entity.invoice_id = :invoiceId
                   AND entity.is_active = true
-                  AND entity.parent_invoice_entity_id IS NULL
+                  AND upper(entity_type_lookup.entity_type) = 'ITEM'
                 ORDER BY entity.created_on, entity.invoice_entity_id
                 """,
                 new MapSqlParameterSource("invoiceId", invoiceId),

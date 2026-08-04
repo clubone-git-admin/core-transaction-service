@@ -6,6 +6,8 @@ public record FinalizedInvoiceInventoryEvent(
         UUID invoiceId,
         UUID clientPaymentTransactionId,
         UUID actorId,
+        UUID locationId,
+        UUID applicationId,
         String correlationId
 ) {
 }

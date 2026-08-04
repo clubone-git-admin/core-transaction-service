@@ -24,16 +24,6 @@ public class ClientInventoryApiClient {
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
     
-    private static final UUID TEST_ACTOR_ID =
-            UUID.fromString(
-                    "1934776b-1912-4886-9890-023f21f6ba3b"
-            );
-
-    private static final UUID TEST_HEADER_LOCATION_ID =
-            UUID.fromString(
-                    "290ea7fa-7842-44ba-bf09-578c6e8a7842"
-            );
-
     public ClientInventoryApiClient(
             RestTemplate restTemplate,
             ObjectMapper objectMapper) {
@@ -46,6 +36,7 @@ public class ClientInventoryApiClient {
             UUID clientRoleId,
             UUID actorId,
             UUID locationId,
+            UUID applicationId,
             String correlationId,
             CreateClientInventoryItemRequest request) {
 
@@ -60,7 +51,7 @@ public class ClientInventoryApiClient {
                 List.of(MediaType.APPLICATION_JSON)
         );
 
-        if (request.applicationId() == null) {
+        if (applicationId == null) {
             throw new InventoryProvisioningException(
                     "applicationId is required for client inventory creation"
             );
@@ -68,17 +59,17 @@ public class ClientInventoryApiClient {
 
         headers.set(
                 "application-id",
-                request.applicationId().toString()
+                applicationId.toString()
         );
 
         headers.set(
                 "x-actor-id",
-                TEST_ACTOR_ID.toString()
+                actorId.toString()
         );
 
         headers.set(
                 "x-location-id",
-                TEST_HEADER_LOCATION_ID.toString()
+                locationId.toString()
         );
 
         headers.set(
@@ -110,9 +101,9 @@ public class ClientInventoryApiClient {
                         + "payload={}",
                 endpoint,
                 clientRoleId,
-                request.applicationId(),
-                TEST_ACTOR_ID,
-                TEST_HEADER_LOCATION_ID,
+                applicationId,
+                actorId,
+                locationId,
                 correlationId,
                 toJson(request)
         );
