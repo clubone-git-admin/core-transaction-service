@@ -77,6 +77,7 @@ import io.clubone.transaction.v2.vo.InvoiceRequest;
 import io.clubone.transaction.v2.vo.InvoiceSummaryDTO;
 import io.clubone.transaction.v2.vo.Item;
 import io.clubone.transaction.v2.vo.PaymentTimelineItemDTO;
+import io.clubone.transaction.currency.InvoiceCurrencyStampService;
 import io.clubone.transaction.v2.vo.PromotionItemEffectDTO;
 import io.clubone.transaction.validation.AgreementPurchaseEligibilityValidator;
 import io.clubone.transaction.vo.EntityTypeDTO;
@@ -116,6 +117,9 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 	@Autowired
 	private NamedParameterJdbcTemplate jdbc;
+
+	@Autowired
+	private InvoiceCurrencyStampService invoiceCurrencyStampService;
 
 	private final TransactionTemplate invoicePersistTx;
 
@@ -1101,6 +1105,15 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		inv.setDiscountAmount(scale2(discountTotal)); // informational
 		inv.setTotalAmount(scale2(subTotal.add(taxTotal)));// âœ… discount already applied
 
+		String currencyCode = invoiceCurrencyStampService.requireCurrencyCode(
+				request.getCurrencyCode(), inv.getLevelId(), request.getClientRoleId());
+		InvoiceCurrencyStampService.Stamp stamp =
+				invoiceCurrencyStampService.stamp(inv.getTotalAmount(), currencyCode);
+		inv.setCurrencyCode(stamp.currencyCode());
+		inv.setAmountReporting(stamp.amountReporting());
+		inv.setFxRateId(stamp.fxRateId());
+		inv.setFxAsOf(stamp.fxAsOf());
+
 		inv.setLineItems(lines);
 
 		UUID firstClientAgreementId = null;
@@ -1258,12 +1271,15 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			String invoiceNumber = transactionDAO.findInvoiceNumber(invoiceId);
 
 			if (corporateInvoiceContexts != null && !corporateInvoiceContexts.isEmpty()) {
+				String corpCcy = inv.getCurrencyCode() != null
+						? inv.getCurrencyCode()
+						: request.getCurrencyCode();
 				saveCorporatePaymentAllocations(
-						invoiceId, applicationId, request.getClientRoleId(), request.getCurrencyCode(),
+						invoiceId, applicationId, request.getClientRoleId(), corpCcy,
 						request.getCreatedBy(), corporateInvoiceContexts, invoiceZone);
 
 				postCorporateAmountsToOrganization(
-						invoiceId, invoiceNumber, applicationId, request.getCurrencyCode(),
+						invoiceId, invoiceNumber, applicationId, corpCcy,
 						request.getCreatedBy(), corporateInvoiceContexts);
 			}
 
@@ -2334,7 +2350,10 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	}
 
 	private String currency(String value) {
-		return StringUtils.hasText(value) ? value.trim().toUpperCase(Locale.ROOT) : "USD";
+		if (StringUtils.hasText(value)) {
+			return value.trim().toUpperCase(Locale.ROOT);
+		}
+		throw new IllegalStateException("currencyCode is required (no silent USD/INR fallback)");
 	}
 
 	private void saveCorporatePaymentAllocations(

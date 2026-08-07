@@ -592,7 +592,11 @@ public class ClientAgreementController {
                 row.put("discountAmount", u.discountAmount != null ? u.discountAmount : BigDecimal.ZERO);
                 row.put("taxAmount", u.taxAmount != null ? u.taxAmount : BigDecimal.ZERO);
                 row.put("totalAmount", required(u.totalAmount, "upsellItems[].totalAmount"));
-                row.put("currencyCode", u.currencyCode != null ? u.currencyCode : "INR");
+                if (u.currencyCode == null || u.currencyCode.isBlank()) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                            "upsellItems[].currencyCode is required (no silent currency default)");
+                }
+                row.put("currencyCode", u.currencyCode.trim().toUpperCase());
                 row.put("invoiceId", u.invoiceId);
                 row.put("invoiceEntityId", u.invoiceEntityId);
                 row.put("itemVersionId", u.itemVersionId);

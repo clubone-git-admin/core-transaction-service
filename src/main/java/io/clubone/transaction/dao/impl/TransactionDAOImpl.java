@@ -309,11 +309,15 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    client_agreement_id,
 				    billing_run_id,
 				    billing_collection_type_id,
+				    currency_code,
+				    amount_reporting,
+				    fx_rate_id,
+				    fx_as_of,
 				    application_id,
 				    created_on,
 				    created_by
 				) VALUES (
-				    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?
+				    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?
 				);
 								""";
 
@@ -322,7 +326,12 @@ public class TransactionDAOImpl implements TransactionDAO {
 				dto.getBusinessTimezone(),
 				dto.getClientRoleId(), dto.getLevelId(), dto.getBillingAddress(), dto.getInvoiceStatusId(), totalSum,
 				subtotal, taxSum, discountSum, Boolean.TRUE.equals(dto.isPaid()), dto.getClientAgreementId(),
-				dto.getBillingRunId(), dto.getBillingCollectionTypeId(), appId, dto.getCreatedBy());
+				dto.getBillingRunId(), dto.getBillingCollectionTypeId(),
+				dto.getCurrencyCode(),
+				dto.getAmountReporting(),
+				dto.getFxRateId(),
+				dto.getFxAsOf() != null ? Timestamp.from(dto.getFxAsOf()) : null,
+				appId, dto.getCreatedBy());
 
 		final String insertEntitySql = """
 				INSERT INTO transactions.invoice_entity (

@@ -2,6 +2,7 @@ package io.clubone.transaction.vo;
 
 import java.math.BigDecimal;
 import java.sql.Timestamp;
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 import lombok.Data;
@@ -34,5 +35,11 @@ public class InvoiceDTO {
     /** From lu_billing_collection_type when header has billing_collection_type_id */
     private String billingCollectionTypeCode;
     private String billingCollectionTypeName;
+    /** ISO-4217 transactional currency (location / POS charge currency). */
+    private String currencyCode;
+    /** Locked reporting-currency amount (org reporting FX). */
+    private BigDecimal amountReporting;
+    private UUID fxRateId;
+    private Instant fxAsOf;
     private List<InvoiceEntityDTO> lineItems;
 }

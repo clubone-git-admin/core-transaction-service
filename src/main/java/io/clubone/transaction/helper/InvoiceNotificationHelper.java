@@ -53,7 +53,8 @@ public class InvoiceNotificationHelper {
         uriVars.put("templateCode", "INVOICE_PURCHASE_COMPLETED");
         uriVars.put("channel", "EMAIL");
         uriVars.put("brandName", "ClubOne");
-        uriVars.put("currencyCode", "INR");
+        // Prefer invoice.currency_code via payload controller (no hardcoded INR).
+        // Omit so controller resolves from invoice header.
 
         ResponseEntity<NotificationRequestDTO> response =
                 restTemplate.getForEntity(

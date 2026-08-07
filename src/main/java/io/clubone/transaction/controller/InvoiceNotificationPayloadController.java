@@ -35,13 +35,22 @@ public class InvoiceNotificationPayloadController {
             @RequestParam(defaultValue = "INVOICE_PURCHASE_COMPLETED") String templateCode,
             @RequestParam(defaultValue = "EMAIL") String channel,
             @RequestParam(defaultValue = "ClubOne") String brandName,
-            @RequestParam(defaultValue = "INR") String currencyCode,
+            @RequestParam(required = false) String currencyCode,
             @RequestParam(required = false) String contractUrl,
             @RequestParam(required = false) String autoRenewalText
     ) {
 
         // 1) Invoice header
         InvoiceHeader header = fetchInvoiceHeader(invoiceId);
+        String resolvedCurrency = (currencyCode != null && !currencyCode.isBlank())
+                ? currencyCode.trim().toUpperCase(Locale.ROOT)
+                : (header.currencyCode != null && !header.currencyCode.isBlank()
+                        ? header.currencyCode.trim().toUpperCase(Locale.ROOT)
+                        : null);
+        if (resolvedCurrency == null || resolvedCurrency.isBlank()) {
+            throw new IllegalStateException(
+                    "Invoice currency_code is required for notification payload (no silent currency default)");
+        }
 
         // 2) Member ID (role_id)
         String memberId = fetchMemberId(header.clientRoleId);
@@ -95,7 +104,7 @@ public class InvoiceNotificationPayloadController {
         // Order
         params.put("orderNumber", header.invoiceNumber);
         params.put("orderDate", formatInvoiceDate(header.invoiceDate));
-        params.put("currencyCode", currencyCode);
+        params.put("currencyCode", resolvedCurrency);
 
         // Payment
         params.put("paymentMethodType", pmType);
@@ -162,7 +171,8 @@ public class InvoiceNotificationPayloadController {
                 i.client_role_id,
                 i.total_amount,
                 i.tax_amount,
-                i.level_id
+                i.level_id,
+                i.currency_code
             FROM transactions.invoice i
             WHERE i.invoice_id = ?
               AND i.is_active = true
@@ -177,6 +187,7 @@ public class InvoiceNotificationPayloadController {
             h.totalAmount = rs.getBigDecimal("total_amount");
             h.taxAmount = rs.getBigDecimal("tax_amount");
             h.levelId = (UUID) rs.getObject("level_id");
+            h.currencyCode = rs.getString("currency_code");
             return h;
         });
 
@@ -687,6 +698,7 @@ public class InvoiceNotificationPayloadController {
         BigDecimal totalAmount;
         BigDecimal taxAmount;
         UUID levelId;
+        String currencyCode;
     }
 
     private static class ClubInfo {
