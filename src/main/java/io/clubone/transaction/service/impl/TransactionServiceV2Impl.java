@@ -227,8 +227,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		InvoiceDTO inv = new InvoiceDTO();
 		ZoneId invoiceZone = resolveInvoiceZoneId(request);
 		ZonedDateTime clubNow = ZonedDateTime.now(invoiceZone);
-		// Store location wall-clock in invoice_date (timestamp without time zone).
-		inv.setInvoiceDate(Timestamp.valueOf(clubNow.toLocalDateTime()));
+		inv.setInvoiceDate(Timestamp.from(clubNow.toInstant()));
 		inv.setBusinessDate(clubNow.toLocalDate());
 		inv.setBusinessTimezone(invoiceZone.getId());
 		inv.setClientRoleId(request.getClientRoleId());
@@ -1084,13 +1083,33 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 					InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, null, itemTypeId, e.getStartDate(), false,
 							e, invoiceLevelId, invoiceZone);
 
-					final int parentQty = def(e.getQuantity(), 1);
-					final int entQty = transactionDAO.resolveDefaultQtyFromEntitlement(it.getPricePlanTemplateId(),
-							applicationId);
-					final int finalQty = qtyFromParentAndEntitlement(parentQty, entQty);
+					/*
+					 * A standalone POS item already carries its final sale quantity. Do not
+					 * multiply it by an entitlement quantity; entitlement expansion applies to
+					 * package/bundle/agreement children only.
+					 *
+					 * POS also sends price as the extended net amount for the complete line.
+					 * Store the equivalent unit price so the existing lineSub() calculation
+					 * reconstructs that extended amount without multiplying it twice.
+					 */
+					final int finalQty = Math.max(1, def(e.getQuantity(), 1));
 
 					itemLine.setQuantity(finalQty);
 					itemLine.setClientAgreementId(e.getClientAgreementId());
+
+					if (e.getPrice() != null) {
+						BigDecimal extendedNet = bd(e.getPrice());
+						BigDecimal storedUnitPrice = extendedNet.divide(BigDecimal.valueOf(finalQty), 6,
+								RoundingMode.HALF_UP);
+						itemLine.setUnitPrice(storedUnitPrice);
+
+						log.info(
+								"[invoice/standalone-item-pricing] "
+										+ "itemId={} itemVersionId={} requestQty={} finalQty={} "
+										+ "extendedNet={} storedUnitPrice={} calculatedGross={}",
+								e.getEntityId(), e.getEntityVersionId(), e.getQuantity(), finalQty, extendedNet,
+								storedUnitPrice, storedUnitPrice.multiply(BigDecimal.valueOf(finalQty)));
+					}
 
 
 					List<UUID> itemSingleDiscountIds = mergeDiscountIds(e, it);
