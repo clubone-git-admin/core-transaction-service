@@ -64,6 +64,9 @@ public interface TransactionDAO {
 
 	void updateInvoiceStatusAndPaidFlag(UUID invoiceId, UUID statusId, boolean paid, UUID modifiedBy);
 
+	/** Persist checkout billing address onto the invoice (POS finalize). */
+	void updateInvoiceBillingAddress(UUID invoiceId, String billingAddress, UUID modifiedBy);
+
 	String currentInvoiceStatusName(UUID invoiceId);
 
 	List<BundleComponent> findBundleComponents(UUID bundleId);

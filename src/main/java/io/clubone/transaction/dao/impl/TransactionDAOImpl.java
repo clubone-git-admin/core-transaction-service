@@ -21,6 +21,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -638,6 +639,25 @@ public class TransactionDAOImpl implements TransactionDAO {
 	}
 
 	@Override
+	public void updateInvoiceBillingAddress(UUID invoiceId, String billingAddress, UUID modifiedBy) {
+		if (invoiceId == null) {
+			return;
+		}
+		String trimmed = billingAddress == null ? null : billingAddress.trim();
+		if (trimmed != null && trimmed.isEmpty()) {
+			trimmed = null;
+		}
+		cluboneJdbcTemplate.update("""
+				UPDATE transactions.invoice
+				   SET billing_address = ?,
+				       modified_on = NOW(),
+				       modified_by = ?
+				 WHERE invoice_id = ?
+				   AND application_id = ?
+				""", trimmed, modifiedBy, invoiceId, AccessContext.applicationId());
+	}
+
+	@Override
 	public String currentInvoiceStatusName(UUID invoiceId) {
 		return cluboneJdbcTemplate.queryForObject("""
 				    SELECT s.status_name
@@ -839,11 +859,22 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    ) VALUES (?,  ?,  ?, ?, ?, NOW(), ?)
 				""";
 
-		cluboneJdbcTemplate.update(sql, transactionId, dto.getClientPaymentTransactionId(), dto.getInvoiceId(),
-				dto.getTransactionDate(), appId, dto.getCreatedBy()
-		);
-
-		return transactionId;
+		try {
+			cluboneJdbcTemplate.update(sql, transactionId, dto.getClientPaymentTransactionId(), dto.getInvoiceId(),
+					dto.getTransactionDate(), appId, dto.getCreatedBy());
+			return transactionId;
+		} catch (DuplicateKeyException dup) {
+			// Race: second finalize with same invoice+CPT after unique index applied.
+			UUID existing = findTransactionIdByInvoiceAndClientPaymentTransaction(
+					dto.getInvoiceId(), dto.getClientPaymentTransactionId());
+			if (existing != null) {
+				logger.warn(
+						"Duplicate transaction insert ignored; returning existing transactionId={} invoiceId={} cptId={}",
+						existing, dto.getInvoiceId(), dto.getClientPaymentTransactionId());
+				return existing;
+			}
+			throw dup;
+		}
 	}
 
 	private static final RowMapper<InvoiceSummaryDTO> INVOICE_SUMMARY_ROW_MAPPER = new RowMapper<>() {
