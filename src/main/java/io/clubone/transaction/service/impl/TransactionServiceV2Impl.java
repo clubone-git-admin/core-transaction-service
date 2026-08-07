@@ -227,7 +227,8 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		InvoiceDTO inv = new InvoiceDTO();
 		ZoneId invoiceZone = resolveInvoiceZoneId(request);
 		ZonedDateTime clubNow = ZonedDateTime.now(invoiceZone);
-		inv.setInvoiceDate(Timestamp.from(clubNow.toInstant()));
+		// Store location wall-clock in invoice_date (timestamp without time zone).
+		inv.setInvoiceDate(Timestamp.valueOf(clubNow.toLocalDateTime()));
 		inv.setBusinessDate(clubNow.toLocalDate());
 		inv.setBusinessTimezone(invoiceZone.getId());
 		inv.setClientRoleId(request.getClientRoleId());

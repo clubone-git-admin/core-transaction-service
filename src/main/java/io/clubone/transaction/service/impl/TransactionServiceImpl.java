@@ -4,6 +4,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -32,6 +33,7 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import org.springframework.util.CollectionUtils;
+import org.springframework.util.StringUtils;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -48,6 +50,7 @@ import io.clubone.transaction.helper.AgreementHelper;
 import io.clubone.transaction.helper.ClientDashboardProjectionRefresher;
 import io.clubone.transaction.helper.InvoiceNotificationHelper;
 import io.clubone.transaction.billing.quote.BillingQuoteSubscriptionPersistenceService;
+import io.clubone.transaction.util.DateUtils;
 import io.clubone.transaction.gl.model.GlPaymentCollectedPayload;
 import io.clubone.transaction.gl.service.GlPostingOutboxService;
 import io.clubone.transaction.integration.WebhookMembershipPurchasePublisher;
@@ -159,11 +162,11 @@ public class TransactionServiceImpl implements TransactionService {
 
 	@Override
 	public UUID createAndFinalizeTransaction(CreateTransactionRequest request) {
-		Instant now = Instant.now();
+		Timestamp localNow = locationLocalTimestamp(request.getLevelId());
 
 		// Step 1: Build InvoiceDTO
 		InvoiceDTO invoice = new InvoiceDTO();
-		invoice.setInvoiceDate(Timestamp.from(now));
+		invoice.setInvoiceDate(localNow);
 		invoice.setClientRoleId(request.getClientRoleId());
 		invoice.setBillingAddress(request.getBillingAddress());
 		invoice.setInvoiceStatusId(transactionDAO.findInvoiceStatusIdByName("PENDING"));
@@ -177,7 +180,7 @@ public class TransactionServiceImpl implements TransactionService {
 		TransactionDTO txn = new TransactionDTO();
 		txn.setClientAgreementId(request.getClientAgreementId());
 		txn.setLevelId(request.getLevelId());
-		txn.setTransactionDate(Timestamp.from(now));
+		txn.setTransactionDate(localNow);
 
 		if (request.getLineItems() != null) {
 			List<TransactionEntityDTO> entityList = new ArrayList<>();
@@ -243,7 +246,7 @@ public class TransactionServiceImpl implements TransactionService {
 		}
 
 		InvoiceDTO inv = new InvoiceDTO();
-		inv.setInvoiceDate(Timestamp.from(Instant.now()));
+		inv.setInvoiceDate(locationLocalTimestamp(null));
 		inv.setClientRoleId(req.getClientRoleId());
 		inv.setBillingAddress(req.getBillingAddress());
 		inv.setInvoiceStatusId(req.getInvoiceStatusId()); // PENDING_PAYMENT from caller
@@ -309,7 +312,7 @@ public class TransactionServiceImpl implements TransactionService {
 		txn.setLevelId(req.getLevelId());
 		txn.setInvoiceId(req.getInvoiceId());
 		txn.setClientPaymentTransactionId(clientPaymentTransactionId);
-		txn.setTransactionDate(new Timestamp(System.currentTimeMillis()));
+		txn.setTransactionDate(locationLocalTimestamp(req.getLevelId()));
 		txn.setCreatedBy(req.getCreatedBy());
 
 		List<TransactionEntityDTO> items = new ArrayList<>();
@@ -409,7 +412,11 @@ public class TransactionServiceImpl implements TransactionService {
 		BigDecimal discountSum = BigDecimal.ZERO;
 
 		InvoiceDTO inv = new InvoiceDTO();
-		inv.setInvoiceDate(Timestamp.from(Instant.now()));
+		Timestamp localNow = locationLocalTimestamp(req.getLevelId());
+		ZoneId invoiceZone = zoneForLevel(req.getLevelId());
+		inv.setInvoiceDate(localNow);
+		inv.setBusinessDate(DateUtils.todayInZone(invoiceZone));
+		inv.setBusinessTimezone(invoiceZone.getId());
 		inv.setClientRoleId(req.getClientRoleId());
 		inv.setLevelId(req.getLevelId());
 		inv.setBillingAddress(req.getBillingAddress());
@@ -703,20 +710,42 @@ public class TransactionServiceImpl implements TransactionService {
 			boolean partial = partialPaymentHint;
 			boolean full = fullPaymentHint;
 
-			if (corporateSplitInvoice && payAmountFinal.compareTo(BigDecimal.ZERO) > 0) {
+			// Persist billing address from checkout (invoice is created before address is collected).
+			if (StringUtils.hasText(req.getBillingAddress())) {
+				transactionDAO.updateInvoiceBillingAddress(
+						req.getInvoiceId(), req.getBillingAddress(), req.getCreatedBy());
+			}
+
+			UUID existingByCpt = null;
+			if (cptId != null) {
+				existingByCpt = transactionDAO.findTransactionIdByInvoiceAndClientPaymentTransaction(
+						req.getInvoiceId(), cptId);
+			}
+
+			// Only apply corporate allocation on first persist (not on CPT reuse / retry).
+			if (corporateSplitInvoice && payAmountFinal.compareTo(BigDecimal.ZERO) > 0 && existingByCpt == null) {
 				applyPaymentToCorporateMemberAllocations(
 						req.getInvoiceId(), payAmountFinal, req.getCreatedBy(), tolerance);
 			}
 
-			TransactionDTO txn = new TransactionDTO();
-			txn.setClientAgreementId(effectiveClientAgreementId);
-			txn.setLevelId(req.getLevelId());
-			txn.setInvoiceId(req.getInvoiceId());
-			txn.setClientPaymentTransactionId(cptId);
-			txn.setTransactionDate(Timestamp.from(Instant.now()));
-			txn.setCreatedBy(req.getCreatedBy());
-
-			UUID transactionId = transactionDAO.saveTransactionV3(txn);
+			final UUID transactionId;
+			if (existingByCpt != null) {
+				// Same invoice+CPT already has a sales txn (retry, race, or legacy verify insert).
+				// Reuse it and still run paid/activation below — do not short-circuit finalize.
+				transactionId = existingByCpt;
+				logger.info(
+						"[transactions/v3/finalize] step=reuse_existing_txn reason=invoice_cpt invoiceId={} transactionId={}",
+						req.getInvoiceId(), transactionId);
+			} else {
+				TransactionDTO txn = new TransactionDTO();
+				txn.setClientAgreementId(effectiveClientAgreementId);
+				txn.setLevelId(req.getLevelId());
+				txn.setInvoiceId(req.getInvoiceId());
+				txn.setClientPaymentTransactionId(cptId);
+				txn.setTransactionDate(locationLocalTimestamp(req.getLevelId()));
+				txn.setCreatedBy(req.getCreatedBy());
+				transactionId = transactionDAO.saveTransactionV3(txn);
+			}
 
 			// Register after-commit hooks while TX synchronization is active.
 			scheduleFinalizeInvoiceNotificationAfterCommit(req, isManual);
@@ -1319,6 +1348,30 @@ public class TransactionServiceImpl implements TransactionService {
 		b.setTaxAmount(r.getTaxAmount());
 		b.setTotalAmount(r.getTotalAmount());
 		return b;
+	}
+
+	/**
+	 * Location wall-clock now for invoice_date / transaction_date columns
+	 * ({@code timestamp without time zone}).
+	 */
+	private Timestamp locationLocalTimestamp(UUID levelId) {
+		return DateUtils.nowAsLocationLocal(zoneForLevel(levelId));
+	}
+
+	private ZoneId zoneForLevel(UUID levelId) {
+		ZoneId zone = null;
+		if (levelId != null) {
+			zone = transactionDAO.resolveTimezoneCodeForLevel(levelId)
+					.flatMap(DateUtils::parseZoneId)
+					.orElse(null);
+		}
+		if (zone == null) {
+			logger.warn(
+					"Location timezone missing for levelId={}; storing invoice/transaction date in UTC wall-clock",
+					levelId);
+			return ZoneId.of("UTC");
+		}
+		return zone;
 	}
 
 	private InvoiceItemDTO toItem(InvoiceEntityRow r) {

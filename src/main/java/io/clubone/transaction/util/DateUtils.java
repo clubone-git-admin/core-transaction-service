@@ -1,7 +1,13 @@
 package io.clubone.transaction.util;
 
 import java.sql.Timestamp;
+import java.time.DateTimeException;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.HashMap;
+import java.util.Optional;
 
 public class DateUtils {
 
@@ -171,5 +177,40 @@ public class DateUtils {
 
 	public static Timestamp getCurrentTime() {
 		return new Timestamp(System.currentTimeMillis());
+	}
+
+	/**
+	 * Parse an IANA timezone code; empty/invalid returns empty.
+	 */
+	public static Optional<ZoneId> parseZoneId(String timezoneCode) {
+		if (timezoneCode == null || timezoneCode.isBlank()) {
+			return Optional.empty();
+		}
+		try {
+			return Optional.of(ZoneId.of(timezoneCode.trim()));
+		} catch (DateTimeException ex) {
+			return Optional.empty();
+		}
+	}
+
+	/**
+	 * Current wall-clock in {@code zone} as a JDBC timestamp.
+	 * <p>
+	 * Use for {@code timestamp without time zone} columns that must store the
+	 * club/location local datetime (not a UTC instant rewritten via Instant).
+	 */
+	public static Timestamp nowAsLocationLocal(ZoneId zone) {
+		ZoneId z = zone != null ? zone : ZoneId.of(UTC);
+		return Timestamp.valueOf(LocalDateTime.now(z));
+	}
+
+	public static LocalDate todayInZone(ZoneId zone) {
+		ZoneId z = zone != null ? zone : ZoneId.of(UTC);
+		return LocalDate.now(z);
+	}
+
+	public static ZonedDateTime zonedNow(ZoneId zone) {
+		ZoneId z = zone != null ? zone : ZoneId.of(UTC);
+		return ZonedDateTime.now(z);
 	}
 }
