@@ -11,14 +11,26 @@ import org.springframework.transaction.event.TransactionalEventListener;
 @RequiredArgsConstructor
 public class FinalizedInvoiceInventoryListener {
 
-    private final FinalizeInventoryProvisioningHelper inventoryProvisioningHelper;
+    private final FinalizeInventoryProvisioningHelper
+            inventoryProvisioningHelper;
 
-    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
-    public void provisionInventory(FinalizedInvoiceInventoryEvent event) {
+    /**
+     * fallbackExecution is required for agreement purchases because their
+     * inventory event is published after asynchronous billing-quote
+     * persistence has committed and therefore has no surrounding transaction.
+     */
+    @TransactionalEventListener(
+            phase = TransactionPhase.AFTER_COMMIT,
+            fallbackExecution = true
+    )
+    public void provisionInventory(
+            FinalizedInvoiceInventoryEvent event) {
+
         log.info(
                 "[inventory-provisioning] step=listener_received "
                         + "invoiceId={}, clientPaymentTransactionId={}, "
-                        + "actorId={}, locationId={}, applicationId={}, correlationId={}",
+                        + "actorId={}, locationId={}, applicationId={}, "
+                        + "correlationId={}",
                 event.invoiceId(),
                 event.clientPaymentTransactionId(),
                 event.actorId(),
@@ -29,31 +41,38 @@ public class FinalizedInvoiceInventoryListener {
 
         try {
             InventoryProvisioningResult result =
-                    inventoryProvisioningHelper.provisionForFinalizedInvoice(
-                            event.invoiceId(),
-                            event.clientPaymentTransactionId(),
-                            event.actorId(),
-                            event.locationId(),
-                            event.applicationId(),
-                            event.correlationId()
-                    );
+                    inventoryProvisioningHelper
+                            .provisionForFinalizedInvoice(
+                                    event.invoiceId(),
+                                    event.clientPaymentTransactionId(),
+                                    event.actorId(),
+                                    event.locationId(),
+                                    event.applicationId(),
+                                    event.correlationId()
+                            );
 
             log.info(
-                    "Inventory provisioning completed "
-                            + "invoiceId={}, clientRoleId={}, "
-                            + "invoiceEntityCount={}, entitlementCount={}, "
-                            + "createdCount={}, skippedCount={}",
-                    result.invoiceId(), result.clientRoleId(),
-                    result.invoiceEntityCount(), result.entitlementCount(),
-                    result.createdCount(), result.skippedCount()
+                    "[inventory-provisioning] step=complete outcome=ok "
+                            + "invoiceId={} clientRoleId={} "
+                            + "invoiceEntityCount={} entitlementCount={} "
+                            + "createdCount={} skippedCount={}",
+                    result.invoiceId(),
+                    result.clientRoleId(),
+                    result.invoiceEntityCount(),
+                    result.entitlementCount(),
+                    result.createdCount(),
+                    result.skippedCount()
             );
         } catch (Exception exception) {
             log.error(
-                    "Inventory provisioning failed after finalize "
-                            + "invoiceId={}, clientPaymentTransactionId={}, "
-                            + "correlationId={}, message={}",
-                    event.invoiceId(), event.clientPaymentTransactionId(),
-                    event.correlationId(), exception.getMessage(), exception
+                    "[inventory-provisioning] step=complete outcome=failed "
+                            + "invoiceId={} clientPaymentTransactionId={} "
+                            + "correlationId={} message={}",
+                    event.invoiceId(),
+                    event.clientPaymentTransactionId(),
+                    event.correlationId(),
+                    exception.getMessage(),
+                    exception
             );
         }
     }

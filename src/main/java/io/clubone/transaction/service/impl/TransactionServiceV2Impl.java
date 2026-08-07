@@ -46,6 +46,8 @@ import org.springframework.web.server.ResponseStatusException;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import lombok.extern.slf4j.Slf4j;
+
 import io.clubone.transaction.dao.EntityLookupDao;
 import io.clubone.transaction.dao.PromotionEffectDAO;
 import io.clubone.transaction.dao.TransactionDAO;
@@ -87,6 +89,7 @@ import io.clubone.transaction.vo.InvoiceEntityTaxDTO;
 import io.clubone.transaction.vo.TaxRateAllocationDTO;
 
 @Service
+@Slf4j
 public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 	@Autowired
@@ -229,8 +232,8 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		inv.setBusinessTimezone(invoiceZone.getId());
 		inv.setClientRoleId(request.getClientRoleId());
 
-		// invoice.level_id FK â†’ locations.levels.level_id.
-		// Clients often send locations.levels.reference_entity_id as levelId â€” resolve
+		// invoice.level_id FK ÃƒÂ¢Ã¢â‚¬ Ã¢â‚¬â„¢ locations.levels.level_id.
+		// Clients often send locations.levels.reference_entity_id as levelId ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â resolve
 		// to level_id.
 		if (request.getLevelId() == null) {
 			throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
@@ -247,7 +250,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		inv.setPaid(false);
 		inv.setCreatedBy(request.getCreatedBy());
 
-		// âœ… Always use invoice level id consistently
+		// ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Always use invoice level id consistently
 		final UUID invoiceLevelId = inv.getLevelId();
 
 		inv.setBillingRunId(request.getBillingRunId());
@@ -332,7 +335,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 				if (e.getItems() != null) {
 					for (Item it : e.getItems()) {
 
-						// âœ… No proration for package
+						// ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ No proration for package
 						InvoiceEntityDTO itemLine = buildItemLineFromPayload(it, pkgBusinessEntityId, itemTypeId,
 								e.getStartDate(), false, e, invoiceLevelId, invoiceZone);
 
@@ -344,8 +347,29 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 						itemLine.setQuantity(finalQty);
 
+						// POS sends `price` as the extended net price for the complete item line.
+						// Keep finalQty for inventory, but store the corresponding per-unit price
+						// so lineSub() reconstructs the payload's extended price exactly.
+						final int itemRequestedQty = def(it.getQuantity(), 1);
+						final int linePriceDivisor = Math.max(1, finalQty);
+						if (linePriceDivisor > 1 && it.getPrice() != null) {
+							BigDecimal extendedNet = bd(it.getPrice());
+							BigDecimal perUnit = extendedNet.divide(BigDecimal.valueOf(linePriceDivisor), 6,
+									RoundingMode.HALF_UP);
+							itemLine.setUnitPrice(perUnit);
+						}
 
-						// âœ… 1) discountIds FIRST (ADD, not overwrite)
+						log.info(
+								"[invoice/package-item-pricing] packageId={} itemId={} planTemplateId={} "
+										+ "packageQty={} requestItemQty={} entitlementQty={} finalQty={} "
+										+ "extendedNet={} storedUnitPrice={} calculatedGross={}",
+								e.getEntityId(), it.getEntityId(), it.getPricePlanTemplateId(),
+								parentQty, itemRequestedQty, entQty, finalQty, it.getPrice(),
+								itemLine.getUnitPrice(),
+								nz(itemLine.getUnitPrice()).multiply(BigDecimal.valueOf(finalQty)));
+
+
+						// ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ 1) discountIds FIRST (ADD, not overwrite)
 						List<UUID> pkgDiscountIds = mergeDiscountIds(e, it);
 						if (!pkgDiscountIds.isEmpty()) {
 							Optional<DiscountDetailDTO> best = transactionDAO
@@ -382,14 +406,14 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 							});
 						}
 
-						// âœ… 2) promotion SECOND
+						// ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ 2) promotion SECOND
 						if (pkgPromotionId != null) {
 							PromotionItemEffectDTO eff = pkgFx.get(it.getEntityId());
 							applyPromotionEffectOnLeafLine(itemLine, eff);
 						}
 
 
-						// âœ… 3) TAX THIRD (NET)
+						// ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ 3) TAX THIRD (NET)
 						computeTaxesFromItemOnly(itemLine, it, invoiceLevelId);
 
 						// 4) finalize
@@ -542,7 +566,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 								itemLine.setQuantity(finalQty);
 
 
-								// âœ… 1) discountIds FIRST
+								// ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ 1) discountIds FIRST
 								List<UUID> agrDiscountIds = mergeDiscountIds(e, it);
 								if (!agrDiscountIds.isEmpty()) {
 									Optional<DiscountDetailDTO> best = transactionDAO.findBestDiscountForItemByIds(
@@ -580,14 +604,14 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 									});
 								}
 
-								// âœ… 2) promotion SECOND
+								// ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ 2) promotion SECOND
 								if (agreementPromotionId != null) {
 									PromotionItemEffectDTO eff = agreementFx.get(it.getEntityId());
 									applyPromotionEffectOnLeafLine(itemLine, eff);
 								}
 
 								// ==========================================================
-								// âœ… AGREEMENT PRORATION RULES (supports Monthly/Weekly/Quarterly/Yearly)
+								// ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ AGREEMENT PRORATION RULES (supports Monthly/Weekly/Quarterly/Yearly)
 								//
 								// RULES:
 								// 1) If Fee item => charge CURRENT only, FULL (no proration), no next line.
@@ -642,22 +666,31 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 									continue;
 								}
 
-								// POS / checkout: final unit price + tax on each line â€” do not split across
+								// POS / checkout: final unit price + tax on each line ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â do not split across
 								// billing periods (avoids duplicate lines and double-applying client
 								// taxAmount).
 								if (it.getTaxAmount() != null && it.getPrice() != null) {
 									final int itemRequestedQty = def(it.getQuantity(), 1);
-									final int posLineQty = Math.max(1, parentQty) * Math.max(1, itemRequestedQty);
-									// Respect payload quantity (entitlement finalQty is ignored here).
-									// When itemRequestedQty > 1, treat `price` as extended line net before tax
-									// for those units; derive stored unit price so line net + tax stay consistent.
-									if (itemRequestedQty > 1) {
+									final int posLineQty = Math.max(1, itemRequestedQty);
+									// POS already sends the final item quantity after applying agreement and
+									// bundle quantities, and `price` is the extended net for that complete
+									// line. Do not multiply the payload quantity by parentQty again.
+									if (posLineQty > 1) {
 										BigDecimal extNet = bd(it.getPrice());
-										BigDecimal perUnit = extNet.divide(BigDecimal.valueOf(itemRequestedQty), 4,
+										BigDecimal perUnit = extNet.divide(BigDecimal.valueOf(posLineQty), 6,
 												RoundingMode.HALF_UP);
-										itemLine.setUnitPrice(scale2(perUnit));
+										itemLine.setUnitPrice(perUnit);
 									}
 									itemLine.setQuantity(posLineQty);
+
+									log.info(
+											"[invoice/agreement-pos-item-pricing] agreementId={} bundleId={} itemId={} "
+													+ "agreementQty={} bundleQty={} parentQty={} requestItemQty={} "
+													+ "finalLineQty={} extendedNet={} storedUnitPrice={} calculatedGross={}",
+											e.getEntityId(), b.getEntityId(), it.getEntityId(),
+											agreementQty, bundleQty, parentQty, itemRequestedQty,
+											posLineQty, it.getPrice(), itemLine.getUnitPrice(),
+											nz(itemLine.getUnitPrice()).multiply(BigDecimal.valueOf(posLineQty)));
 									computeTaxesFromItemOnly(itemLine, it, invoiceLevelId);
 									finalizeLeaf(itemLine);
 
@@ -848,6 +881,27 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 						final int finalQty = qtyFromParentAndEntitlement(parentQty, entQty);
 
 						itemLine.setQuantity(finalQty);
+
+						// POS sends `price` as the extended net price for the complete item line.
+						// Keep finalQty for inventory, but store the corresponding per-unit price
+						// so lineSub() reconstructs the payload's extended price exactly.
+						final int itemRequestedQty = def(it.getQuantity(), 1);
+						final int linePriceDivisor = Math.max(1, finalQty);
+						if (linePriceDivisor > 1 && it.getPrice() != null) {
+							BigDecimal extendedNet = bd(it.getPrice());
+							BigDecimal perUnit = extendedNet.divide(BigDecimal.valueOf(linePriceDivisor), 6,
+									RoundingMode.HALF_UP);
+							itemLine.setUnitPrice(perUnit);
+						}
+
+						log.info(
+								"[invoice/bundle-item-pricing] bundleId={} itemId={} planTemplateId={} "
+										+ "bundleQty={} requestItemQty={} entitlementQty={} finalQty={} "
+										+ "extendedNet={} storedUnitPrice={} calculatedGross={}",
+								e.getEntityId(), it.getEntityId(), it.getPricePlanTemplateId(),
+								parentQty, itemRequestedQty, entQty, finalQty, it.getPrice(),
+								itemLine.getUnitPrice(),
+								nz(itemLine.getUnitPrice()).multiply(BigDecimal.valueOf(finalQty)));
 
 
 						List<UUID> bundleDiscountIds = mergeDiscountIds(e, it);
@@ -1100,10 +1154,10 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			}
 		}
 
-		inv.setSubTotal(scale2(subTotal)); // âœ… NET
+		inv.setSubTotal(scale2(subTotal)); // ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ NET
 		inv.setTaxAmount(scale2(taxTotal));
 		inv.setDiscountAmount(scale2(discountTotal)); // informational
-		inv.setTotalAmount(scale2(subTotal.add(taxTotal)));// âœ… discount already applied
+		inv.setTotalAmount(scale2(subTotal.add(taxTotal)));// ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ discount already applied
 
 		String currencyCode = invoiceCurrencyStampService.requireCurrencyCode(
 				request.getCurrencyCode(), inv.getLevelId(), request.getClientRoleId());
@@ -1480,8 +1534,8 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		BigDecimal perUnitAfter = grossAfter.divide(qty, 6, RoundingMode.HALF_UP);
 		perUnitAfter = scale2(perUnitAfter);
 
-		line.setQuantity(qtyInt); // âœ… KEEP entitlement qty (2)
-		line.setUnitPrice(perUnitAfter); // âœ… per-unit price so totals remain correct
+		line.setQuantity(qtyInt); // ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ KEEP entitlement qty (2)
+		line.setUnitPrice(perUnitAfter); // ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ per-unit price so totals remain correct
 		line.setDiscountAmount(scale2(discBefore));// total discount remains same
 
 	}
@@ -2047,7 +2101,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 				null, null,
 
-				"Membership Â· Base Membership", true, "â€”", null,
+				"Membership Ãƒâ€šÃ‚Â· Base Membership", true, "ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â", null,
 
 				timeline,
 
@@ -2167,7 +2221,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 			InvoiceEntityPriceBandDTO bandRef = new InvoiceEntityPriceBandDTO();
 			bandRef.setPriceCycleBandId(band.bandId());
-			bandRef.setUnitPrice(band.unitPrice()); // âœ… from DB
+			bandRef.setUnitPrice(band.unitPrice()); // ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ from DB
 			it.setPriceBands(List.of(bandRef));
 
 			items.add(it);

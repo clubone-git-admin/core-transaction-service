@@ -80,7 +80,10 @@ public class InvoiceInventoryProvisioningRepository {
                  AND coalesce(entity_type_lookup.is_active, true) = true
                 WHERE entity.invoice_id = :invoiceId
                   AND entity.is_active = true
-                  AND upper(entity_type_lookup.entity_type) = 'ITEM'
+                  AND entity.parent_invoice_entity_id IS NULL
+                  AND upper(entity_type_lookup.entity_type) IN (
+                      'ITEM', 'PACKAGE', 'BUNDLE'
+                  )
                 ORDER BY entity.created_on, entity.invoice_entity_id
                 """,
                 new MapSqlParameterSource("invoiceId", invoiceId),
@@ -195,10 +198,7 @@ public class InvoiceInventoryProvisioningRepository {
         List<ItemEntitlement> rows = jdbc.query("""
                 SELECT
                     package.package_id,
-                    coalesce(
-                        :packageVersionId,
-                        package.current_version_id
-                    ) AS package_version_id,
+                    package_version.package_version_id,
                     package_item.package_item_id,
                     package_item.item_quantity,
                     version.item_version_id,
@@ -219,8 +219,21 @@ public class InvoiceInventoryProvisioningRepository {
                         :fallbackDescription
                     ) AS item_description
                 FROM package.package package
+                JOIN package.package_version package_version
+                  ON package_version.package_version_id = coalesce(
+                         :packageVersionId,
+                         package.current_version_id
+                     )
+                 AND package_version.package_id = package.package_id
+                 AND package_version.application_id =
+                     package.application_id
+                 AND package_version.is_active = true
                 JOIN package.package_item package_item
-                  ON package_item.package_id = package.package_id
+                  ON package_item.package_version_id =
+                     package_version.package_version_id
+                 AND package_item.package_id = package.package_id
+                 AND package_item.application_id =
+                     package.application_id
                  AND package_item.is_active = true
                 JOIN items.item_version version
                   ON version.item_version_id =
@@ -278,6 +291,102 @@ public class InvoiceInventoryProvisioningRepository {
         }
 
         return rows;
+    }
+
+    /**
+     * Loads agreement item entitlements after billing-quote purchase-snapshot
+     * persistence has completed. Agreement invoices do not necessarily contain
+     * root ITEM/PACKAGE invoice_entity rows, so their inventory quantity must
+     * come from the selected plan's persisted entitlement.
+     */
+    public List<ItemEntitlement> loadAgreementSnapshotEntitlements(
+            UUID invoiceId) {
+
+        return jdbc.query("""
+                SELECT DISTINCT ON (
+                    snapshot_line.purchase_snapshot_line_id,
+                    item_version.item_version_id,
+                    entitlement.entitlement_mode_id
+                )
+                    snapshot_line.purchase_snapshot_line_id
+                        AS source_line_id,
+                    snapshot.client_agreement_id,
+                    package_item.package_id,
+                    package_item.package_version_id,
+                    package_item.package_item_id,
+                    item_version.item_id,
+                    item_version.item_version_id,
+                    item_version.application_id,
+                    coalesce(
+                        nullif(item.item_name, ''),
+                        item_version.item_version_id::text
+                    ) AS item_name,
+                    coalesce(
+                        nullif(item.item_name, ''),
+                        item_version.item_version_id::text
+                    ) AS item_code,
+                    coalesce(
+                        nullif(item_version.description, ''),
+                        nullif(item.description, ''),
+                        snapshot_line.display_name
+                    ) AS item_description,
+                    coalesce(
+                        nullif(entitlement.quantity_per_cycle, 0),
+                        nullif(entitlement.total_entitlement, 0),
+                        nullif(snapshot_line.quantity, 0),
+                        1
+                    )::numeric AS entitlement_quantity
+                FROM client_subscription_billing
+                    .subscription_purchase_snapshot_line snapshot_line
+                JOIN client_subscription_billing
+                    .subscription_purchase_snapshot snapshot
+                  ON snapshot.subscription_purchase_snapshot_id =
+                     snapshot_line.subscription_purchase_snapshot_id
+                JOIN client_subscription_billing
+                    .subscription_purchase_snapshot_entitlement entitlement
+                  ON entitlement.purchase_snapshot_line_id =
+                     snapshot_line.purchase_snapshot_line_id
+                JOIN items.item_version item_version
+                  ON item_version.item_version_id =
+                     snapshot_line.entity_version_id
+                 AND item_version.is_active = true
+                JOIN items.item item
+                  ON item.item_id = item_version.item_id
+                 AND item.is_active = true
+                LEFT JOIN package.package_item package_item
+                  ON package_item.package_item_id =
+                     nullif(
+                         snapshot_line.attributes_json ->> 'packageItemId',
+                         ''
+                     )::uuid
+                 AND package_item.item_version_id =
+                     item_version.item_version_id
+                 AND package_item.is_active = true
+                WHERE snapshot_line.invoice_id = :invoiceId
+                ORDER BY
+                    snapshot_line.purchase_snapshot_line_id,
+                    item_version.item_version_id,
+                    entitlement.entitlement_mode_id
+                """,
+                new MapSqlParameterSource("invoiceId", invoiceId),
+                (rs, rowNum) -> new ItemEntitlement(
+                        uuid(rs, "source_line_id"),
+                        "AGREEMENT",
+                        uuid(rs, "client_agreement_id"),
+                        null,
+                        uuid(rs, "package_id"),
+                        uuid(rs, "package_version_id"),
+                        uuid(rs, "package_item_id"),
+                        uuid(rs, "item_id"),
+                        uuid(rs, "item_version_id"),
+                        uuid(rs, "application_id"),
+                        rs.getString("item_code"),
+                        rs.getString("item_name"),
+                        rs.getString("item_description"),
+                        positiveQuantity(
+                                decimal(rs, "entitlement_quantity")
+                        )
+                ));
     }
 
     public MappingContext resolveMapping(UUID itemVersionId) {

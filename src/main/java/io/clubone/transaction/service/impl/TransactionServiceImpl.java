@@ -696,6 +696,8 @@ public class TransactionServiceImpl implements TransactionService {
 		final BigDecimal payAmountFinal = payAmount;
 		final boolean fullPaymentHint = fullPayment;
 		final boolean partialPaymentHint = partialPayment;
+		final boolean deferInventoryUntilQuotePersistence =
+				containsAgreementBillingQuoteSpec(req.getBillingQuoteFinalizeSpecs());
 
 		FinalizePersistOutcome outcome = loadPressureGuard.withFinalizeDb(() -> finalizePersistTx.execute(status -> {
 			boolean partial = partialPaymentHint;
@@ -770,22 +772,18 @@ public class TransactionServiceImpl implements TransactionService {
 			if (purchaseCompleted) {
 				transactionDAO.activateAgreementAndClientStatusForInvoice(req.getInvoiceId(), req.getCreatedBy());
 
-				String inventoryCorrelationId = "finalize-inventory-" + req.getInvoiceId();
-
-				applicationEventPublisher.publishEvent(
-						new FinalizedInvoiceInventoryEvent(
-								req.getInvoiceId(),
-								cptId,
-								actorId,
-								locationId,
-								applicationId,
-								inventoryCorrelationId));
-
-				logger.info(
-						"[transactions/v3/finalize] step=inventory_provisioning "
-								+ "outcome=registered_for_after_commit "
-								+ "invoiceId={} clientPaymentTransactionId={} correlationId={}",
-						req.getInvoiceId(), cptId, inventoryCorrelationId);
+				if (!deferInventoryUntilQuotePersistence) {
+					publishFinalizedInvoiceInventoryEvent(
+							req.getInvoiceId(), cptId, actorId, locationId, applicationId,
+							"finalize-inventory-" + req.getInvoiceId(),
+							"registered_for_after_commit");
+				} else {
+					logger.info(
+							"[transactions/v3/finalize] step=inventory_provisioning "
+									+ "outcome=deferred reason=agreement_quote_persistence_required "
+									+ "invoiceId={} specCount={}",
+							req.getInvoiceId(), req.getBillingQuoteFinalizeSpecs().size());
+				}
 				// Fully async: resolve + refresh_client_dashboard_proj never touch the finalize request thread.
 				UUID dashboardApplicationId = AccessContext.applicationId();
 				clientDashboardProjectionRefresher.scheduleRefreshAfterCommit(
@@ -812,7 +810,11 @@ public class TransactionServiceImpl implements TransactionService {
 							effectiveClientAgreementId,
 							req.getInvoiceId(),
 							cptId,
-							req.getCreatedBy());
+							req.getCreatedBy(),
+							actorId,
+							locationId,
+							applicationId,
+							deferInventoryUntilQuotePersistence);
 				}
 			}
 
@@ -1051,7 +1053,11 @@ public class TransactionServiceImpl implements TransactionService {
 			UUID clientAgreementId,
 			UUID invoiceId,
 			UUID clientPaymentTransactionId,
-			UUID createdBy) {
+			UUID createdBy,
+			UUID actorId,
+			UUID locationId,
+			UUID applicationId,
+			boolean provisionInventoryAfterPersistence) {
 		final List<BillingQuoteFinalizeSpec> specsCopy = List.copyOf(specs);
 		runAfterCommitAsync(() -> {
 			try {
@@ -1077,12 +1083,55 @@ public class TransactionServiceImpl implements TransactionService {
 				logger.info(
 						"[transactions/v3/finalize] step=billing_quote_persist outcome=ok invoiceId={} responseCount={}",
 						invoiceId, quoteLineItems.size());
+				if (provisionInventoryAfterPersistence) {
+					publishFinalizedInvoiceInventoryEvent(
+							invoiceId,
+							clientPaymentTransactionId,
+							actorId,
+							locationId,
+							applicationId,
+							"finalize-inventory-" + invoiceId,
+							"published_after_quote_persistence");
+				}
 			} catch (Exception e) {
 				logger.error(
 						"[transactions/v3/finalize] step=billing_quote_async outcome=error invoiceId={} message={}",
 						invoiceId, e.getMessage(), e);
 			}
 		});
+	}
+
+	private boolean containsAgreementBillingQuoteSpec(List<BillingQuoteFinalizeSpec> specs) {
+		if (CollectionUtils.isEmpty(specs)) {
+			return false;
+		}
+		return specs.stream()
+				.filter(Objects::nonNull)
+				.map(BillingQuoteFinalizeSpec::getEntityTypeCode)
+				.filter(Objects::nonNull)
+				.anyMatch(code -> "AGREEMENT".equalsIgnoreCase(code.trim()));
+	}
+
+	private void publishFinalizedInvoiceInventoryEvent(
+			UUID invoiceId,
+			UUID clientPaymentTransactionId,
+			UUID actorId,
+			UUID locationId,
+			UUID applicationId,
+			String correlationId,
+			String outcome) {
+		applicationEventPublisher.publishEvent(
+				new FinalizedInvoiceInventoryEvent(
+						invoiceId,
+						clientPaymentTransactionId,
+						actorId,
+						locationId,
+						applicationId,
+						correlationId));
+		logger.info(
+				"[transactions/v3/finalize] step=inventory_provisioning "
+						+ "outcome={} invoiceId={} clientPaymentTransactionId={} correlationId={}",
+				outcome, invoiceId, clientPaymentTransactionId, correlationId);
 	}
 
 	private void runAfterCommitAsync(Runnable task) {
