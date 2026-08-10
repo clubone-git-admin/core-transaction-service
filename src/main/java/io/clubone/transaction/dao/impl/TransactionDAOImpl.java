@@ -138,7 +138,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 			    i.client_role_id,
 			    i.total_amount,
 			    i.level_id,
-			    i.client_agreement_id
+			    i.client_agreement_id,
+			    i.currency_code
 			FROM "transactions".invoice i
 			WHERE i.invoice_id = ?
 			  AND i.application_id = ?
@@ -885,6 +886,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 			dto.setTotalAmount(rs.getBigDecimal("total_amount"));
 			dto.setLevelId((UUID) rs.getObject("level_id"));
 			dto.setClientAgreementId((UUID) rs.getObject("client_agreement_id"));
+			dto.setCurrencyCode(rs.getString("currency_code"));
 			return dto;
 		}
 	};

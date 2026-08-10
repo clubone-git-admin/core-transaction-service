@@ -25,6 +25,8 @@ public class CreateTransactionRequest {
 	private String paymentMethodCode; // e.g. CASH
 	private String paymentTypeCode; // e.g. CASH
 	private UUID paymentGatewayCurrencyTypeId;
+	/** ISO-4217 code for Manual/CASH (location currency). */
+	private String currencyCode;
 	private String billingAddress;
 	private UUID createdBy;
 

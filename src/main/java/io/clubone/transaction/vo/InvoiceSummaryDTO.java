@@ -11,4 +11,6 @@ public class InvoiceSummaryDTO {
     private UUID levelId;
     /** From transactions.invoice — used when finalize request omits clientAgreementId. */
     private UUID clientAgreementId;
+    /** Transactional currency stamped on the invoice (ISO-4217). */
+    private String currencyCode;
 }

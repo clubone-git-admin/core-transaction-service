@@ -56,6 +56,7 @@ import io.clubone.transaction.gl.service.GlPostingOutboxService;
 import io.clubone.transaction.integration.WebhookMembershipPurchasePublisher;
 import io.clubone.transaction.helper.SubscriptionPlanHelper;
 import io.clubone.transaction.inventory.FinalizedInvoiceInventoryEvent;
+import io.clubone.transaction.currency.InvoiceCurrencyStampService;
 import io.clubone.transaction.request.CreateInvoiceRequest;
 import io.clubone.transaction.request.CreateInvoiceRequestV3;
 import io.clubone.transaction.request.CreateTransactionRequest;
@@ -128,6 +129,9 @@ public class TransactionServiceImpl implements TransactionService {
 
 	@Autowired
 	private LoadPressureGuard loadPressureGuard;
+
+	@Autowired
+	private InvoiceCurrencyStampService invoiceCurrencyStampService;
 
 	private final TransactionTemplate finalizePersistTx;
 
@@ -204,13 +208,20 @@ public class TransactionServiceImpl implements TransactionService {
 		UUID invoiceId = transactionDAO.saveInvoice(invoice);
 
 		// Step 5: Create Payment (POST /payment/v1 — include invoiceId for CASH / manual allocation)
+		String currencyCode = invoiceCurrencyStampService.requireCurrencyCode(
+				request.getCurrencyCode(), request.getLevelId(), request.getClientRoleId());
 		PaymentRequestDTO payment = new PaymentRequestDTO();
 		payment.setClientRoleId(request.getClientRoleId());
 		payment.setInvoiceId(invoiceId);
 		payment.setAmount(request.getTotalAmount());
-		payment.setPaymentGatewayCode("MANUAL");
-		payment.setPaymentMethodCode("CASH");
-		payment.setPaymentTypeCode("CASH");
+		payment.setPaymentGatewayCode(
+				StringUtils.hasText(request.getPaymentGatewayCode()) ? request.getPaymentGatewayCode() : "MANUAL");
+		payment.setPaymentMethodCode(
+				StringUtils.hasText(request.getPaymentMethodCode()) ? request.getPaymentMethodCode() : "CASH");
+		payment.setPaymentTypeCode(
+				StringUtils.hasText(request.getPaymentTypeCode()) ? request.getPaymentTypeCode() : "CASH");
+		payment.setPaymentGatewayCurrencyTypeId(request.getPaymentGatewayCurrencyTypeId());
+		payment.setCurrencyCode(currencyCode);
 		payment.setCreatedBy(request.getCreatedBy());
 		UUID clientPaymentTransactionId = paymentService.processManualPayment(payment);
 
@@ -294,6 +305,10 @@ public class TransactionServiceImpl implements TransactionService {
 		}
 
 		// Call your existing /payment/v1
+		String currencyCode = StringUtils.hasText(req.getCurrencyCode())
+				? req.getCurrencyCode().trim().toUpperCase()
+				: invoiceCurrencyStampService.requireCurrencyCode(
+						null, req.getLevelId(), req.getClientRoleId());
 		PaymentRequestDTO pay = new PaymentRequestDTO();
 		pay.setClientRoleId(req.getClientRoleId());
 		pay.setInvoiceId(req.getInvoiceId());
@@ -302,6 +317,7 @@ public class TransactionServiceImpl implements TransactionService {
 		pay.setPaymentMethodCode(req.getPaymentMethodCode());
 		pay.setPaymentTypeCode(req.getPaymentTypeCode());
 		pay.setPaymentGatewayCurrencyTypeId(req.getPaymentGatewayCurrencyTypeId());
+		pay.setCurrencyCode(currencyCode);
 		pay.setCreatedBy(req.getCreatedBy());
 
 		UUID clientPaymentTransactionId = paymentService.processManualPayment(pay);
@@ -687,6 +703,18 @@ public class TransactionServiceImpl implements TransactionService {
 			clientPaymentTransactionId = isManual ? null : req.getClientPaymentTransactionId();
 		} else if (isManual) {
 			// Payment HTTP outside the DB TX so we never hold Hikari during vendor latency.
+			String manualCurrencyCode = StringUtils.hasText(req.getCurrencyCode())
+					? req.getCurrencyCode().trim().toUpperCase()
+					: (StringUtils.hasText(invoiceSummary.getCurrencyCode())
+							? invoiceSummary.getCurrencyCode().trim().toUpperCase()
+							: "");
+			if (req.getPaymentGatewayCurrencyTypeId() == null && manualCurrencyCode.isEmpty()) {
+				logger.warn(
+						"[transactions/v3/finalize] step=manual_payment outcome=reject invoiceId={} reason=missing_currency",
+						req.getInvoiceId());
+				return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null,
+						"Location currency is required for Manual/CASH (paymentGatewayCurrencyTypeId or currencyCode)");
+			}
 			PaymentRequestDTO pay = new PaymentRequestDTO();
 			pay.setClientRoleId(req.getClientRoleId());
 			pay.setInvoiceId(req.getInvoiceId());
@@ -695,6 +723,9 @@ public class TransactionServiceImpl implements TransactionService {
 			pay.setPaymentMethodCode(req.getPaymentMethodCode());
 			pay.setPaymentTypeCode(req.getPaymentTypeCode());
 			pay.setPaymentGatewayCurrencyTypeId(req.getPaymentGatewayCurrencyTypeId());
+			if (!manualCurrencyCode.isEmpty()) {
+				pay.setCurrencyCode(manualCurrencyCode);
+			}
 			pay.setCreatedBy(req.getCreatedBy());
 			clientPaymentTransactionId = paymentService.processManualPayment(pay);
 		}
