@@ -114,5 +114,10 @@ public interface SubscriptionPlanDao {
 	 
 	 UUID insertSubscriptionInvoiceScheduleReturningId(SubscriptionInvoiceScheduleRow r);
 
+	/** Soft-deactivates the subscription plan ({@code is_active = false}). */
+	int deactivatePlan(UUID subscriptionPlanId, UUID modifiedBy);
+
+	/** Updates the plan's card only; does not touch other plans sharing the prior card. */
+	int updateClientPaymentMethodId(UUID subscriptionPlanId, UUID clientPaymentMethodId, UUID modifiedBy);
 
 }

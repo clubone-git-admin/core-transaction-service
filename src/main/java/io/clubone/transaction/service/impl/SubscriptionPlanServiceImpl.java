@@ -33,12 +33,14 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
+import io.clubone.transaction.dao.ClientGatewayMandateDao;
 import io.clubone.transaction.dao.EntityLookupDao;
 import io.clubone.transaction.dao.SubscriptionPlanDao;
 import io.clubone.transaction.dao.SubscriptionPlanDao.BillingRule;
 import io.clubone.transaction.dao.SubscriptionPromoBillingDAO;
 import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.dao.impl.SubscriptionInvoiceScheduleRow;
+import io.clubone.transaction.request.ReplacePlanPaymentMethodRequest;
 import io.clubone.transaction.request.SubscriptionPlanBatchCreateRequest;
 import io.clubone.transaction.request.SubscriptionPlanCreateRequest;
 import io.clubone.transaction.response.CreateInvoiceResponse;
@@ -47,6 +49,7 @@ import io.clubone.transaction.response.SubscriptionPlanBatchCreateResponse;
 import io.clubone.transaction.response.SubscriptionPlanCreateResponse;
 import io.clubone.transaction.service.SubscriptionPlanService;
 import io.clubone.transaction.service.TransactionServicev2;
+import io.clubone.transaction.subscription.billing.dto.SimpleActionResponse;
 import io.clubone.transaction.subscription.billing.service.SubscriptionBillingScheduleService;
 import io.clubone.transaction.util.FrequencyUnit;
 import io.clubone.transaction.v2.vo.CyclePriceDTO;
@@ -84,6 +87,9 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 	
 	@Autowired
 	private SubscriptionBillingScheduleService subscriptionBillingScheduleService;
+
+	@Autowired
+	private ClientGatewayMandateDao clientGatewayMandateDao;
 
 	private static final Logger log = LoggerFactory.getLogger(SubscriptionPlanServiceImpl.class);
 
@@ -832,5 +838,52 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 	@Transactional(readOnly = true)
 	public List<SubscriptionPlanSummaryDTO> getClientSubscriptionPlans(UUID clientRoleId) {
 		return dao.findClientSubscriptionPlans(clientRoleId);
+	}
+
+	@Override
+	@Transactional
+	public SimpleActionResponse cancelPlan(UUID subscriptionPlanId, UUID modifiedBy) {
+		if (subscriptionPlanId == null) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "subscriptionPlanId is required");
+		}
+		int planRows = dao.deactivatePlan(subscriptionPlanId, modifiedBy);
+		int mandateRows = clientGatewayMandateDao.deactivateActiveMandatesForPlan(subscriptionPlanId, modifiedBy);
+		log.info("cancelPlan subscriptionPlanId={} planRows={} mandateRows={} modifiedBy={}", subscriptionPlanId,
+				planRows, mandateRows, modifiedBy);
+		SimpleActionResponse resp = new SimpleActionResponse();
+		resp.setSuccess(planRows > 0 || mandateRows > 0);
+		resp.setAffectedCount(planRows + mandateRows);
+		resp.setMessage(planRows > 0
+				? "Plan deactivated and mandate revoked for this plan only"
+				: (mandateRows > 0 ? "Mandate revoked (plan already inactive)" : "No active plan/mandate found"));
+		return resp;
+	}
+
+	@Override
+	@Transactional
+	public SimpleActionResponse replacePaymentMethod(UUID subscriptionPlanId, ReplacePlanPaymentMethodRequest request,
+			UUID modifiedBy) {
+		if (subscriptionPlanId == null || request == null || request.getClientPaymentMethodId() == null) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+					"subscriptionPlanId and clientPaymentMethodId are required");
+		}
+		int planRows = dao.updateClientPaymentMethodId(subscriptionPlanId, request.getClientPaymentMethodId(),
+				modifiedBy);
+		if (planRows <= 0) {
+			throw new ResponseStatusException(HttpStatus.NOT_FOUND, "subscription plan not found");
+		}
+		int mandateRows = clientGatewayMandateDao.rebindMandateForPlan(subscriptionPlanId,
+				request.getClientPaymentMethodId(), request.getParentInvoiceId(), modifiedBy);
+		log.info(
+				"replacePaymentMethod subscriptionPlanId={} newCpm={} parentInvoiceId={} planRows={} mandateRows={} modifiedBy={}",
+				subscriptionPlanId, request.getClientPaymentMethodId(), request.getParentInvoiceId(), planRows,
+				mandateRows, modifiedBy);
+		SimpleActionResponse resp = new SimpleActionResponse();
+		resp.setSuccess(true);
+		resp.setAffectedCount(planRows + mandateRows);
+		resp.setMessage(mandateRows > 0
+				? "Payment method updated and mandate rebound for this plan only"
+				: "Payment method updated; no seed mandate found to link (tokenize card first)");
+		return resp;
 	}
 }

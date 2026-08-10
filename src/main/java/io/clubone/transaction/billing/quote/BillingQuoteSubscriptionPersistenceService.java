@@ -386,30 +386,31 @@ public class BillingQuoteSubscriptionPersistenceService {
 	}
 
 	/**
-	 * When mandate rows were created with {@code parent_invoice_id} = finalize invoice, attach the new subscription plan
-	 * and payment method (no-op if no matching rows).
+	 * Checkout creates one seed mandate (subscription_plan_id null). Finalize attaches a 1:1 active
+	 * mandate row to every non-fee subscription plan (clone seed when the cart has multiple plans).
+	 * Same card / gateway token may be shared; each plan owns its own mandate row.
 	 */
 	private void linkClientGatewayMandateToSubscription(UUID invoiceId, UUID clientPaymentMethodId, UUID createdBy,
 			List<MergedQuoteRunOutcome> allQuoteRuns) {
 		if (invoiceId == null || clientPaymentMethodId == null || allQuoteRuns == null || allQuoteRuns.isEmpty()) {
 			return;
 		}
-		UUID subscriptionPlanId = allQuoteRuns.stream()
+		List<UUID> subscriptionPlanIds = allQuoteRuns.stream()
 				.filter(o -> o != null && !o.feeOnly() && o.subscriptionPlanId() != null)
 				.map(MergedQuoteRunOutcome::subscriptionPlanId)
-				.findFirst()
-				.orElse(null);
-		if (subscriptionPlanId == null) {
+				.distinct()
+				.toList();
+		if (subscriptionPlanIds.isEmpty()) {
 			log.warn(
 					"[billing-quote/persist] step=client_gateway_mandate outcome=skip reason=no_non_fee_subscription_plan invoiceId={}",
 					invoiceId);
 			return;
 		}
-		int rows = clientGatewayMandateDao.updateSubscriptionLinkForParentInvoice(invoiceId, subscriptionPlanId,
+		int rows = clientGatewayMandateDao.ensureOneMandatePerSubscriptionPlan(invoiceId, subscriptionPlanIds,
 				clientPaymentMethodId, createdBy);
 		log.info(
-				"[billing-quote/persist] step=client_gateway_mandate outcome=updated rows={} parentInvoiceId={} subscriptionPlanId={} clientPaymentMethodId={}",
-				rows, invoiceId, subscriptionPlanId, clientPaymentMethodId);
+				"[billing-quote/persist] step=client_gateway_mandate outcome=ensured rows={} parentInvoiceId={} subscriptionPlanCount={} clientPaymentMethodId={}",
+				rows, invoiceId, subscriptionPlanIds.size(), clientPaymentMethodId);
 	}
 
 	/**
