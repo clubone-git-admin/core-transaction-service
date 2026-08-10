@@ -853,8 +853,8 @@ public class BillingQuoteSubscriptionPersistenceService {
 				billingPeriodUnitId, chargeTriggerId, chargeEndId, billingTimingId, billingAlignmentId,
 				prorationStrategyId, dayRuleId);
 
-		LocalDate contractStart = nzDate(pos.getBillingStartDate(), quote.getStartDate());
-		LocalDate contractEnd = nzDate(pos.getBillingEndDate(), contractStart);
+		LocalDate contractStart = resolveMembershipContractStart(quote, pos);
+		LocalDate contractEnd = resolveMembershipContractEnd(quote, pos, contractStart, subscriptionLines);
 		log.info("[billing-quote/persist] step=contract_dates contractStart={} contractEnd={} timezone={}",
 				contractStart, contractEnd, quote.getTimezone());
 
@@ -959,11 +959,40 @@ public class BillingQuoteSubscriptionPersistenceService {
 
 		ZoneId quoteZone = requireZone(quote.getTimezone());
 		LocalDate todayInQuoteTz = LocalDate.now(quoteZone);
-		LocalDate nextBillingDate = resolveFirstCycleBillingDate(quote, subscriptionLines, contractStart);
-		LocalDate lastBilledOn = resolveLastBilledOn(subscriptionLines, invoicePaid, todayInQuoteTz);
+		List<RecurringForecastRow> recurringRows = readRecurringForecastRows(quote);
+
+		ScheduleAgg agg = aggregateSchedule(subscriptionLines, contractStart, contractEnd, quoteZone);
+		boolean anyLineProrated = subscriptionLines.stream()
+				.anyMatch(li -> li != null && Boolean.TRUE.equals(li.getIsProrated()));
+		boolean aggregateChargeBelowFullCycle = aggregateChargeLessThanFullCycleUnitTotal(subscriptionLines);
+		boolean firstCycleProrated = anyLineProrated || aggregateChargeBelowFullCycle;
 		log.info(
-				"[billing-quote/persist] step=subscription_instance_dates nextBillingDate={} lastBilledOn={} invoicePaid={} todayInQuoteTz={}",
-				nextBillingDate, lastBilledOn, invoicePaid, todayInQuoteTz);
+				"[billing-quote/persist] step=aggregate_schedule cycle=1 label={} periodStart={} periodEnd={} billingDate={} baseAmount={} taxAmount={} anyLineProrated={} aggregateChargeBelowFullCycle={}",
+				agg.label(), agg.periodStart(), agg.periodEnd(), agg.billingDate(), agg.baseAmount(), agg.taxAmount(),
+				anyLineProrated, aggregateChargeBelowFullCycle);
+
+		List<PendingSchedule> pending = buildPendingSchedules(subscriptionLines, recurringRows);
+		LocalDate contractEndResolved = resolveMembershipContractEndFromPending(pending, recurringRows, contractStart,
+				contractEnd);
+		if (contractEndResolved != null && !contractEndResolved.equals(contractEnd)) {
+			log.info("[billing-quote/persist] step=contract_end_from_schedule prior={} resolved={}", contractEnd,
+					contractEndResolved);
+			contractEnd = contractEndResolved;
+		}
+
+		boolean paidFirstCycle = invoicePaid && invoiceId != null;
+		UUID firstCycleScheduleStatusId = paidFirstCycle ? paidScheduleStatusId : plannedScheduleStatusId;
+		Timestamp billedOnPaidCycle = paidFirstCycle ? Timestamp.from(Instant.now()) : null;
+		UUID invoiceIdForPaidCycle = paidFirstCycle ? invoiceId : null;
+
+		LocalDate firstCycleBillDate = normalizePersistedBillingDate(
+				agg.billingDate(), agg.periodStart(), contractStart, null, true, todayInQuoteTz);
+		LocalDate nextBillingDate = resolveInstanceNextBillingDate(pending, recurringRows, subscriptionLines,
+				contractStart, firstCycleBillDate, paidFirstCycle, quoteZone);
+		LocalDate lastBilledOn = paidFirstCycle ? firstCycleBillDate : null;
+		log.info(
+				"[billing-quote/persist] step=subscription_instance_dates nextBillingDate={} lastBilledOn={} invoicePaid={} todayInQuoteTz={} firstCycleBillDate={}",
+				nextBillingDate, lastBilledOn, invoicePaid, todayInQuoteTz, firstCycleBillDate);
 
 		log.info("[billing-quote/persist] step=insert_subscription_instance");
 		UUID subscriptionInstanceId = jdbc.queryForObject("""
@@ -998,7 +1027,7 @@ public class BillingQuoteSubscriptionPersistenceService {
 				subscriptionInstanceId);
 
 		if (!mergeAgreementSnapshots) {
-			LocalDate catalogAsOf = nzDate(pos.getBillingStartDate(), quote.getStartDate());
+			LocalDate catalogAsOf = nzDate(quote.getStartDate(), pos.getBillingStartDate());
 			Optional<VendorAgreementBundleSlice> catalogSlice = resolveCatalogAgreementBundle(pos, quote, catalogAsOf);
 			purchaseSnapshotLineIdsBySequence = insertPurchaseSnapshotLines(purchaseSnapshotId, null, lines,
 					subscriptionPlanId, subscriptionInstanceId, pos, configSnapshotId, invoiceId, catalogSlice);
@@ -1013,27 +1042,10 @@ public class BillingQuoteSubscriptionPersistenceService {
 			insertPurchaseSnapshotEntitlements(purchaseSnapshotId, pos.getEntitlements(), entitlementLineId);
 		}
 
-		List<RecurringForecastRow> recurringRows = readRecurringForecastRows(quote);
-
-		ScheduleAgg agg = aggregateSchedule(subscriptionLines, contractStart, contractEnd, quoteZone);
-		boolean anyLineProrated = subscriptionLines.stream()
-				.anyMatch(li -> li != null && Boolean.TRUE.equals(li.getIsProrated()));
-		boolean aggregateChargeBelowFullCycle = aggregateChargeLessThanFullCycleUnitTotal(subscriptionLines);
-		boolean firstCycleProrated = anyLineProrated || aggregateChargeBelowFullCycle;
-		log.info(
-				"[billing-quote/persist] step=aggregate_schedule cycle=1 label={} periodStart={} periodEnd={} billingDate={} baseAmount={} taxAmount={} anyLineProrated={} aggregateChargeBelowFullCycle={}",
-				agg.label(), agg.periodStart(), agg.periodEnd(), agg.billingDate(), agg.baseAmount(), agg.taxAmount(),
-				anyLineProrated, aggregateChargeBelowFullCycle);
-
-		boolean paidFirstCycle = invoicePaid && invoiceId != null;
-		UUID firstCycleScheduleStatusId = paidFirstCycle ? paidScheduleStatusId : plannedScheduleStatusId;
-		Timestamp billedOnPaidCycle = paidFirstCycle ? Timestamp.from(Instant.now()) : null;
-		UUID invoiceIdForPaidCycle = paidFirstCycle ? invoiceId : null;
-
-		List<PendingSchedule> pending = buildPendingSchedules(subscriptionLines, recurringRows);
 		log.info("[billing-quote/persist] step=billing_schedules_to_insert count={}", pending.size());
 
 		UUID primaryBillingScheduleId = null;
+		LocalDate previousBillDate = null;
 		for (int i = 0; i < pending.size(); i++) {
 			PendingSchedule ps = pending.get(i);
 			boolean isLast = i == pending.size() - 1;
@@ -1057,8 +1069,11 @@ public class BillingQuoteSubscriptionPersistenceService {
 				bounds = computeForecastPeriodBounds(recurringRows, ps.recurringIndex(), contractStart, contractEnd);
 				bounds = resolveBillingPeriodBounds(bounds, ps.recRow().resolvedPeriodLabel(), contractStart, contractEnd);
 			}
-			LocalDate billDate = ps.fromAgg() ? agg.billingDate()
+			LocalDate rawBillDate = ps.fromAgg() ? agg.billingDate()
 					: nzDate(ps.recRow().resolvedBillingDate(), bounds.periodStart());
+			LocalDate billDate = normalizePersistedBillingDate(rawBillDate, bounds.periodStart(), contractStart,
+					previousBillDate, ps.fromAgg(), todayInQuoteTz);
+			previousBillDate = billDate;
 			boolean rowProrated = ps.fromAgg() ? firstCycleProrated : recurringRowIndicatesProration(ps.recRow());
 			String prCase = rowProrated ? billing.getProrationCase() : null;
 			String prStrat = rowProrated ? billing.getProrationStrategyCode() : null;
@@ -1094,8 +1109,8 @@ public class BillingQuoteSubscriptionPersistenceService {
 				primaryBillingScheduleId = sid;
 			}
 			if (ps.fromAgg()) {
-				log.info("[billing-quote/persist] step=insert_billing_schedule outcome=ok billingScheduleId={} cycle={} fromAgg=true",
-						sid, ps.cycleNumber());
+				log.info("[billing-quote/persist] step=insert_billing_schedule outcome=ok billingScheduleId={} cycle={} fromAgg=true billDate={}",
+						sid, ps.cycleNumber(), billDate);
 				for (QuoteLineItemRow li : subscriptionLines) {
 					insertBillingScheduleTaxLinesForQuoteLine(sid, li);
 				}
@@ -1107,10 +1122,23 @@ public class BillingQuoteSubscriptionPersistenceService {
 					insertSnapshotCyclePricesFromApplied(purchaseSnapshotId, applied, cycleLineId);
 				}
 			} else {
-				log.info("[billing-quote/persist] step=insert_billing_schedule outcome=ok billingScheduleId={} cycle={} fromAgg=false",
-						sid, ps.cycleNumber());
+				log.info("[billing-quote/persist] step=insert_billing_schedule outcome=ok billingScheduleId={} cycle={} fromAgg=false billDate={}",
+						sid, ps.cycleNumber(), billDate);
 				insertBillingScheduleTaxLinesForRecurringRow(sid, ps.recRow());
 			}
+		}
+
+		if (pending.size() > 0) {
+			jdbc.update("""
+					UPDATE client_subscription_billing.subscription_plan
+					SET term_total_cycles = ?
+					WHERE subscription_plan_id = ?
+					""", pending.size(), subscriptionPlanId);
+			jdbc.update("""
+					UPDATE client_subscription_billing.subscription_billing_config_snapshot
+					SET end_specific_date = ?
+					WHERE subscription_billing_config_snapshot_id = ?
+					""", contractEnd, configSnapshotId);
 		}
 
 		if (invoiceId != null) {
@@ -2336,44 +2364,150 @@ private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 	}
 
 	/**
-	 * First cycle billing date: {@code recurring[0].billingDate} when present, else earliest
-	 * {@code lineItems[].billingDate} (by {@code sequence}), else contract start.
+	 * Membership/service start — prefer quote {@code startDate} over {@code planPosDetail.billingStartDate}
+	 * (the latter is first <em>charge</em> DOM and can precede enrollment for IN_ADVANCE).
 	 */
-	private LocalDate resolveFirstCycleBillingDate(BillingQuoteLineItemsResponse quote,
-			List<QuoteLineItemRow> subscriptionLines, LocalDate contractStart) {
-		JsonNode recurring = quote.getRecurring();
-		if (recurring != null && recurring.isArray() && !recurring.isEmpty()) {
-			JsonNode n = recurring.get(0);
-			if (n != null && !n.isNull()) {
-				try {
-					RecurringForecastRow r = objectMapper.convertValue(n, RecurringForecastRow.class);
-					LocalDate bd = r.resolvedBillingDate();
-					if (bd != null) {
-						return bd;
-					}
-				} catch (IllegalArgumentException ignored) {
-					// fall through
+	private static LocalDate resolveMembershipContractStart(BillingQuoteLineItemsResponse quote,
+			PlanPosDetailSection pos) {
+		LocalDate fromQuote = quote != null ? quote.getStartDate() : null;
+		if (fromQuote != null) {
+			return fromQuote;
+		}
+		return pos != null ? pos.getBillingStartDate() : null;
+	}
+
+	/**
+	 * Membership/service end — prefer last service period end from quote lines/recurring over
+	 * {@code planPosDetail.billingEndDate} (last charge date under IN_ADVANCE).
+	 */
+	private LocalDate resolveMembershipContractEnd(BillingQuoteLineItemsResponse quote, PlanPosDetailSection pos,
+			LocalDate contractStart, List<QuoteLineItemRow> subscriptionLines) {
+		LocalDate fromLines = null;
+		if (subscriptionLines != null) {
+			for (QuoteLineItemRow li : subscriptionLines) {
+				if (li != null && li.getEndDate() != null) {
+					fromLines = fromLines == null || li.getEndDate().isAfter(fromLines) ? li.getEndDate() : fromLines;
 				}
 			}
 		}
+		List<RecurringForecastRow> recurring = quote != null ? readRecurringForecastRows(quote) : List.of();
+		for (RecurringForecastRow r : recurring) {
+			if (r == null) {
+				continue;
+			}
+			LocalDate pe = r.resolvedPeriodEnd();
+			if (pe != null) {
+				fromLines = fromLines == null || pe.isAfter(fromLines) ? pe : fromLines;
+			}
+		}
+		if (fromLines != null) {
+			return fromLines;
+		}
+		if (pos != null && pos.getAgreementTermDetail() != null
+				&& pos.getAgreementTermDetail().getDurationValue() != null
+				&& contractStart != null) {
+			Integer months = pos.getAgreementTermDetail().getDurationValue();
+			String unit = pos.getAgreementTermDetail().getDurationUnitTypeCode();
+			if (unit != null && unit.toUpperCase(Locale.ROOT).contains("MONTH") && months > 0) {
+				return contractStart.plusMonths(months).minusDays(1);
+			}
+		}
+		LocalDate fromPos = pos != null ? pos.getBillingEndDate() : null;
+		return nzDate(fromPos, contractStart);
+	}
+
+	private LocalDate resolveMembershipContractEndFromPending(List<PendingSchedule> pending,
+			List<RecurringForecastRow> recurringRows, LocalDate contractStart, LocalDate fallback) {
+		LocalDate end = fallback;
+		if (recurringRows != null) {
+			for (RecurringForecastRow r : recurringRows) {
+				if (r == null) {
+					continue;
+				}
+				LocalDate pe = r.resolvedPeriodEnd();
+				if (pe != null && (end == null || pe.isAfter(end))) {
+					end = pe;
+				}
+			}
+		}
+		if (end == null) {
+			end = contractStart;
+		}
+		return end;
+	}
+
+	/**
+	 * Normalize schedule {@code billing_date}: never before membership start; first paid cycle uses
+	 * membership/purchase day; later cycles must be strictly after the previous bill date.
+	 */
+	private static LocalDate normalizePersistedBillingDate(LocalDate rawBillingDate, LocalDate periodStart,
+			LocalDate contractStart, LocalDate previousBillDate, boolean firstCycle, LocalDate purchaseDay) {
+		LocalDate d = rawBillingDate != null ? rawBillingDate : periodStart;
+		if (firstCycle) {
+			LocalDate anchor = contractStart != null ? contractStart : purchaseDay;
+			if (anchor != null) {
+				d = anchor;
+			}
+			if (d != null && purchaseDay != null && d.isAfter(purchaseDay) && contractStart != null
+					&& contractStart.isAfter(purchaseDay)) {
+				// Future membership start still collected at POS today.
+				d = purchaseDay;
+			}
+			return d;
+		}
+		if (d == null) {
+			d = periodStart != null ? periodStart : contractStart;
+		}
+		if (d != null && contractStart != null && d.isBefore(contractStart)) {
+			d = periodStart != null && !periodStart.isBefore(contractStart) ? periodStart : contractStart;
+		}
+		if (previousBillDate != null && d != null && !d.isAfter(previousBillDate)) {
+			if (periodStart != null && periodStart.isAfter(previousBillDate)) {
+				d = periodStart;
+			} else {
+				d = previousBillDate.plusDays(1);
+			}
+		}
+		return d;
+	}
+
+	/**
+	 * Instance {@code next_billing_date}: after a paid first cycle, the next unpaid schedule's bill
+	 * date; otherwise the first cycle bill date.
+	 */
+	private LocalDate resolveInstanceNextBillingDate(List<PendingSchedule> pending,
+			List<RecurringForecastRow> recurringRows, List<QuoteLineItemRow> subscriptionLines,
+			LocalDate contractStart, LocalDate firstCycleBillDate, boolean paidFirstCycle, ZoneId quoteZone) {
+		if (!paidFirstCycle) {
+			return firstCycleBillDate != null ? firstCycleBillDate
+					: resolveFirstCycleBillingDateFromLines(subscriptionLines, contractStart);
+		}
+		LocalDate previous = firstCycleBillDate;
+		LocalDate purchaseDay = LocalDate.now(quoteZone);
+		if (pending != null) {
+			for (PendingSchedule ps : pending) {
+				if (ps == null || ps.fromAgg() || ps.recRow() == null) {
+					continue;
+				}
+				LocalDate periodStart = ps.recRow().resolvedPeriodStart();
+				LocalDate raw = nzDate(ps.recRow().resolvedBillingDate(), periodStart);
+				LocalDate normalized = normalizePersistedBillingDate(raw, periodStart, contractStart, previous, false,
+						purchaseDay);
+				if (normalized != null) {
+					return normalized;
+				}
+			}
+		}
+		return firstCycleBillDate;
+	}
+
+	private static LocalDate resolveFirstCycleBillingDateFromLines(List<QuoteLineItemRow> subscriptionLines,
+			LocalDate contractStart) {
 		LocalDate lineBd = firstLineItemBillingDateOrdered(subscriptionLines);
 		if (lineBd != null) {
 			return lineBd;
 		}
 		return contractStart;
-	}
-
-	/**
-	 * When invoice is paid: first line item's {@code billingDate} (by {@code sequence}), else "today" in quote
-	 * timezone. When not paid: {@code null}.
-	 */
-	private static LocalDate resolveLastBilledOn(List<QuoteLineItemRow> subscriptionLines, boolean invoicePaid,
-			LocalDate todayInQuoteTimezone) {
-		if (!invoicePaid) {
-			return null;
-		}
-		LocalDate first = firstLineItemBillingDateOrdered(subscriptionLines);
-		return first != null ? first : todayInQuoteTimezone;
 	}
 
 	private static LocalDate firstLineItemBillingDateOrdered(List<QuoteLineItemRow> lines) {
@@ -2436,8 +2570,8 @@ private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 		UUID prorationStrategyId = billingLookup.requireProrationStrategyId(billing.getProrationStrategyCode());
 		UUID dayRuleId = billingLookup.findSubscriptionBillingDayRuleIdByTermConfig(pos.getPackagePlanTemplateTermConfigId());
 		ZoneId zone = requireZone(quote.getTimezone());
-		LocalDate contractStart = nzDate(pos.getBillingStartDate(), quote.getStartDate());
-		LocalDate contractEnd = nzDate(pos.getBillingEndDate(), contractStart);
+		LocalDate contractStart = resolveMembershipContractStart(quote, pos);
+		LocalDate contractEnd = resolveMembershipContractEnd(quote, pos, contractStart, lines);
 		Instant triggerAt = contractStart != null ? contractStart.atStartOfDay(zone).toInstant() : Instant.now();
 		UUID configSnapshotId = jdbc.queryForObject("""
 				INSERT INTO client_subscription_billing.subscription_billing_config_snapshot (
