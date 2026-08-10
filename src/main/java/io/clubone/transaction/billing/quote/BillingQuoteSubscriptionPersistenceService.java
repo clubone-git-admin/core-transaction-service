@@ -1555,19 +1555,23 @@ private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 	}
 
 	/**
-	 * Per-cycle discount: prefer (unit before discount − discounted/unit), else zero.
+	 * Per-cycle discount amount (currency units), not price-after-discount.
+	 * Vendor billing quote sets {@code discountedAmount} = per-unit OFF
+	 * ({@code unitPriceBeforeDiscount - unitPrice}). Treating it as "after" price
+	 * incorrectly zeros the schedule when OFF is 0.
 	 */
 	private static BigDecimal recurringRowDiscountAmount(RecurringForecastRow r) {
 		if (r == null) {
 			return BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
 		}
-		BigDecimal before = r.resolvedUnitPriceBeforeDiscount();
-		BigDecimal after = r.resolvedDiscountedAmount();
-		if (after == null) {
-			after = r.resolvedUnitPrice();
+		BigDecimal off = r.resolvedDiscountedAmount();
+		if (off != null) {
+			return off.max(BigDecimal.ZERO).setScale(2, RoundingMode.HALF_UP);
 		}
-		if (before != null && after != null) {
-			return before.subtract(after).max(BigDecimal.ZERO).setScale(2, RoundingMode.HALF_UP);
+		BigDecimal before = r.resolvedUnitPriceBeforeDiscount();
+		BigDecimal unit = r.resolvedUnitPrice();
+		if (before != null && unit != null) {
+			return before.subtract(unit).max(BigDecimal.ZERO).setScale(2, RoundingMode.HALF_UP);
 		}
 		return BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
 	}
@@ -2881,7 +2885,7 @@ private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 			periodLabelOut = formatIsoPeriodLabel(pStart, pEnd);
 		}
 		return new ScheduleAgg(label, trunc(periodLabelOut, 100), pStart, pEnd, billDate, qty, avgFullCycleUnit,
-				avgBefDisc, sumChargeAmount.setScale(2, RoundingMode.HALF_UP),
+				avgBefDisc, subtotalBeforeTax,
 				discountTotal.setScale(2, RoundingMode.HALF_UP), tax, taxPct, subtotalBeforeTax);
 	}
 
