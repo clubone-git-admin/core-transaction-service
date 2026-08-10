@@ -450,11 +450,18 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 				    iet.tax_amount,
 				    iet.tax_rate_allocation_id,
 				    ta."name" AS taxAuthority,
+				    iet.tax_group_id,
+				    iet.catalog_tax_assignment_id,
+				    iet.matched_level_id,
+				    iet.taxable_amount,
+				    iet.resolution_reason,
+				    iet.tax_exempt_id,
+				    iet.is_tax_inclusive,
 				    iet.created_on
 				FROM "transactions".invoice_entity_tax iet
-				JOIN finance.tax_rate_allocation tra
+				LEFT JOIN finance.tax_rate_allocation tra
 				    ON tra.tax_rate_allocation_id = iet.tax_rate_allocation_id
-				JOIN finance.tax_authority ta
+				LEFT JOIN finance.tax_authority ta
 				    ON ta.tax_authority_id = tra.tax_authority_id
 				WHERE iet.invoice_entity_id IN (%s)
 				  AND COALESCE(iet.is_active, true) = true
@@ -470,6 +477,13 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 			dto.setTaxAmount(rs.getBigDecimal("tax_amount"));
 			dto.setTaxRateAllocationId(rs.getObject("tax_rate_allocation_id", UUID.class));
 			dto.setTaxAuthority(rs.getString("taxAuthority"));
+			dto.setTaxGroupId(rs.getObject("tax_group_id", UUID.class));
+			dto.setCatalogTaxAssignmentId(rs.getObject("catalog_tax_assignment_id", UUID.class));
+			dto.setMatchedLevelId(rs.getObject("matched_level_id", UUID.class));
+			dto.setTaxableAmount(rs.getBigDecimal("taxable_amount"));
+			dto.setResolutionReason(rs.getString("resolution_reason"));
+			dto.setTaxExemptId(rs.getObject("tax_exempt_id", UUID.class));
+			dto.setTaxInclusive(rs.getBoolean("is_tax_inclusive"));
 			map.computeIfAbsent(invEntId, k -> new ArrayList<>()).add(dto);
 		}, ids.toArray());
 

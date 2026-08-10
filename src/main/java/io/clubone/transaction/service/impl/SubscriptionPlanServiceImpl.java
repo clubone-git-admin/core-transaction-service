@@ -71,6 +71,9 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 	private TransactionDAO transactionDAO;
 
 	@Autowired
+	private io.clubone.transaction.tax.TaxDeterminationService taxDeterminationService;
+
+	@Autowired
 	private EntityLookupDao entityLookupDao;
 
 	@Autowired
@@ -307,29 +310,27 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 	 */
 
 	private BigDecimal computeTaxesFromItemOnly(UUID itemId, UUID levelId, BigDecimal unitPrice) {
-		UUID taxGroupId = null;
-		BigDecimal taxAmount = BigDecimal.ZERO;
+		if (itemId == null || levelId == null) {
+			return BigDecimal.ZERO;
+		}
+		UUID appId = null;
 		try {
-			taxGroupId = transactionDAO.findTaxGroupIdForItem(itemId, levelId);
+			appId = io.clubone.transaction.security.AccessContext.applicationId();
 		} catch (Exception ignore) {
 		}
-
-		if (taxGroupId == null) {
-			return taxAmount;
-		}
-
-		List<TaxRateAllocationDTO> taxAllocs = transactionDAO.getTaxRatesByGroupAndLevel(taxGroupId, levelId);
-
-		if (taxAllocs == null || taxAllocs.isEmpty()) {
-			return taxAmount;
-		}
-		for (TaxRateAllocationDTO tr : taxAllocs) {
-			BigDecimal thisTax = unitPrice.multiply(tr.getTaxRatePercentage()).divide(new BigDecimal("100"), 2,
-					RoundingMode.HALF_UP);
-
-			taxAmount = taxAmount.add(thisTax);
-		}
-		return taxAmount;
+		var req = new io.clubone.transaction.tax.TaxDeterminationRequest(
+				appId,
+				itemId,
+				levelId,
+				null,
+				unitPrice == null ? BigDecimal.ZERO : unitPrice,
+				1,
+				BigDecimal.ZERO,
+				LocalDate.now(),
+				null,
+				"SUBSCRIPTION",
+				null);
+		return taxDeterminationService.determine(req).getTaxAmount();
 	}
 
 	private static <T> List<T> nz(List<T> list) {

@@ -124,6 +124,12 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	@Autowired
 	private InvoiceCurrencyStampService invoiceCurrencyStampService;
 
+	@Autowired
+	private io.clubone.transaction.tax.TaxDeterminationService taxDeterminationService;
+
+	/** Scoped for tax exemption resolution during a single invoice create. */
+	private final ThreadLocal<UUID> taxClientRoleId = new ThreadLocal<>();
+
 	private final TransactionTemplate invoicePersistTx;
 
 
@@ -176,19 +182,24 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	            request
 	    );
 
-		// Public remote-close / join portal: no staff TenantContext. Scope application_id from
-		// the request body so DAO writes (saveInvoiceV3, status lookups) still tenant-filter.
-		final boolean publicRemotePurchase = TenantContext.get() == null;
-		if (publicRemotePurchase && request.getCreatedBy() == null) {
-			throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-					"createdBy is required for remote/public invoice create when X-Actor-Id is absent");
+		taxClientRoleId.set(request.getClientRoleId());
+		try {
+			// Public remote-close / join portal: no staff TenantContext. Scope application_id from
+			// the request body so DAO writes (saveInvoiceV3, status lookups) still tenant-filter.
+			final boolean publicRemotePurchase = TenantContext.get() == null;
+			if (publicRemotePurchase && request.getCreatedBy() == null) {
+				throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+						"createdBy is required for remote/public invoice create when X-Actor-Id is absent");
+			}
+			if (publicRemotePurchase) {
+				return AccessContext.callWithApplicationIdOverride(
+						request.getApplicationId(),
+						() -> createInvoiceCore(request));
+			}
+			return createInvoiceCore(request);
+		} finally {
+			taxClientRoleId.remove();
 		}
-		if (publicRemotePurchase) {
-			return AccessContext.callWithApplicationIdOverride(
-					request.getApplicationId(),
-					() -> createInvoiceCore(request));
-		}
-		return createInvoiceCore(request);
 	}
 
 	private CreateInvoiceResponse createInvoiceCore(InvoiceRequest request) {
@@ -1447,10 +1458,37 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	}
 
 	private static BigDecimal lineNet(InvoiceEntityDTO line) {
+		if (isLineTaxInclusive(line)) {
+			// Prefer stamped taxable base from determination (exclusive of embedded tax).
+			if (line.getTaxes() != null && !line.getTaxes().isEmpty()
+					&& line.getTaxes().get(0).getTaxableAmount() != null) {
+				return scale2(nz(line.getTaxes().get(0).getTaxableAmount()));
+			}
+			BigDecimal gross = lineSub(line);
+			BigDecimal disc = nz(line.getDiscountAmount());
+			BigDecimal grossNet = gross.subtract(disc);
+			if (grossNet.compareTo(BigDecimal.ZERO) < 0) {
+				grossNet = BigDecimal.ZERO;
+			}
+			BigDecimal taxable = grossNet.subtract(nz(line.getTaxAmount()));
+			return taxable.compareTo(BigDecimal.ZERO) < 0 ? BigDecimal.ZERO : scale2(taxable);
+		}
 		BigDecimal gross = lineSub(line);
 		BigDecimal disc = nz(line.getDiscountAmount());
 		BigDecimal net = gross.subtract(disc);
 		return (net.compareTo(BigDecimal.ZERO) < 0) ? BigDecimal.ZERO : net;
+	}
+
+	private static boolean isLineTaxInclusive(InvoiceEntityDTO line) {
+		if (line == null || line.getTaxes() == null) {
+			return false;
+		}
+		for (InvoiceEntityTaxDTO t : line.getTaxes()) {
+			if (t != null && t.isTaxInclusive()) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/*
@@ -1921,11 +1959,15 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		return a != null ? a : b;
 	}
 
-	/** TAX: item-level only (tax on NET = gross - discount) */
+	/** TAX: catalog assignment + level rates (+ exempt / inclusive) via TaxDeterminationService */
 	private void computeTaxesFromItemOnly(InvoiceEntityDTO line, Item it, UUID levelId) {
+		if (it == null) {
+			line.setTaxAmount(BigDecimal.ZERO);
+			return;
+		}
 
-
-		if (it != null && it.getTaxAmount() != null) {
+		// Client-provided tax amount: still try to stamp rate/allocation IDs when present
+		if (it.getTaxAmount() != null) {
 			BigDecimal amt = scale2(nz(it.getTaxAmount()));
 			line.setTaxAmount(amt);
 			InvoiceEntityTaxDTO tx = new InvoiceEntityTaxDTO();
@@ -1933,66 +1975,90 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			if (it.getTaxPct() != null) {
 				tx.setTaxRate(scale2(nz(it.getTaxPct())));
 			}
-			if (it.getTaxRateId() != null && it.getTaxRateAllocationId() != null) {
-				tx.setTaxRateId(it.getTaxRateId());
-				tx.setTaxRateAllocationId(it.getTaxRateAllocationId());
-			}
+			tx.setTaxRateId(it.getTaxRateId());
+			tx.setTaxRateAllocationId(it.getTaxRateAllocationId());
+			tx.setResolutionReason(io.clubone.transaction.tax.TaxDeterminationResult.Reason.CLIENT_PROVIDED.name());
+			tx.setTaxableAmount(TaxMathSafeBase(line));
 			line.setTaxes(List.of(tx));
 			return;
 		}
 
-		UUID taxGroupId = null;
+		UUID appId = null;
 		try {
-			taxGroupId = transactionDAO.findTaxGroupIdForItem(it.getEntityId(), levelId);
+			appId = AccessContext.applicationId();
 		} catch (Exception ignore) {
 		}
+		UUID clientRoleId = taxClientRoleId.get();
 
-		if (taxGroupId == null) {
-			line.setTaxAmount(BigDecimal.ZERO);
-			return;
-		}
+		var req = new io.clubone.transaction.tax.TaxDeterminationRequest(
+				appId,
+				it.getEntityId(),
+				levelId,
+				clientRoleId,
+				line.getUnitPrice(),
+				def(line.getQuantity(), 1),
+				line.getDiscountAmount(),
+				LocalDate.now(),
+				null,
+				"INVOICE_ENTITY",
+				line.getInvoiceEntityId());
 
-		List<TaxRateAllocationDTO> taxAllocs = transactionDAO.getTaxRatesByGroupAndLevel(taxGroupId, levelId);
-		if (taxAllocs == null || taxAllocs.isEmpty()) {
-			line.setTaxAmount(BigDecimal.ZERO);
-			return;
-		}
-
-		BigDecimal qty = BigDecimal.valueOf(def(line.getQuantity(), 1));
-		BigDecimal gross = nz(line.getUnitPrice()).multiply(qty);
-		BigDecimal discount = nz(line.getDiscountAmount());
-
-		BigDecimal taxableBase = gross.subtract(discount);
-		if (taxableBase.compareTo(BigDecimal.ZERO) < 0)
-			taxableBase = BigDecimal.ZERO;
-
+		io.clubone.transaction.tax.TaxDeterminationResult result = taxDeterminationService.determine(req);
 
 		List<InvoiceEntityTaxDTO> taxes = new ArrayList<>();
-		BigDecimal taxAmount = BigDecimal.ZERO;
+		if (result.getComponents() != null) {
+			for (var c : result.getComponents()) {
+				InvoiceEntityTaxDTO tx = new InvoiceEntityTaxDTO();
+				tx.setTaxRateId(c.getTaxRateId());
+				tx.setTaxRateAllocationId(c.getTaxRateAllocationId());
+				tx.setTaxRate(scale2(nz(c.getPercentage())));
+				tx.setTaxAmount(scale2(nz(c.getAmount())));
+				tx.setTaxGroupId(result.getTaxGroupId());
+				tx.setCatalogTaxAssignmentId(result.getCatalogTaxAssignmentId());
+				tx.setMatchedLevelId(result.getMatchedLevelId());
+				tx.setTaxableAmount(result.getTaxableAmount());
+				tx.setResolutionReason(result.getReason().name());
+				tx.setTaxExemptId(result.getTaxExemptId());
+				tx.setTaxInclusive(result.isTaxInclusive());
+				taxes.add(tx);
+			}
+		}
 
-		for (TaxRateAllocationDTO tr : taxAllocs) {
+		if (taxes.isEmpty() && result.getReason() == io.clubone.transaction.tax.TaxDeterminationResult.Reason.EXEMPT_ZERO) {
 			InvoiceEntityTaxDTO tx = new InvoiceEntityTaxDTO();
-			tx.setTaxRateId(tr.getTaxRateId());
-			tx.setTaxRateAllocationId(tr.getTaxRateAllocationId());
-			tx.setTaxRate(scale2(nz(tr.getTaxRatePercentage())));
-
-			BigDecimal thisTax = taxableBase.multiply(tx.getTaxRate()).divide(new BigDecimal("100"), 2,
-					RoundingMode.HALF_UP);
-
-			tx.setTaxAmount(thisTax);
+			tx.setTaxAmount(BigDecimal.ZERO);
+			tx.setTaxRate(BigDecimal.ZERO);
+			tx.setTaxableAmount(result.getTaxableAmount());
+			tx.setResolutionReason(result.getReason().name());
+			tx.setTaxExemptId(result.getTaxExemptId());
+			tx.setTaxGroupId(result.getTaxGroupId());
+			tx.setCatalogTaxAssignmentId(result.getCatalogTaxAssignmentId());
+			tx.setMatchedLevelId(result.getMatchedLevelId());
+			tx.setTaxInclusive(result.isTaxInclusive());
 			taxes.add(tx);
-			taxAmount = taxAmount.add(thisTax);
 		}
 
 		line.setTaxes(taxes);
-		line.setTaxAmount(scale2(taxAmount));
+		line.setTaxAmount(scale2(nz(result.getTaxAmount())));
+	}
+
+	private static BigDecimal TaxMathSafeBase(InvoiceEntityDTO line) {
+		BigDecimal qty = BigDecimal.valueOf(def(line.getQuantity(), 1));
+		BigDecimal gross = nz(line.getUnitPrice()).multiply(qty);
+		BigDecimal base = gross.subtract(nz(line.getDiscountAmount()));
+		return base.compareTo(BigDecimal.ZERO) < 0 ? BigDecimal.ZERO : scale2(base);
 	}
 
 	private static void finalizeLeaf(InvoiceEntityDTO line) {
 		BigDecimal q = BigDecimal.valueOf(def(line.getQuantity(), 1));
 		BigDecimal sub = nz(line.getUnitPrice()).multiply(q);
-		BigDecimal total = sub.add(nz(line.getTaxAmount())).subtract(nz(line.getDiscountAmount()));
-		line.setTotalAmount(scale2(total));
+		BigDecimal disc = nz(line.getDiscountAmount());
+		if (isLineTaxInclusive(line)) {
+			// Unit price is tax-inclusive gross; tax is extracted for reporting only.
+			line.setTotalAmount(scale2(sub.subtract(disc)));
+		} else {
+			line.setTotalAmount(scale2(sub.add(nz(line.getTaxAmount())).subtract(disc)));
+		}
 	}
 
 	/**

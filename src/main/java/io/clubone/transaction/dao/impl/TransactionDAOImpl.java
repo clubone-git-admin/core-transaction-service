@@ -371,8 +371,10 @@ public class TransactionDAOImpl implements TransactionDAO {
 		final String insertTaxSql = """
 				INSERT INTO transactions.invoice_entity_tax (
 				    invoice_entity_tax_id, invoice_entity_id, tax_rate_id, tax_rate_percentage, tax_amount,
-				    created_on, created_by,tax_rate_allocation_id
-				) VALUES (?, ?, ?, ?, ?, NOW(), ?,?)
+				    created_on, created_by, tax_rate_allocation_id,
+				    tax_group_id, catalog_tax_assignment_id, matched_level_id,
+				    taxable_amount, resolution_reason, tax_exempt_id, is_tax_inclusive
+				) VALUES (?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				""";
 
 		final String insertPriceBandSql = """
@@ -414,12 +416,16 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 			if (li.getTaxes() != null && !li.getTaxes().isEmpty()) {
 				for (InvoiceEntityTaxDTO t : li.getTaxes()) {
-					if (t.getTaxRateId() == null || t.getTaxRateAllocationId() == null) {
-						continue;
-					}
+					// Persist snapshot even when rate/allocation IDs are absent (e.g. EXEMPT_ZERO / CLIENT_PROVIDED)
+					String reason = t.getResolutionReason() != null ? t.getResolutionReason() : "UNKNOWN";
 					taxBatch.add(new Object[] {
-							UUID.randomUUID(), ieId, t.getTaxRateId(), t.getTaxRate(),
-							t.getTaxAmount(), dto.getCreatedBy(), t.getTaxRateAllocationId()
+							UUID.randomUUID(), ieId, t.getTaxRateId(),
+							t.getTaxRate() == null ? BigDecimal.ZERO : t.getTaxRate(),
+							t.getTaxAmount() == null ? BigDecimal.ZERO : t.getTaxAmount(),
+							dto.getCreatedBy(), t.getTaxRateAllocationId(),
+							t.getTaxGroupId(), t.getCatalogTaxAssignmentId(), t.getMatchedLevelId(),
+							t.getTaxableAmount(), reason, t.getTaxExemptId(),
+							Boolean.TRUE.equals(t.isTaxInclusive())
 					});
 				}
 			}

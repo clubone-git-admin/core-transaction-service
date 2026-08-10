@@ -24,4 +24,8 @@ public class BillingQuoteFinalizeSpec {
 	private LocalDate chargeDate;
 	private LocalDate chargeEndDate;
 	private UUID levelId;
+	/** Promotion applied at checkout; must be re-quoted so schedules match POS amounts. */
+	private UUID promotionId;
+	/** Quote mode passed through to vendor (e.g. INITIAL / SCHEDULE). */
+	private String quoteMode;
 }

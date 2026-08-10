@@ -633,6 +633,23 @@ public class TransactionServiceImpl implements TransactionService {
 		final UUID effectiveClientAgreementId = req.getClientAgreementId() != null ? req.getClientAgreementId()
 				: invoiceSummary.getClientAgreementId();
 
+		if (!CollectionUtils.isEmpty(req.getBillingQuoteFinalizeSpecs())) {
+			if (effectiveClientAgreementId == null) {
+				logger.warn(
+						"[transactions/v3/finalize] step=validation outcome=reject invoiceId={} reason=missing_client_agreement_for_billing_quote_specs",
+						req.getInvoiceId());
+				return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null,
+						"clientAgreementId is required when billingQuoteFinalizeSpecs are present");
+			}
+			if (applicationId == null) {
+				logger.warn(
+						"[transactions/v3/finalize] step=validation outcome=reject invoiceId={} reason=missing_application_id_for_billing_quote_specs",
+						req.getInvoiceId());
+				return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null,
+						"applicationId is required when billingQuoteFinalizeSpecs are present");
+			}
+		}
+
 		final boolean isManual = isManualPaymentGateway(req);
 
 		BigDecimal tolerance = finalizeAmountTolerance != null ? finalizeAmountTolerance.setScale(2, RoundingMode.HALF_UP)
@@ -1139,7 +1156,8 @@ public class TransactionServiceImpl implements TransactionService {
 						clientPaymentTransactionId,
 						createdBy,
 						true,
-						cpmHint.orElse(null));
+						cpmHint.orElse(null),
+						applicationId);
 				logger.info(
 						"[transactions/v3/finalize] step=billing_quote_persist outcome=ok invoiceId={} responseCount={}",
 						invoiceId, quoteLineItems.size());

@@ -88,9 +88,9 @@ public class SubscriptionPlanHelper {
 
 	private BillingQuoteLineItemsResponse fetchOne(BillingQuoteFinalizeSpec spec, int index, int total) {
 		log.info(
-				"[billing-quote/line-items] step=request index={}/{} entityTypeCode={} entityId={} planTemplateId={} startDate={} levelId={}",
+				"[billing-quote/line-items] step=request index={}/{} entityTypeCode={} entityId={} planTemplateId={} startDate={} levelId={} promotionId={} quoteMode={}",
 				index, total, spec.getEntityTypeCode(), spec.getEntityId(), spec.getPlanTemplateId(),
-				spec.getStartDate(), spec.getLevelId());
+				spec.getStartDate(), spec.getLevelId(), spec.getPromotionId(), spec.getQuoteMode());
 		long t0 = System.nanoTime();
 		HttpHeaders headers = new HttpHeaders();
 		headers.setContentType(MediaType.APPLICATION_JSON);
