@@ -160,15 +160,36 @@ public class TransactionDAOImpl implements TransactionDAO {
 			""";
 
 	private static final String TAX_RATE_SQL = """
+			WITH RECURSIVE level_path AS (
+			  SELECT l.level_id, 0 AS depth
+			  FROM locations.levels l
+			  WHERE l.level_id = ?
+			  UNION ALL
+			  SELECT par.level_id, lp.depth + 1
+			  FROM level_path lp
+			  JOIN locations.levels cur ON cur.level_id = lp.level_id
+			  JOIN locations.levels par ON par.level_id = cur.parent_level_id
+			),
+			chosen_rate AS (
+			  SELECT tr.tax_rate_id
+			  FROM finance.tax_rate tr
+			  JOIN level_path lp ON lp.level_id = tr.level_id
+			  WHERE tr.tax_group_id = ?
+			    AND COALESCE(tr.is_active, true) = true
+			    AND (tr.start_date IS NULL OR tr.start_date <= CURRENT_DATE)
+			    AND (tr.end_date IS NULL OR tr.end_date >= CURRENT_DATE)
+			  ORDER BY lp.depth ASC, tr.start_date DESC NULLS LAST
+			  LIMIT 1
+			)
 			SELECT
 			    tr.tax_rate_id,
 			    tra.tax_rate_percentage,
 			    tra.tax_rate_allocation_id
-			FROM finance.tax_rate tr
+			FROM chosen_rate cr
+			JOIN finance.tax_rate tr ON tr.tax_rate_id = cr.tax_rate_id
 			JOIN finance.tax_rate_allocation tra
 			  ON tra.tax_rate_id = tr.tax_rate_id
-			WHERE tr.tax_group_id = ?
-			  AND tr.level_id = ?
+			 AND COALESCE(tra.is_active, true) = true
 			""";
 
 	private static final String BUNDLE_PRICE_BAND_SQL = "SELECT unit_price, down_payment_units FROM package.package_price_cycle_band WHERE package_price_cycle_band_id = ?";
@@ -926,7 +947,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 		if (taxGroupId == null || levelId == null) {
 			return Collections.emptyList();
 		}
-		return cluboneJdbcTemplate.query(TAX_RATE_SQL, TAX_RATE_ROW_MAPPER, taxGroupId, levelId);
+		return cluboneJdbcTemplate.query(TAX_RATE_SQL, TAX_RATE_ROW_MAPPER, levelId, taxGroupId);
 	}
 
 	@Override
@@ -1064,26 +1085,41 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 	@Override
 	public UUID findTaxGroupIdForItem(UUID itemId, UUID levelId) {
-		// Look for item_price scoped to given level
+		// Prefer catalog tax assignment (Item Group → Item Category) over legacy item.tax_group_id
 		final String sql = """
-				    SELECT i.tax_group_id
-				    FROM items.item_price ip
-				    JOIN items.item_version iv on iv.item_version_id=ip.item_version_id
-				    JOIN items.item i ON i.item_id = iv.item_id
-				    WHERE i.item_id = ?
-				      AND ip.level_id = ?
-				      AND COALESCE(ip.is_active, true) = true
-				      AND (ip.start_at_local IS NULL OR ip.start_at_local <= now())
-				      AND (ip.end_at_local IS NULL OR ip.end_at_local >= now())
-				    ORDER BY ip.created_on DESC
-				    LIMIT 1
+				WITH RECURSIVE level_path AS (
+				  SELECT l.level_id, 0 AS depth
+				  FROM locations.levels l
+				  WHERE l.level_id = ?
+				  UNION ALL
+				  SELECT par.level_id, lp.depth + 1
+				  FROM level_path lp
+				  JOIN locations.levels cur ON cur.level_id = lp.level_id
+				  JOIN locations.levels par ON par.level_id = cur.parent_level_id
+				)
+				SELECT cta.tax_group_id
+				FROM items.item i
+				JOIN finance.catalog_tax_assignment cta
+				  ON cta.application_id = i.application_id
+				 AND cta.item_group_id = i.item_group_id
+				 AND (cta.item_category_id IS NULL OR cta.item_category_id = i.item_category_id)
+				 AND (cta.level_id IS NULL OR cta.level_id IN (SELECT level_id FROM level_path))
+				 AND COALESCE(cta.is_active, true) = true
+				 AND (cta.valid_from IS NULL OR cta.valid_from <= CURRENT_DATE)
+				 AND (cta.valid_to IS NULL OR cta.valid_to >= CURRENT_DATE)
+				WHERE i.item_id = ?
+				ORDER BY
+				  CASE WHEN cta.item_category_id IS NOT NULL THEN 0 ELSE 1 END,
+				  CASE WHEN cta.level_id IS NOT NULL THEN 0 ELSE 1 END,
+				  cta.priority ASC
+				LIMIT 1
 				""";
 
-		UUID tg = firstUuid(sql, itemId, levelId);
+		UUID tg = firstUuid(sql, levelId, itemId);
 		if (tg != null)
 			return tg;
 
-		// fallback: no level-specific row, get default item.tax_group_id
+		// Transitional fallback: legacy item.tax_group_id while assignments are being configured
 		final String fallback = """
 				    SELECT i.tax_group_id
 				    FROM items.item i
