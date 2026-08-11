@@ -111,19 +111,22 @@ public class ClientAgreementCreationHelper {
         UUID requestedAgreementVersionId = primary.getEntityVersionId();
         UUID clientRoleId = invoice.getClientRoleId();
         UUID levelRefOrId = invoice.getLevelId();  // accepts levels.level_id or levels.reference_entity_id
+        String availabilityTypeCode = invoice.getAvailabilityTypeCode();
 
         // Meta as-of: use requested start, else UTC instant's calendar only for version validity lookup
         LocalDate metaAsOf = primary.getStartDate() != null
                 ? primary.getStartDate()
                 : OffsetDateTime.now(ZoneOffset.UTC).toLocalDate();
 
-        AgreementMeta meta = resolveAgreementMeta(agreementId, requestedAgreementVersionId, levelRefOrId, metaAsOf);
+        AgreementMeta meta = resolveAgreementMeta(
+                agreementId, requestedAgreementVersionId, levelRefOrId, metaAsOf, availabilityTypeCode);
         ZoneId zoneId = requireZoneId(meta.getLocationTimeZone());
         LocalDate startDate = primary.getStartDate() != null
                 ? primary.getStartDate()
                 : LocalDate.now(zoneId);
         if (primary.getStartDate() == null && !startDate.equals(metaAsOf)) {
-            meta = resolveAgreementMeta(agreementId, requestedAgreementVersionId, levelRefOrId, startDate);
+            meta = resolveAgreementMeta(
+                    agreementId, requestedAgreementVersionId, levelRefOrId, startDate, availabilityTypeCode);
             zoneId = requireZoneId(meta.getLocationTimeZone());
         }
         OffsetDateTime purchasedOnUtc = OffsetDateTime.now(ZoneOffset.UTC);
@@ -193,29 +196,49 @@ public class ClientAgreementCreationHelper {
 
     /**
      * Resolve agreement metadata based on:
-     *  - agreement_id
-     *  - level.reference_entity_id
-     *  - as-of timestamp (start date)
+     *  - agreement_id (+ optional requested agreement_version_id)
+     *  - POS selling level ({@code levels.level_id} or {@code reference_entity_id}/clubId)
+     *  - as-of date (contract start)
+     *  - optional availability type (e.g. POS) — preferred when multiple AL rows exist
+     *
+     * <p>{@code agreement_location} is resolved like POS catalog: nearest active row on the
+     * selling level's ancestor chain (child override wins). {@code purchased_level_id} remains
+     * the selling club level, not the ancestor where the location row was published.
      */
     private AgreementMeta resolveAgreementMeta(UUID agreementId,
                                                UUID requestedAgreementVersionId,
                                                UUID levelReferenceOrId,
-                                               LocalDate asOf) {
+                                               LocalDate asOf,
+                                               String availabilityTypeCode) {
+
+        String avail = availabilityTypeCode == null ? null : availabilityTypeCode.trim();
+        if (avail != null && avail.isEmpty()) {
+            avail = null;
+        }
 
         String cacheKey = agreementId + "|" + requestedAgreementVersionId + "|"
-                + levelReferenceOrId + "|" + asOf;
+                + levelReferenceOrId + "|" + asOf + "|" + (avail == null ? "" : avail.toUpperCase(Locale.ROOT));
         AgreementMeta cached = agreementMetaCache.getIfPresent(cacheKey);
         if (cached != null) {
             return cached;
         }
 
         String sql = """
-            WITH lvl AS (
-                SELECT l.level_id
+            WITH RECURSIVE sale_lvl AS (
+                SELECT l.level_id, l.parent_level_id, l.reference_entity_id, 0 AS depth
                 FROM locations.levels l
                 WHERE l.reference_entity_id = :levelRefOrId
                    OR l.level_id = :levelRefOrId
                 LIMIT 1
+            ),
+            level_path AS (
+                SELECT level_id, parent_level_id, reference_entity_id, depth
+                FROM sale_lvl
+                UNION ALL
+                SELECT p.level_id, p.parent_level_id, p.reference_entity_id, lp.depth + 1
+                FROM locations.levels p
+                JOIN level_path lp ON lp.parent_level_id = p.level_id
+                WHERE lp.depth < 32
             ),
             av_choice AS (
                 SELECT av.*
@@ -235,12 +258,21 @@ public class ClientAgreementCreationHelper {
             al_choice AS (
                 SELECT al.*
                 FROM agreements.agreement_location al
-                JOIN lvl ON al.level_id = lvl.level_id
+                JOIN level_path lp ON lp.level_id = al.level_id
                 JOIN av_choice av ON av.agreement_version_id = al.agreement_version_id
+                LEFT JOIN agreements.lu_availability_type at
+                  ON at.availability_type_id = al.availability_type_id
                 WHERE al.is_active = TRUE
                   AND CAST(al.start_date AS date) <= CAST(:asOf AS date)
                   AND (al.end_date IS NULL OR CAST(al.end_date AS date) >= CAST(:asOf AS date))
-                ORDER BY al.start_date DESC
+                ORDER BY
+                  lp.depth ASC,
+                  CASE
+                    WHEN :availabilityTypeCode IS NULL THEN 0
+                    WHEN UPPER(COALESCE(at.code, '')) = UPPER(:availabilityTypeCode) THEN 0
+                    ELSE 1
+                  END ASC,
+                  al.start_date DESC
                 LIMIT 1
             )
             SELECT
@@ -248,20 +280,15 @@ public class ClientAgreementCreationHelper {
                 a.agreement_classification_id,
                 av_choice.agreement_version_id,
                 al_choice.agreement_location_id,
-                (SELECT level_id FROM lvl) AS purchased_level_id,
+                (SELECT level_id FROM sale_lvl) AS purchased_level_id,
                 tz.timezone_code AS location_timezone,
                 at.duration_value AS term_duration_value,
                 ut.code AS term_duration_unit_code
             FROM agreements.agreement a
             JOIN av_choice ON av_choice.agreement_id = a.agreement_id
             JOIN al_choice ON al_choice.agreement_version_id = av_choice.agreement_version_id
-            JOIN lvl ON true
-            LEFT JOIN locations.location loc ON loc.location_id = (
-                SELECT l.reference_entity_id
-                FROM locations.levels l
-                WHERE l.level_id = lvl.level_id
-                LIMIT 1
-            )
+            JOIN sale_lvl ON true
+            LEFT JOIN locations.location loc ON loc.location_id = sale_lvl.reference_entity_id
             LEFT JOIN locations.lu_timezone tz ON tz.timezone_id = loc.timezone_id
                 AND COALESCE(tz.is_active, true) = true
             LEFT JOIN agreements.agreement_term at ON at.agreement_term_id = a.agreement_term_id
@@ -273,7 +300,8 @@ public class ClientAgreementCreationHelper {
                 .addValue("agreementId", agreementId)
                 .addValue("levelRefOrId", levelReferenceOrId)
                 .addValue("requestedAgreementVersionId", requestedAgreementVersionId)
-                .addValue("asOf", asOf);
+                .addValue("asOf", asOf)
+                .addValue("availabilityTypeCode", avail);
 
         try {
             AgreementMeta meta = namedJdbc.queryForObject(sql, params, new AgreementMetaRowMapper());

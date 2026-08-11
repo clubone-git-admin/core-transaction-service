@@ -140,10 +140,21 @@ public class ClientAgreementOrchestrator {
                                                OffsetDateTime asOf) {
 
         String sql = """
-            WITH lvl AS (
-                SELECT l.level_id
+            WITH RECURSIVE sale_lvl AS (
+                SELECT l.level_id, l.parent_level_id, l.reference_entity_id
                 FROM locations.levels l
                 WHERE l.reference_entity_id = :levelRefId
+                   OR l.level_id = :levelRefId
+                LIMIT 1
+            ),
+            level_path AS (
+                SELECT level_id, parent_level_id, reference_entity_id, 0 AS depth
+                FROM sale_lvl
+                UNION ALL
+                SELECT p.level_id, p.parent_level_id, p.reference_entity_id, lp.depth + 1
+                FROM locations.levels p
+                JOIN level_path lp ON lp.parent_level_id = p.level_id
+                WHERE lp.depth < 32
             ),
             av_choice AS (
                 SELECT av.*
@@ -158,12 +169,12 @@ public class ClientAgreementOrchestrator {
             al_choice AS (
                 SELECT al.*
                 FROM agreements.agreement_location al
-                JOIN lvl ON al.level_id = lvl.level_id
+                JOIN level_path lp ON lp.level_id = al.level_id
                 JOIN av_choice av ON av.agreement_version_id = al.agreement_version_id
                 WHERE al.is_active = TRUE
                   AND al.start_date <= :asOf
                   AND (al.end_date IS NULL OR al.end_date >= :asOf)
-                ORDER BY al.start_date DESC
+                ORDER BY lp.depth ASC, al.start_date DESC
                 LIMIT 1
             )
             SELECT
@@ -171,14 +182,14 @@ public class ClientAgreementOrchestrator {
                 a.agreement_classification_id,
                 av_choice.agreement_version_id,
                 al_choice.agreement_location_id,
-                (SELECT level_id FROM lvl) AS purchased_level_id,
+                (SELECT level_id FROM sale_lvl) AS purchased_level_id,
                 tz.timezone_code AS location_timezone,
                 at.duration_value AS term_duration_value,
                 ut.code AS term_duration_unit_code
             FROM agreements.agreement a
             JOIN av_choice ON av_choice.agreement_id = a.agreement_id
             JOIN al_choice ON al_choice.agreement_version_id = av_choice.agreement_version_id
-            LEFT JOIN locations.levels purchased_lvl ON purchased_lvl.level_id = (SELECT level_id FROM lvl)
+            LEFT JOIN locations.levels purchased_lvl ON purchased_lvl.level_id = (SELECT level_id FROM sale_lvl)
             LEFT JOIN locations.location loc ON loc.location_id = purchased_lvl.reference_entity_id
             LEFT JOIN locations.lu_timezone tz ON tz.timezone_id = loc.timezone_id
                 AND COALESCE(tz.is_active, true) = true
