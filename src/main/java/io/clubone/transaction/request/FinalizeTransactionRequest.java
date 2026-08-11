@@ -27,6 +27,8 @@ public class FinalizeTransactionRequest {
     private String paymentMethodCode;
     private String paymentTypeCode;
     private UUID paymentGatewayCurrencyTypeId;
+    /** ISO-4217 location/invoice currency — used when supported-currency UUID is missing. */
+    private String currencyCode;
 
     private UUID createdBy;
     private List<TransactionLineItemRequest> lineItems;

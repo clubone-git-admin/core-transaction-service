@@ -101,11 +101,11 @@ public class TransactionDAOImpl implements TransactionDAO {
 	private static final String ITEM_PRICE_SQL = """
 						WITH RECURSIVE ancestors AS (
 			  SELECT l.level_id, l.parent_level_id, 0 AS depth
-			  FROM location.levels l
+			  FROM locations.levels l
 			  WHERE l.level_id = ?
 			  UNION ALL
 			  SELECT p.level_id, p.parent_level_id, a.depth + 1
-			  FROM location.levels p
+			  FROM locations.levels p
 			  JOIN ancestors a ON a.parent_level_id = p.level_id
 			),
 			level_candidates AS (
@@ -116,7 +116,23 @@ public class TransactionDAOImpl implements TransactionDAO {
 			SELECT
 			  i.item_description,
 			  eff_ip.price AS "itemPrice",
-			  i.tax_group_id,
+			  (
+			    SELECT cta.tax_group_id
+			    FROM finance.catalog_tax_assignment cta
+			    WHERE cta.application_id = i.application_id
+			      AND cta.item_group_id = i.item_group_id
+			      AND (cta.item_category_id IS NULL OR cta.item_category_id = i.item_category_id)
+			      AND (cta.level_id IS NULL OR cta.level_id IN (SELECT level_id FROM ancestors))
+			      AND COALESCE(cta.is_active, true) = true
+			      AND (cta.valid_from IS NULL OR cta.valid_from <= CURRENT_DATE)
+			      AND (cta.valid_to IS NULL OR cta.valid_to >= CURRENT_DATE)
+			    ORDER BY
+			      CASE WHEN cta.item_category_id IS NOT NULL THEN 0 ELSE 1 END,
+			      CASE WHEN cta.level_id IS NOT NULL THEN 0 ELSE 1 END,
+			      COALESCE((SELECT a.depth FROM ancestors a WHERE a.level_id = cta.level_id), 2147483647) ASC,
+			      cta.priority ASC
+			    LIMIT 1
+			  ) AS tax_group_id,
 			  eff_ip.price_level_id
 			FROM items.item i
 			JOIN LATERAL (
@@ -138,7 +154,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 			    i.client_role_id,
 			    i.total_amount,
 			    i.level_id,
-			    i.client_agreement_id
+			    i.client_agreement_id,
+			    i.currency_code
 			FROM "transactions".invoice i
 			WHERE i.invoice_id = ?
 			  AND i.application_id = ?
@@ -159,15 +176,36 @@ public class TransactionDAOImpl implements TransactionDAO {
 			""";
 
 	private static final String TAX_RATE_SQL = """
+			WITH RECURSIVE level_path AS (
+			  SELECT l.level_id, 0 AS depth
+			  FROM locations.levels l
+			  WHERE l.level_id = ?
+			  UNION ALL
+			  SELECT par.level_id, lp.depth + 1
+			  FROM level_path lp
+			  JOIN locations.levels cur ON cur.level_id = lp.level_id
+			  JOIN locations.levels par ON par.level_id = cur.parent_level_id
+			),
+			chosen_rate AS (
+			  SELECT tr.tax_rate_id
+			  FROM finance.tax_rate tr
+			  JOIN level_path lp ON lp.level_id = tr.level_id
+			  WHERE tr.tax_group_id = ?
+			    AND COALESCE(tr.is_active, true) = true
+			    AND (tr.start_date IS NULL OR tr.start_date <= CURRENT_DATE)
+			    AND (tr.end_date IS NULL OR tr.end_date >= CURRENT_DATE)
+			  ORDER BY lp.depth ASC, tr.start_date DESC NULLS LAST
+			  LIMIT 1
+			)
 			SELECT
 			    tr.tax_rate_id,
 			    tra.tax_rate_percentage,
 			    tra.tax_rate_allocation_id
-			FROM finance.tax_rate tr
+			FROM chosen_rate cr
+			JOIN finance.tax_rate tr ON tr.tax_rate_id = cr.tax_rate_id
 			JOIN finance.tax_rate_allocation tra
 			  ON tra.tax_rate_id = tr.tax_rate_id
-			WHERE tr.tax_group_id = ?
-			  AND tr.level_id = ?
+			 AND COALESCE(tra.is_active, true) = true
 			""";
 
 	private static final String BUNDLE_PRICE_BAND_SQL = "SELECT unit_price, down_payment_units FROM package.package_price_cycle_band WHERE package_price_cycle_band_id = ?";
@@ -413,8 +451,10 @@ public class TransactionDAOImpl implements TransactionDAO {
 		final String insertTaxSql = """
 				INSERT INTO transactions.invoice_entity_tax (
 				    invoice_entity_tax_id, invoice_entity_id, tax_rate_id, tax_rate_percentage, tax_amount,
-				    created_on, created_by,tax_rate_allocation_id
-				) VALUES (?, ?, ?, ?, ?, NOW(), ?,?)
+				    created_on, created_by, tax_rate_allocation_id,
+				    tax_group_id, catalog_tax_assignment_id, matched_level_id,
+				    taxable_amount, resolution_reason, tax_exempt_id, is_tax_inclusive
+				) VALUES (?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				""";
 
 		final String insertPriceBandSql = """
@@ -456,12 +496,16 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 			if (li.getTaxes() != null && !li.getTaxes().isEmpty()) {
 				for (InvoiceEntityTaxDTO t : li.getTaxes()) {
-					if (t.getTaxRateId() == null || t.getTaxRateAllocationId() == null) {
-						continue;
-					}
+					// Persist snapshot even when rate/allocation IDs are absent (e.g. EXEMPT_ZERO / CLIENT_PROVIDED)
+					String reason = t.getResolutionReason() != null ? t.getResolutionReason() : "UNKNOWN";
 					taxBatch.add(new Object[] {
-							UUID.randomUUID(), ieId, t.getTaxRateId(), t.getTaxRate(),
-							t.getTaxAmount(), dto.getCreatedBy(), t.getTaxRateAllocationId()
+							UUID.randomUUID(), ieId, t.getTaxRateId(),
+							t.getTaxRate() == null ? BigDecimal.ZERO : t.getTaxRate(),
+							t.getTaxAmount() == null ? BigDecimal.ZERO : t.getTaxAmount(),
+							dto.getCreatedBy(), t.getTaxRateAllocationId(),
+							t.getTaxGroupId(), t.getCatalogTaxAssignmentId(), t.getMatchedLevelId(),
+							t.getTaxableAmount(), reason, t.getTaxExemptId(),
+							Boolean.TRUE.equals(t.isTaxInclusive())
 					});
 				}
 			}
@@ -825,11 +869,11 @@ public class TransactionDAOImpl implements TransactionDAO {
 	private static final String SQL = """
 			WITH RECURSIVE ancestors AS (
 			    SELECT l.level_id, l.parent_level_id, 0 AS depth
-			    FROM location.levels l
+			    FROM locations.levels l
 			    WHERE l.level_id = ?
 			    UNION ALL
 			    SELECT p.level_id, p.parent_level_id, a.depth + 1
-			    FROM location.levels p
+			    FROM locations.levels p
 			    JOIN ancestors a
 			      ON a.parent_level_id = p.level_id
 			),
@@ -845,7 +889,23 @@ public class TransactionDAOImpl implements TransactionDAO {
 			    i.item_description,
 			    pi.item_quantity,
 			    eff_ip.price AS "itemPrice",
-			    i.tax_group_id,
+			    (
+			      SELECT cta.tax_group_id
+			      FROM finance.catalog_tax_assignment cta
+			      WHERE cta.application_id = i.application_id
+			        AND cta.item_group_id = i.item_group_id
+			        AND (cta.item_category_id IS NULL OR cta.item_category_id = i.item_category_id)
+			        AND (cta.level_id IS NULL OR cta.level_id IN (SELECT level_id FROM ancestors))
+			        AND COALESCE(cta.is_active, true) = true
+			        AND (cta.valid_from IS NULL OR cta.valid_from <= CURRENT_DATE)
+			        AND (cta.valid_to IS NULL OR cta.valid_to >= CURRENT_DATE)
+			      ORDER BY
+			        CASE WHEN cta.item_category_id IS NOT NULL THEN 0 ELSE 1 END,
+			        CASE WHEN cta.level_id IS NOT NULL THEN 0 ELSE 1 END,
+			        COALESCE((SELECT a.depth FROM ancestors a WHERE a.level_id = cta.level_id), 2147483647) ASC,
+			        cta.priority ASC
+			      LIMIT 1
+			    ) AS tax_group_id,
 			    eff_pp.price,
 			    NULL::boolean AS is_continuous,
 			    NULL::integer AS recurrence_count,
@@ -1020,6 +1080,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 			dto.setTotalAmount(rs.getBigDecimal("total_amount"));
 			dto.setLevelId((UUID) rs.getObject("level_id"));
 			dto.setClientAgreementId((UUID) rs.getObject("client_agreement_id"));
+			dto.setCurrencyCode(rs.getString("currency_code"));
 			return dto;
 		}
 	};
@@ -1059,7 +1120,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 		if (taxGroupId == null || levelId == null) {
 			return Collections.emptyList();
 		}
-		return cluboneJdbcTemplate.query(TAX_RATE_SQL, TAX_RATE_ROW_MAPPER, taxGroupId, levelId);
+		return cluboneJdbcTemplate.query(TAX_RATE_SQL, TAX_RATE_ROW_MAPPER, levelId, taxGroupId);
 	}
 
 	@Override
@@ -1197,33 +1258,41 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 	@Override
 	public UUID findTaxGroupIdForItem(UUID itemId, UUID levelId) {
-		// Look for item_price scoped to given level
+		// CTA-only hard cutover (no item.tax_group_id)
 		final String sql = """
-				    SELECT i.tax_group_id
-				    FROM items.item_price ip
-				    JOIN items.item_version iv on iv.item_version_id=ip.item_version_id
-				    JOIN items.item i ON i.item_id = iv.item_id
-				    WHERE i.item_id = ?
-				      AND ip.level_id = ?
-				      AND COALESCE(ip.is_active, true) = true
-				      AND (ip.start_at_local IS NULL OR ip.start_at_local <= now())
-				      AND (ip.end_at_local IS NULL OR ip.end_at_local >= now())
-				    ORDER BY ip.created_on DESC
-				    LIMIT 1
+				WITH RECURSIVE level_path AS (
+				  SELECT l.level_id, 0 AS depth
+				  FROM locations.levels l
+				  WHERE l.level_id = COALESCE(
+				    (SELECT x.level_id FROM locations.levels x WHERE x.reference_entity_id = ? LIMIT 1),
+				    ?
+				  )
+				  UNION ALL
+				  SELECT par.level_id, lp.depth + 1
+				  FROM level_path lp
+				  JOIN locations.levels cur ON cur.level_id = lp.level_id
+				  JOIN locations.levels par ON par.level_id = cur.parent_level_id
+				)
+				SELECT cta.tax_group_id
+				FROM items.item i
+				JOIN finance.catalog_tax_assignment cta
+				  ON cta.application_id = i.application_id
+				 AND cta.item_group_id = i.item_group_id
+				 AND (cta.item_category_id IS NULL OR cta.item_category_id = i.item_category_id)
+				 AND (cta.level_id IS NULL OR cta.level_id IN (SELECT level_id FROM level_path))
+				 AND COALESCE(cta.is_active, true) = true
+				 AND (cta.valid_from IS NULL OR cta.valid_from <= CURRENT_DATE)
+				 AND (cta.valid_to IS NULL OR cta.valid_to >= CURRENT_DATE)
+				WHERE i.item_id = ?
+				ORDER BY
+				  CASE WHEN cta.item_category_id IS NOT NULL THEN 0 ELSE 1 END,
+				  CASE WHEN cta.level_id IS NOT NULL THEN 0 ELSE 1 END,
+				  COALESCE((SELECT lp.depth FROM level_path lp WHERE lp.level_id = cta.level_id), 2147483647) ASC,
+				  cta.priority ASC
+				LIMIT 1
 				""";
 
-		UUID tg = firstUuid(sql, itemId, levelId);
-		if (tg != null)
-			return tg;
-
-		// fallback: no level-specific row, get default item.tax_group_id
-		final String fallback = """
-				    SELECT i.tax_group_id
-				    FROM items.item i
-				    WHERE i.item_id = ?
-				    LIMIT 1
-				""";
-		return firstUuid(fallback, itemId);
+		return firstUuid(sql, levelId, levelId, itemId);
 	}
 
 	private UUID firstUuid(String sql, Object... params) {

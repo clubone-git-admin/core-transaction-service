@@ -16,4 +16,13 @@ public class InvoiceEntityTaxDTO {
 	private String taxAuthority;
 	/** From finance.tax_rate_allocation; null for POS-only tax if not resolved on read. */
 	private UUID taxRateAllocationId;
+
+	/** Enterprise tax determination snapshot fields */
+	private UUID taxGroupId;
+	private UUID catalogTaxAssignmentId;
+	private UUID matchedLevelId;
+	private BigDecimal taxableAmount;
+	private String resolutionReason;
+	private UUID taxExemptId;
+	private boolean taxInclusive;
 }

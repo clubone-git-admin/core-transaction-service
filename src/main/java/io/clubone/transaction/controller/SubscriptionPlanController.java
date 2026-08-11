@@ -10,6 +10,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -17,6 +18,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import io.clubone.transaction.helper.SubscriptionPlanHelper;
 import io.clubone.transaction.request.BillingQuoteFinalizeSpec;
+import io.clubone.transaction.request.ReplacePlanPaymentMethodRequest;
 import io.clubone.transaction.request.SubscriptionPlanBatchCreateRequest;
 import io.clubone.transaction.request.SubscriptionPlanCreateRequest;
 import io.clubone.transaction.response.BillingQuoteLineItemsResponse;
@@ -24,6 +26,7 @@ import io.clubone.transaction.response.SubscriptionPlanBatchCreateResponse;
 import io.clubone.transaction.response.SubscriptionPlanCreateResponse;
 import io.clubone.transaction.security.AccessContext;
 import io.clubone.transaction.service.SubscriptionPlanService;
+import io.clubone.transaction.subscription.billing.dto.SimpleActionResponse;
 import io.clubone.transaction.v2.vo.InvoiceDetailDTO;
 import io.clubone.transaction.v2.vo.SubscriptionPlanSummaryDTO;
 import jakarta.validation.Valid;
@@ -89,5 +92,28 @@ public class SubscriptionPlanController {
 
 		List<SubscriptionPlanSummaryDTO> list = service.getClientSubscriptionPlans(clientRoleId);
 		return ResponseEntity.ok(list);
+	}
+
+	/**
+	 * Soft-cancels one plan and deactivates its 1:1 gateway mandate (other plans sharing the card are untouched).
+	 */
+	@PostMapping("/{subscriptionPlanId}/cancel")
+	@PreAuthorize("@perm.canOperatePos()")
+	public ResponseEntity<SimpleActionResponse> cancelPlan(@PathVariable UUID subscriptionPlanId) {
+		UUID modifiedBy = AccessContext.actorApplicationUserId();
+		return ResponseEntity.ok(service.cancelPlan(subscriptionPlanId, modifiedBy));
+	}
+
+	/**
+	 * Replaces the card on this plan only and rebinds that plan's mandate from the new CPM seed.
+	 */
+	@PutMapping("/{subscriptionPlanId}/payment-method")
+	@PreAuthorize("@perm.canOperatePos()")
+	public ResponseEntity<SimpleActionResponse> replacePaymentMethod(@PathVariable UUID subscriptionPlanId,
+			@Valid @RequestBody ReplacePlanPaymentMethodRequest request) {
+		UUID modifiedBy = request.getModifiedBy() != null
+				? request.getModifiedBy()
+				: AccessContext.actorApplicationUserId();
+		return ResponseEntity.ok(service.replacePaymentMethod(subscriptionPlanId, request, modifiedBy));
 	}
 }

@@ -957,4 +957,35 @@ public class SubscriptionPlanDaoImpl implements SubscriptionPlanDao {
 	    }
 	}
 
+	@Override
+	public int deactivatePlan(UUID subscriptionPlanId, UUID modifiedBy) {
+		if (subscriptionPlanId == null) {
+			return 0;
+		}
+		return cluboneJdbcTemplate.update("""
+				UPDATE client_subscription_billing.subscription_plan
+				SET is_active = false,
+				    modified_on = NOW(),
+				    modified_by = ?
+				WHERE subscription_plan_id = ?
+				  AND application_id = ?
+				  AND COALESCE(is_active, true)
+				""", modifiedBy, subscriptionPlanId, AccessContext.applicationId());
+	}
+
+	@Override
+	public int updateClientPaymentMethodId(UUID subscriptionPlanId, UUID clientPaymentMethodId, UUID modifiedBy) {
+		if (subscriptionPlanId == null || clientPaymentMethodId == null) {
+			return 0;
+		}
+		return cluboneJdbcTemplate.update("""
+				UPDATE client_subscription_billing.subscription_plan
+				SET client_payment_method_id = ?,
+				    modified_on = NOW(),
+				    modified_by = ?
+				WHERE subscription_plan_id = ?
+				  AND application_id = ?
+				""", clientPaymentMethodId, modifiedBy, subscriptionPlanId, AccessContext.applicationId());
+	}
+
 }
