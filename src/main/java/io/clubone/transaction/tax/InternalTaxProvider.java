@@ -104,7 +104,10 @@ public class InternalTaxProvider implements TaxProvider {
 				WITH RECURSIVE level_path AS (
 				  SELECT l.level_id, 0 AS depth
 				  FROM locations.levels l
-				  WHERE l.level_id = :levelId
+				  WHERE l.level_id = COALESCE(
+				    (SELECT x.level_id FROM locations.levels x WHERE x.reference_entity_id = :levelId LIMIT 1),
+				    :levelId
+				  )
 				  UNION ALL
 				  SELECT par.level_id, lp.depth + 1
 				  FROM level_path lp
@@ -132,6 +135,7 @@ public class InternalTaxProvider implements TaxProvider {
 				  ORDER BY
 				    CASE WHEN cta.item_category_id IS NOT NULL THEN 0 ELSE 1 END,
 				    CASE WHEN cta.level_id IS NOT NULL THEN 0 ELSE 1 END,
+				    COALESCE((SELECT lp.depth FROM level_path lp WHERE lp.level_id = cta.level_id), 2147483647) ASC,
 				    cta.priority ASC
 				  LIMIT 1
 				),

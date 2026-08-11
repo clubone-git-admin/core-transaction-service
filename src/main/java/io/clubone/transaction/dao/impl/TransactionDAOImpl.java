@@ -101,11 +101,11 @@ public class TransactionDAOImpl implements TransactionDAO {
 	private static final String ITEM_PRICE_SQL = """
 						WITH RECURSIVE ancestors AS (
 			  SELECT l.level_id, l.parent_level_id, 0 AS depth
-			  FROM location.levels l
+			  FROM locations.levels l
 			  WHERE l.level_id = ?
 			  UNION ALL
 			  SELECT p.level_id, p.parent_level_id, a.depth + 1
-			  FROM location.levels p
+			  FROM locations.levels p
 			  JOIN ancestors a ON a.parent_level_id = p.level_id
 			),
 			level_candidates AS (
@@ -129,6 +129,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 			    ORDER BY
 			      CASE WHEN cta.item_category_id IS NOT NULL THEN 0 ELSE 1 END,
 			      CASE WHEN cta.level_id IS NOT NULL THEN 0 ELSE 1 END,
+			      COALESCE((SELECT a.depth FROM ancestors a WHERE a.level_id = cta.level_id), 2147483647) ASC,
 			      cta.priority ASC
 			    LIMIT 1
 			  ) AS tax_group_id,
@@ -733,11 +734,11 @@ public class TransactionDAOImpl implements TransactionDAO {
 	private static final String SQL = """
 			WITH RECURSIVE ancestors AS (
 			    SELECT l.level_id, l.parent_level_id, 0 AS depth
-			    FROM location.levels l
+			    FROM locations.levels l
 			    WHERE l.level_id = ?
 			    UNION ALL
 			    SELECT p.level_id, p.parent_level_id, a.depth + 1
-			    FROM location.levels p
+			    FROM locations.levels p
 			    JOIN ancestors a
 			      ON a.parent_level_id = p.level_id
 			),
@@ -766,6 +767,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 			      ORDER BY
 			        CASE WHEN cta.item_category_id IS NOT NULL THEN 0 ELSE 1 END,
 			        CASE WHEN cta.level_id IS NOT NULL THEN 0 ELSE 1 END,
+			        COALESCE((SELECT a.depth FROM ancestors a WHERE a.level_id = cta.level_id), 2147483647) ASC,
 			        cta.priority ASC
 			      LIMIT 1
 			    ) AS tax_group_id,
@@ -1126,7 +1128,10 @@ public class TransactionDAOImpl implements TransactionDAO {
 				WITH RECURSIVE level_path AS (
 				  SELECT l.level_id, 0 AS depth
 				  FROM locations.levels l
-				  WHERE l.level_id = ?
+				  WHERE l.level_id = COALESCE(
+				    (SELECT x.level_id FROM locations.levels x WHERE x.reference_entity_id = ? LIMIT 1),
+				    ?
+				  )
 				  UNION ALL
 				  SELECT par.level_id, lp.depth + 1
 				  FROM level_path lp
@@ -1147,11 +1152,12 @@ public class TransactionDAOImpl implements TransactionDAO {
 				ORDER BY
 				  CASE WHEN cta.item_category_id IS NOT NULL THEN 0 ELSE 1 END,
 				  CASE WHEN cta.level_id IS NOT NULL THEN 0 ELSE 1 END,
+				  COALESCE((SELECT lp.depth FROM level_path lp WHERE lp.level_id = cta.level_id), 2147483647) ASC,
 				  cta.priority ASC
 				LIMIT 1
 				""";
 
-		return firstUuid(sql, levelId, itemId);
+		return firstUuid(sql, levelId, levelId, itemId);
 	}
 
 	private UUID firstUuid(String sql, Object... params) {
