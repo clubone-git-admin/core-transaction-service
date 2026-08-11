@@ -112,7 +112,7 @@ public class InternalTaxProvider implements TaxProvider {
 				  JOIN locations.levels par ON par.level_id = cur.parent_level_id
 				),
 				item AS (
-				  SELECT i.item_id, i.application_id, i.item_group_id, i.item_category_id, i.tax_group_id
+				  SELECT i.item_id, i.application_id, i.item_group_id, i.item_category_id
 				  FROM items.item i
 				  WHERE i.item_id = :itemId
 				  LIMIT 1
@@ -135,17 +135,11 @@ public class InternalTaxProvider implements TaxProvider {
 				    cta.priority ASC
 				  LIMIT 1
 				),
-				fallback AS (
-				  SELECT i.tax_group_id, COALESCE(tg.is_tax_inclusive, false) AS is_tax_inclusive
-				  FROM item i
-				  LEFT JOIN finance.tax_group tg ON tg.tax_group_id = i.tax_group_id
-				  WHERE i.tax_group_id IS NOT NULL
-				),
 				chosen_rate AS (
 				  SELECT tr.tax_rate_id, tr.level_id AS matched_level_id, lp.depth
 				  FROM finance.tax_rate tr
 				  JOIN level_path lp ON lp.level_id = tr.level_id
-				  WHERE tr.tax_group_id = COALESCE((SELECT tax_group_id FROM cta), (SELECT tax_group_id FROM fallback))
+				  WHERE tr.tax_group_id = (SELECT tax_group_id FROM cta)
 				    AND COALESCE(tr.is_active, true) = true
 				    AND (tr.start_date IS NULL OR tr.start_date <= :asOf)
 				    AND (tr.end_date IS NULL OR tr.end_date >= :asOf)
@@ -153,11 +147,10 @@ public class InternalTaxProvider implements TaxProvider {
 				  LIMIT 1
 				)
 				SELECT
-				  COALESCE((SELECT tax_group_id FROM cta), (SELECT tax_group_id FROM fallback)) AS tax_group_id,
+				  (SELECT tax_group_id FROM cta) AS tax_group_id,
 				  (SELECT catalog_tax_assignment_id FROM cta) AS catalog_tax_assignment_id,
-				  COALESCE((SELECT is_tax_inclusive FROM cta), (SELECT is_tax_inclusive FROM fallback), false) AS is_tax_inclusive,
+				  COALESCE((SELECT is_tax_inclusive FROM cta), false) AS is_tax_inclusive,
 				  CASE WHEN EXISTS (SELECT 1 FROM cta) THEN 'CATALOG_ASSIGNMENT'
-				       WHEN EXISTS (SELECT 1 FROM fallback) THEN 'ITEM_TAX_GROUP_FALLBACK'
 				       ELSE 'NO_RATE' END AS reason,
 				  (SELECT matched_level_id FROM chosen_rate) AS matched_level_id,
 				  (SELECT tax_rate_id FROM chosen_rate) AS tax_rate_id

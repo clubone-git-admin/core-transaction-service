@@ -116,7 +116,22 @@ public class TransactionDAOImpl implements TransactionDAO {
 			SELECT
 			  i.item_description,
 			  eff_ip.price AS "itemPrice",
-			  i.tax_group_id,
+			  (
+			    SELECT cta.tax_group_id
+			    FROM finance.catalog_tax_assignment cta
+			    WHERE cta.application_id = i.application_id
+			      AND cta.item_group_id = i.item_group_id
+			      AND (cta.item_category_id IS NULL OR cta.item_category_id = i.item_category_id)
+			      AND (cta.level_id IS NULL OR cta.level_id IN (SELECT level_id FROM ancestors))
+			      AND COALESCE(cta.is_active, true) = true
+			      AND (cta.valid_from IS NULL OR cta.valid_from <= CURRENT_DATE)
+			      AND (cta.valid_to IS NULL OR cta.valid_to >= CURRENT_DATE)
+			    ORDER BY
+			      CASE WHEN cta.item_category_id IS NOT NULL THEN 0 ELSE 1 END,
+			      CASE WHEN cta.level_id IS NOT NULL THEN 0 ELSE 1 END,
+			      cta.priority ASC
+			    LIMIT 1
+			  ) AS tax_group_id,
 			  eff_ip.price_level_id
 			FROM items.item i
 			JOIN LATERAL (
@@ -738,7 +753,22 @@ public class TransactionDAOImpl implements TransactionDAO {
 			    i.item_description,
 			    pi.item_quantity,
 			    eff_ip.price AS "itemPrice",
-			    i.tax_group_id,
+			    (
+			      SELECT cta.tax_group_id
+			      FROM finance.catalog_tax_assignment cta
+			      WHERE cta.application_id = i.application_id
+			        AND cta.item_group_id = i.item_group_id
+			        AND (cta.item_category_id IS NULL OR cta.item_category_id = i.item_category_id)
+			        AND (cta.level_id IS NULL OR cta.level_id IN (SELECT level_id FROM ancestors))
+			        AND COALESCE(cta.is_active, true) = true
+			        AND (cta.valid_from IS NULL OR cta.valid_from <= CURRENT_DATE)
+			        AND (cta.valid_to IS NULL OR cta.valid_to >= CURRENT_DATE)
+			      ORDER BY
+			        CASE WHEN cta.item_category_id IS NOT NULL THEN 0 ELSE 1 END,
+			        CASE WHEN cta.level_id IS NOT NULL THEN 0 ELSE 1 END,
+			        cta.priority ASC
+			      LIMIT 1
+			    ) AS tax_group_id,
 			    eff_pp.price,
 			    NULL::boolean AS is_continuous,
 			    NULL::integer AS recurrence_count,
@@ -1091,7 +1121,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 	@Override
 	public UUID findTaxGroupIdForItem(UUID itemId, UUID levelId) {
-		// Prefer catalog tax assignment (Item Group → Item Category) over legacy item.tax_group_id
+		// CTA-only hard cutover (no item.tax_group_id)
 		final String sql = """
 				WITH RECURSIVE level_path AS (
 				  SELECT l.level_id, 0 AS depth
@@ -1121,18 +1151,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 				LIMIT 1
 				""";
 
-		UUID tg = firstUuid(sql, levelId, itemId);
-		if (tg != null)
-			return tg;
-
-		// Transitional fallback: legacy item.tax_group_id while assignments are being configured
-		final String fallback = """
-				    SELECT i.tax_group_id
-				    FROM items.item i
-				    WHERE i.item_id = ?
-				    LIMIT 1
-				""";
-		return firstUuid(fallback, itemId);
+		return firstUuid(sql, levelId, itemId);
 	}
 
 	private UUID firstUuid(String sql, Object... params) {
