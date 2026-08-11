@@ -1978,7 +1978,16 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			tx.setTaxRateId(it.getTaxRateId());
 			tx.setTaxRateAllocationId(it.getTaxRateAllocationId());
 			tx.setResolutionReason(io.clubone.transaction.tax.TaxDeterminationResult.Reason.CLIENT_PROVIDED.name());
-			tx.setTaxableAmount(TaxMathSafeBase(line));
+			boolean inclusive = resolveClientProvidedTaxInclusive(it);
+			tx.setTaxInclusive(inclusive);
+			BigDecimal grossBase = TaxMathSafeBase(line);
+			if (inclusive) {
+				// Price is VAT-inclusive gross; taxable base is net of embedded tax.
+				BigDecimal taxable = grossBase.subtract(amt);
+				tx.setTaxableAmount(taxable.compareTo(BigDecimal.ZERO) < 0 ? BigDecimal.ZERO : scale2(taxable));
+			} else {
+				tx.setTaxableAmount(grossBase);
+			}
 			line.setTaxes(List.of(tx));
 			return;
 		}
@@ -2047,6 +2056,41 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		BigDecimal gross = nz(line.getUnitPrice()).multiply(qty);
 		BigDecimal base = gross.subtract(nz(line.getDiscountAmount()));
 		return base.compareTo(BigDecimal.ZERO) < 0 ? BigDecimal.ZERO : scale2(base);
+	}
+
+	/**
+	 * Prefer explicit request flag; else look up finance.tax_group.is_tax_inclusive via tax_rate_id
+	 * (UK VAT is inclusive — without this, CLIENT_PROVIDED tax double-counts on invoice total).
+	 */
+	private boolean resolveClientProvidedTaxInclusive(Item it) {
+		if (it == null) {
+			return false;
+		}
+		if (Boolean.TRUE.equals(it.getTaxInclusive())) {
+			return true;
+		}
+		if (Boolean.FALSE.equals(it.getTaxInclusive())) {
+			return false;
+		}
+		UUID taxRateId = it.getTaxRateId();
+		if (taxRateId == null) {
+			return false;
+		}
+		try {
+			Boolean flagged = jdbc.query("""
+					SELECT COALESCE(tg.is_tax_inclusive, FALSE)
+					  FROM finance.tax_rate tr
+					  JOIN finance.tax_group tg ON tg.tax_group_id = tr.tax_group_id
+					 WHERE tr.tax_rate_id = :taxRateId
+					 LIMIT 1
+					""",
+					new MapSqlParameterSource("taxRateId", taxRateId),
+					rs -> rs.next() ? rs.getBoolean(1) : null);
+			return Boolean.TRUE.equals(flagged);
+		} catch (Exception ex) {
+			log.warn("Could not resolve taxInclusive for taxRateId={}: {}", taxRateId, ex.getMessage());
+			return false;
+		}
 	}
 
 	private static void finalizeLeaf(InvoiceEntityDTO line) {

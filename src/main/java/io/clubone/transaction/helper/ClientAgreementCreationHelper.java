@@ -260,12 +260,12 @@ public class ClientAgreementCreationHelper {
                       JOIN agreements.agreement ag ON ag.agreement_id = av.agreement_id
                      WHERE av.agreement_id = :agreementId
                        AND av.is_active = TRUE
-                       AND (:requestedAgreementVersionId IS NULL
-                            OR av.agreement_version_id = :requestedAgreementVersionId)
+                       AND (CAST(:requestedAgreementVersionId AS uuid) IS NULL
+                            OR av.agreement_version_id = CAST(:requestedAgreementVersionId AS uuid))
                        AND CAST(av.valid_from AS date) <= CAST(:asOf AS date)
                        AND (av.valid_to IS NULL OR CAST(av.valid_to AS date) >= CAST(:asOf AS date))
                      ORDER BY
-                       CASE WHEN av.agreement_version_id = :requestedAgreementVersionId THEN 0 ELSE 1 END,
+                       CASE WHEN av.agreement_version_id = CAST(:requestedAgreementVersionId AS uuid) THEN 0 ELSE 1 END,
                        CASE WHEN ag.current_version_id = av.agreement_version_id THEN 0 ELSE 1 END,
                        av.valid_from DESC
                      LIMIT 1
@@ -286,7 +286,7 @@ public class ClientAgreementCreationHelper {
                      ORDER BY
                        lp.depth ASC,
                        CASE
-                         WHEN :availabilityTypeCode IS NULL THEN 0
+                         WHEN CAST(:availabilityTypeCode AS text) = '' THEN 0
                          WHEN UPPER(COALESCE(avail_t.code, '')) = UPPER(CAST(:availabilityTypeCode AS text)) THEN 0
                          ELSE 1
                        END ASC,
@@ -318,9 +318,14 @@ public class ClientAgreementCreationHelper {
         MapSqlParameterSource params = new MapSqlParameterSource()
                 .addValue("agreementId", agreementId)
                 .addValue("levelRefOrId", levelReferenceOrId)
-                .addValue("requestedAgreementVersionId", requestedAgreementVersionId)
-                .addValue("asOf", asOf)
-                .addValue("availabilityTypeCode", avail);
+                // Bind UUID/date/text with explicit JDBC types so PG can type repeated prepared params
+                // (bare "? IS NULL" / untyped nulls cause: could not determine data type of parameter $n).
+                .addValue(
+                        "requestedAgreementVersionId",
+                        requestedAgreementVersionId == null ? null : requestedAgreementVersionId.toString(),
+                        java.sql.Types.VARCHAR)
+                .addValue("asOf", java.sql.Date.valueOf(asOf), java.sql.Types.DATE)
+                .addValue("availabilityTypeCode", avail == null ? "" : avail, java.sql.Types.VARCHAR);
 
         try {
             AgreementMeta meta = namedJdbc.queryForObject(sql, params, new AgreementMetaRowMapper());

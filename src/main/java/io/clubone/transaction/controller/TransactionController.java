@@ -99,10 +99,12 @@ public class TransactionController {
             @RequestBody FinalizeTransactionRequest request) {
         FinalizeTransactionResponse response = transactionService.finalizeTransactionV3(
                 request, actorId, locationId, applicationId);
-        if (StringUtils.isEmpty(response.getMessage()))
-            return ResponseEntity.ok(response);
-        else
+        // Success (PAID / PARTIALLY_PAID / etc.) must be 2xx. Only true payment failures
+        // use invoiceStatus=UNPAID with a message — those stay 400.
+        if ("UNPAID".equalsIgnoreCase(StringUtils.trimToEmpty(response.getInvoiceStatus()))) {
             return ResponseEntity.badRequest().body(response);
+        }
+        return ResponseEntity.ok(response);
     }
 
     @GetMapping("v3/invoices/{invoiceId}/receipt")

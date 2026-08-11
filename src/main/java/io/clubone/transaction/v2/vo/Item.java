@@ -33,6 +33,11 @@ public class Item {
 	private BigDecimal taxAmount;
 	private BigDecimal taxPct;
 	/**
+	 * When client provides {@link #taxAmount}, tells invoice math whether {@link #price}
+	 * already embeds tax (UK VAT) so total is not base+tax again.
+	 */
+	private Boolean taxInclusive;
+	/**
 	 * When set together with {@link #taxRateAllocationId} and {@link #taxAmount}, a row is written to
 	 * {@code transactions.invoice_entity_tax} (finance-backed audit). Load from your tax/catalog API.
 	 */
