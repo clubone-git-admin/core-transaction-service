@@ -7,6 +7,7 @@ import lombok.Data;
 @Data
 public class FinalizeTransactionResponse {
     private UUID invoiceId;
+    private String invoiceStatus;
     private String status;
     private UUID clientPaymentTransactionId;
     private UUID transactionId;
