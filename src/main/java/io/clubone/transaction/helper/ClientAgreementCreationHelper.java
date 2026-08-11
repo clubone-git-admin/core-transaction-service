@@ -224,75 +224,94 @@ public class ClientAgreementCreationHelper {
         }
 
         String sql = """
-            WITH RECURSIVE sale_lvl AS (
-                SELECT l.level_id, l.parent_level_id, l.reference_entity_id, 0 AS depth
-                FROM locations.levels l
-                WHERE l.reference_entity_id = :levelRefOrId
-                   OR l.level_id = :levelRefOrId
-                LIMIT 1
+            WITH RECURSIVE loc_anchor AS (
+                SELECT COALESCE(
+                    (SELECT l.level_id
+                       FROM locations.levels l
+                      WHERE l.reference_entity_id = :levelRefOrId
+                      LIMIT 1),
+                    (SELECT l2.level_id
+                       FROM locations.levels l2
+                      WHERE l2.level_id = :levelRefOrId
+                      LIMIT 1)
+                ) AS level_id
             ),
             level_path AS (
-                SELECT level_id, parent_level_id, reference_entity_id, depth
-                FROM sale_lvl
+                SELECT la.level_id, 0 AS depth
+                  FROM loc_anchor la
+                 WHERE la.level_id IS NOT NULL
                 UNION ALL
-                SELECT p.level_id, p.parent_level_id, p.reference_entity_id, lp.depth + 1
-                FROM locations.levels p
-                JOIN level_path lp ON lp.parent_level_id = p.level_id
-                WHERE lp.depth < 32
+                SELECT par.level_id, lp.depth + 1
+                  FROM level_path lp
+                  JOIN locations.levels cur ON cur.level_id = lp.level_id
+                  JOIN locations.levels par ON par.level_id = cur.parent_level_id
+                 WHERE lp.depth < 32
+            ),
+            sale_lvl AS (
+                SELECT l.level_id, l.reference_entity_id
+                  FROM locations.levels l
+                  JOIN loc_anchor la ON la.level_id = l.level_id
             ),
             av_choice AS (
-                SELECT av.*
-                FROM agreements.agreement_version av
-                JOIN agreements.agreement ag ON ag.agreement_id = av.agreement_id
-                WHERE av.agreement_id = :agreementId
-                  AND av.is_active = TRUE
-                  AND (:requestedAgreementVersionId IS NULL OR av.agreement_version_id = :requestedAgreementVersionId)
-                  AND CAST(av.valid_from AS date) <= CAST(:asOf AS date)
-                  AND (av.valid_to IS NULL OR CAST(av.valid_to AS date) >= CAST(:asOf AS date))
-                ORDER BY
-                  (CASE WHEN av.agreement_version_id = :requestedAgreementVersionId THEN 1 ELSE 0 END) DESC,
-                  (CASE WHEN ag.current_version_id = av.agreement_version_id THEN 1 ELSE 0 END) DESC,
-                  av.valid_from DESC
-                LIMIT 1
+                SELECT x.*
+                  FROM (
+                    SELECT av.*
+                      FROM agreements.agreement_version av
+                      JOIN agreements.agreement ag ON ag.agreement_id = av.agreement_id
+                     WHERE av.agreement_id = :agreementId
+                       AND av.is_active = TRUE
+                       AND (:requestedAgreementVersionId IS NULL
+                            OR av.agreement_version_id = :requestedAgreementVersionId)
+                       AND CAST(av.valid_from AS date) <= CAST(:asOf AS date)
+                       AND (av.valid_to IS NULL OR CAST(av.valid_to AS date) >= CAST(:asOf AS date))
+                     ORDER BY
+                       CASE WHEN av.agreement_version_id = :requestedAgreementVersionId THEN 0 ELSE 1 END,
+                       CASE WHEN ag.current_version_id = av.agreement_version_id THEN 0 ELSE 1 END,
+                       av.valid_from DESC
+                     LIMIT 1
+                  ) x
             ),
             al_choice AS (
-                SELECT al.*
-                FROM agreements.agreement_location al
-                JOIN level_path lp ON lp.level_id = al.level_id
-                JOIN av_choice av ON av.agreement_version_id = al.agreement_version_id
-                LEFT JOIN agreements.lu_availability_type at
-                  ON at.availability_type_id = al.availability_type_id
-                WHERE al.is_active = TRUE
-                  AND CAST(al.start_date AS date) <= CAST(:asOf AS date)
-                  AND (al.end_date IS NULL OR CAST(al.end_date AS date) >= CAST(:asOf AS date))
-                ORDER BY
-                  lp.depth ASC,
-                  CASE
-                    WHEN :availabilityTypeCode IS NULL THEN 0
-                    WHEN UPPER(COALESCE(at.code, '')) = UPPER(:availabilityTypeCode) THEN 0
-                    ELSE 1
-                  END ASC,
-                  al.start_date DESC
-                LIMIT 1
+                SELECT x.*
+                  FROM (
+                    SELECT al.*
+                      FROM agreements.agreement_location al
+                      JOIN level_path lp ON lp.level_id = al.level_id
+                      JOIN av_choice av ON av.agreement_version_id = al.agreement_version_id
+                      LEFT JOIN agreements.lu_availability_type avail_t
+                        ON avail_t.availability_type_id = al.availability_type_id
+                     WHERE al.is_active = TRUE
+                       AND CAST(al.start_date AS date) <= CAST(:asOf AS date)
+                       AND (al.end_date IS NULL OR CAST(al.end_date AS date) >= CAST(:asOf AS date))
+                     ORDER BY
+                       lp.depth ASC,
+                       CASE
+                         WHEN :availabilityTypeCode IS NULL THEN 0
+                         WHEN UPPER(COALESCE(avail_t.code, '')) = UPPER(CAST(:availabilityTypeCode AS text)) THEN 0
+                         ELSE 1
+                       END ASC,
+                       al.start_date DESC
+                     LIMIT 1
+                  ) x
             )
             SELECT
                 a.agreement_id,
                 a.agreement_classification_id,
                 av_choice.agreement_version_id,
                 al_choice.agreement_location_id,
-                (SELECT level_id FROM sale_lvl) AS purchased_level_id,
+                sale_lvl.level_id AS purchased_level_id,
                 tz.timezone_code AS location_timezone,
-                at.duration_value AS term_duration_value,
+                aterm.duration_value AS term_duration_value,
                 ut.code AS term_duration_unit_code
             FROM agreements.agreement a
             JOIN av_choice ON av_choice.agreement_id = a.agreement_id
             JOIN al_choice ON al_choice.agreement_version_id = av_choice.agreement_version_id
-            JOIN sale_lvl ON true
+            JOIN sale_lvl ON 1 = 1
             LEFT JOIN locations.location loc ON loc.location_id = sale_lvl.reference_entity_id
             LEFT JOIN locations.lu_timezone tz ON tz.timezone_id = loc.timezone_id
                 AND COALESCE(tz.is_active, true) = true
-            LEFT JOIN agreements.agreement_term at ON at.agreement_term_id = a.agreement_term_id
-            LEFT JOIN agreements.lu_duration_unit_type ut ON ut.duration_unit_type_id = at.duration_unit_type_id
+            LEFT JOIN agreements.agreement_term aterm ON aterm.agreement_term_id = a.agreement_term_id
+            LEFT JOIN agreements.lu_duration_unit_type ut ON ut.duration_unit_type_id = aterm.duration_unit_type_id
             WHERE a.agreement_id = :agreementId
             """;
 
@@ -315,6 +334,19 @@ public class ClientAgreementCreationHelper {
                             ", levelRefOrId=" + levelReferenceOrId +
                             ", requestedAgreementVersionId=" + requestedAgreementVersionId +
                             ", asOf=" + asOf);
+        } catch (org.springframework.dao.DataAccessException ex) {
+            Throwable root = ex.getMostSpecificCause();
+            String rootMsg = root != null ? root.getMessage() : ex.getMessage();
+            logger.error(
+                    "Agreement metadata SQL failed agreementId={} levelRefOrId={} versionId={} asOf={}: {}",
+                    agreementId, levelReferenceOrId, requestedAgreementVersionId, asOf, rootMsg, ex);
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Unable to resolve agreement metadata for agreementId=" + agreementId +
+                            ", levelRefOrId=" + levelReferenceOrId +
+                            ", requestedAgreementVersionId=" + requestedAgreementVersionId +
+                            ", asOf=" + asOf +
+                            " (" + rootMsg + ")",
+                    ex);
         }
     }
 
