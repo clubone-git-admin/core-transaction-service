@@ -20,6 +20,7 @@ import io.clubone.transaction.v2.vo.PromotionEffectValueDTO;
 import io.clubone.transaction.vo.BundleComponent;
 import io.clubone.transaction.vo.BundleItemPriceDTO;
 import io.clubone.transaction.vo.EntityTypeDTO;
+import io.clubone.transaction.vo.GiftcardPurchaseLineRow;
 import io.clubone.transaction.vo.InvoiceDTO;
 import io.clubone.transaction.vo.InvoiceEntityDTO;
 import io.clubone.transaction.vo.InvoiceEntityRow;
@@ -178,4 +179,23 @@ public interface TransactionDAO {
 	);
 
 	List<InvoiceAdjustmentDetailDTO> findInvoiceAdjustments(UUID invoiceId);
+	List<GiftcardPurchaseLineRow> findGiftcardPurchaseLines(
+	        UUID invoiceId,
+	        UUID applicationId
+	);
+
+	boolean giftcardIssuanceOutboxExists(
+	        UUID invoiceId,
+	        UUID applicationId
+	);
+
+	UUID enqueueGiftcardIssuance(
+	        UUID invoiceId,
+	        UUID transactionId,
+	        UUID clientPaymentTransactionId,
+	        UUID purchaserClientRoleId,
+	        UUID purchaseLevelId,
+	        UUID applicationId,
+	        UUID actorId
+	);
 }

@@ -15,4 +15,5 @@ public class PaymentRequestDTO {
     private String paymentTypeCode;
     private UUID paymentGatewayCurrencyTypeId;   // e.g., "CASH"
     private UUID createdBy;
+    private UUID currencyId;
 }

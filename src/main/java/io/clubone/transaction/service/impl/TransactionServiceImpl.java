@@ -53,6 +53,7 @@ import io.clubone.transaction.billing.quote.BillingQuoteSubscriptionPersistenceS
 import io.clubone.transaction.util.DateUtils;
 import io.clubone.transaction.gl.model.GlPaymentCollectedPayload;
 import io.clubone.transaction.gl.service.GlPostingOutboxService;
+import io.clubone.transaction.giftcard.GiftcardIssuanceService;
 import io.clubone.transaction.integration.WebhookMembershipPurchasePublisher;
 import io.clubone.transaction.helper.SubscriptionPlanHelper;
 import io.clubone.transaction.inventory.FinalizedInvoiceInventoryEvent;
@@ -65,6 +66,7 @@ import io.clubone.transaction.request.TransactionLineItemRequest;
 import io.clubone.transaction.response.BillingQuoteLineItemsResponse;
 import io.clubone.transaction.response.CreateInvoiceResponse;
 import io.clubone.transaction.response.FinalizeTransactionResponse;
+import io.clubone.transaction.response.GiftcardIssuedDTO;
 import io.clubone.transaction.service.PaymentService;
 import io.clubone.transaction.service.TransactionService;
 import io.clubone.transaction.vo.BundleDTO;
@@ -128,6 +130,9 @@ public class TransactionServiceImpl implements TransactionService {
 
 	@Autowired
 	private LoadPressureGuard loadPressureGuard;
+
+	@Autowired
+	private GiftcardIssuanceService giftcardIssuanceService;
 
 	private final TransactionTemplate finalizePersistTx;
 
@@ -641,6 +646,39 @@ public class TransactionServiceImpl implements TransactionService {
 			payAmount = corporateSplitInvoice ? memberOutstandingBefore : invoiceTotal;
 		}
 
+		final boolean giftcardPurchaseInvoice = !transactionDAO
+				.findGiftcardPurchaseLines(req.getInvoiceId(), applicationId)
+				.isEmpty();
+
+		if (giftcardPurchaseInvoice && corporateSplitInvoice) {
+			logger.warn(
+					"[transactions/v3/finalize] step=giftcard_payment_validation "
+							+ "outcome=reject invoiceId={} reason=corporate_split_not_supported",
+					req.getInvoiceId());
+			return new FinalizeTransactionResponse(
+					req.getInvoiceId(),
+					"UNPAID",
+					null,
+					null,
+					"Gift Card purchase requires one full payment");
+		}
+
+		if (giftcardPurchaseInvoice
+				&& invoiceTotal.compareTo(BigDecimal.ZERO) > 0
+				&& payAmount.add(tolerance).compareTo(invoiceTotal) < 0) {
+			logger.warn(
+					"[transactions/v3/finalize] step=giftcard_payment_validation "
+							+ "outcome=reject invoiceId={} invoiceTotal={} payAmount={} "
+							+ "reason=partial_payment_not_supported",
+					req.getInvoiceId(), invoiceTotal, payAmount);
+			return new FinalizeTransactionResponse(
+					req.getInvoiceId(),
+					"UNPAID",
+					null,
+					null,
+					"Gift Card purchase requires one full payment");
+		}
+
 		if (invoiceTotal.compareTo(BigDecimal.ZERO) > 0 && payAmount.compareTo(BigDecimal.ZERO) <= 0) {
 			logger.warn(
 					"[transactions/v3/finalize] step=amount_validation outcome=reject invoiceId={} reason=non_positive_pay_amount invoiceTotal={} payAmount={}",
@@ -798,7 +836,19 @@ public class TransactionServiceImpl implements TransactionService {
 				responseStatusName = "PAID";
 			}
 
+			List<GiftcardIssuedDTO> issuedGiftcards = List.of();
+
 			if (purchaseCompleted) {
+				issuedGiftcards = giftcardIssuanceService.issueForPaidInvoice(
+						req.getInvoiceId(),
+						cptId,
+						applicationId,
+						actorId);
+
+				logger.info(
+						"[transactions/v3/finalize] step=giftcard_issuance invoiceId={} issuedCount={}",
+						req.getInvoiceId(), issuedGiftcards.size());
+
 				transactionDAO.activateAgreementAndClientStatusForInvoice(req.getInvoiceId(), req.getCreatedBy());
 
 				if (!deferInventoryUntilQuotePersistence) {
@@ -849,7 +899,12 @@ public class TransactionServiceImpl implements TransactionService {
 
 			enqueueGlPaymentCollected(req, cptId, transactionId, payAmountFinal);
 
-			return new FinalizePersistOutcome(transactionId, responseStatusName, purchaseCompleted, partial);
+			return new FinalizePersistOutcome(
+					transactionId,
+					responseStatusName,
+					purchaseCompleted,
+					partial,
+					issuedGiftcards);
 		}));
 
 		if (outcome == null) {
@@ -877,19 +932,22 @@ public class TransactionServiceImpl implements TransactionService {
 				req.getInvoiceId(), outcome.responseStatusName(), outcome.transactionId(), cptId,
 				outcome.partialPayment(), (System.nanoTime() - t0) / 1_000_000L);
 
-		return new FinalizeTransactionResponse(
+		FinalizeTransactionResponse response = new FinalizeTransactionResponse(
 				req.getInvoiceId(),
 				outcome.responseStatusName(),
 				cptId,
 				outcome.transactionId(),
 				responseMessage);
+		response.setIssuedGiftcards(outcome.issuedGiftcards());
+		return response;
 	}
 
 	private record FinalizePersistOutcome(
 			UUID transactionId,
 			String responseStatusName,
 			boolean purchaseCompleted,
-			boolean partialPayment) {
+			boolean partialPayment,
+			List<GiftcardIssuedDTO> issuedGiftcards) {
 	}
 
 

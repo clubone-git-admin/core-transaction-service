@@ -31,7 +31,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-
+import io.clubone.transaction.vo.GiftcardPurchaseLineRow;
 import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.security.AccessContext;
 import io.clubone.transaction.util.FrequencyUnit;
@@ -247,6 +247,70 @@ public class TransactionDAOImpl implements TransactionDAO {
 			LIMIT ?
 			OFFSET ?
 			""";
+	
+	private static final String GIFTCARD_PURCHASE_LINES_SQL = """
+	        SELECT
+	            ie.invoice_entity_id,
+	            ie.invoice_id,
+	            inv.application_id,
+	            ie.entity_id AS item_id,
+	            ie.entity_version_id AS item_version_id,
+	            cg.cfg_giftcard_id,
+	            cg.giftcard_type_id,
+	            COALESCE(ie.quantity, 1) AS quantity,
+	            ie.unit_price AS face_value,
+	            COALESCE(ie.discount_amount, 0) AS discount_amount,
+	            COALESCE(ie.tax_amount, 0) AS tax_amount,
+	            COALESCE(ie.total_amount, 0) AS line_total,
+	            inv.currency_code,
+	            inv.client_role_id AS purchaser_client_role_id,
+	            inv.level_id AS purchase_level_id,
+	            cg.activation_mode_code,
+	            cg.valid_for_value,
+	            du.code AS valid_for_unit_code,
+	            cg.restrict_to_buyer,
+	            cg.is_reloadable,
+	            cg.allow_partial_redemption,
+	            cg.allow_split_tender,
+	            cg.allow_recurring_payment,
+	            cg.allow_giftcard_purchase,
+	            cg.allow_tax,
+	            cg.allow_fees,
+	            cg.allow_tips,
+	            cg.allow_cash_out,
+	            cg.location_mode_code,
+	            cg.max_balance_minor
+	        FROM transactions.invoice inv
+	        JOIN transactions.invoice_entity ie
+	          ON ie.invoice_id = inv.invoice_id
+	         AND ie.application_id = inv.application_id
+	         AND ie.is_active = TRUE
+	        JOIN transactions.lu_entity_type et
+	          ON et.entity_type_id = ie.entity_type_id
+	         AND COALESCE(et.is_active, TRUE) = TRUE
+	         AND UPPER(TRIM(et.entity_type)) = 'ITEM'
+	        JOIN items.item item_master
+	          ON item_master.item_id = ie.entity_id
+	         AND item_master.application_id = inv.application_id
+	         AND item_master.is_active = TRUE
+	        JOIN items.lu_item_group item_group
+	          ON item_group.item_group_id = item_master.item_group_id
+	         AND item_group.application_id = inv.application_id
+	         AND item_group.is_active = TRUE
+	         AND UPPER(TRIM(item_group.code)) = 'GIFTCARD'
+	        JOIN items.cfg_giftcard cg
+	          ON cg.item_version_id = ie.entity_version_id
+	         AND cg.application_id = inv.application_id
+	         AND cg.is_active = TRUE
+	        LEFT JOIN items.lu_duration_unit du
+	          ON du.duration_unit_id = cg.valid_for_unit_id
+	         AND du.application_id = cg.application_id
+	         AND du.is_active = TRUE
+	        WHERE inv.invoice_id = ?
+	          AND inv.application_id = ?
+	          AND inv.is_active = TRUE
+	        ORDER BY ie.invoice_entity_id
+	        """;
 
 	@Override
 	public UUID saveInvoice(InvoiceDTO dto) {
@@ -429,6 +493,77 @@ public class TransactionDAOImpl implements TransactionDAO {
 		saveInvoiceEntityPromotions(dto.getLineItems(), dto.getCreatedBy());
 		return invoiceId;
 	}
+	
+	private static final RowMapper<GiftcardPurchaseLineRow>
+    GIFTCARD_PURCHASE_LINE_ROW_MAPPER = (rs, rowNum) ->
+    new GiftcardPurchaseLineRow(
+            rs.getObject("invoice_entity_id", UUID.class),
+            rs.getObject("invoice_id", UUID.class),
+            rs.getObject("application_id", UUID.class),
+            rs.getObject("item_id", UUID.class),
+            rs.getObject("item_version_id", UUID.class),
+            rs.getObject("cfg_giftcard_id", UUID.class),
+            rs.getObject("giftcard_type_id", UUID.class),
+            rs.getInt("quantity"),
+            rs.getBigDecimal("face_value"),
+            rs.getBigDecimal("discount_amount"),
+            rs.getBigDecimal("tax_amount"),
+            rs.getBigDecimal("line_total"),
+            rs.getString("currency_code"),
+            rs.getObject("purchaser_client_role_id", UUID.class),
+            rs.getObject("purchase_level_id", UUID.class),
+            rs.getString("activation_mode_code"),
+            (Integer) rs.getObject("valid_for_value"),
+            rs.getString("valid_for_unit_code"),
+            rs.getBoolean("restrict_to_buyer"),
+            rs.getBoolean("is_reloadable"),
+            rs.getBoolean("allow_partial_redemption"),
+            rs.getBoolean("allow_split_tender"),
+            rs.getBoolean("allow_recurring_payment"),
+            rs.getBoolean("allow_giftcard_purchase"),
+            rs.getBoolean("allow_tax"),
+            rs.getBoolean("allow_fees"),
+            rs.getBoolean("allow_tips"),
+            rs.getBoolean("allow_cash_out"),
+            rs.getString("location_mode_code"),
+            (Long) rs.getObject("max_balance_minor")
+    );
+    
+    @Override
+    public List<GiftcardPurchaseLineRow> findGiftcardPurchaseLines(
+            UUID invoiceId,
+            UUID applicationId
+    ) {
+        if (invoiceId == null || applicationId == null) {
+            throw new IllegalArgumentException("invoiceId and applicationId are required");
+        }
+
+        long startedAt = System.nanoTime();
+        try {
+            List<GiftcardPurchaseLineRow> rows = cluboneJdbcTemplate.query(
+                    GIFTCARD_PURCHASE_LINES_SQL,
+                    GIFTCARD_PURCHASE_LINE_ROW_MAPPER,
+                    invoiceId,
+                    applicationId
+            );
+            logger.info(
+                    "Gift Card lines loaded: invoiceId={}, count={}, elapsedMs={}",
+                    invoiceId,
+                    rows.size(),
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
+            );
+            return rows;
+        } catch (DataAccessException exception) {
+            logger.error(
+                    "Failed loading Gift Card lines: invoiceId={}, applicationId={}, elapsedMs={}",
+                    invoiceId,
+                    applicationId,
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt),
+                    exception
+            );
+            throw exception;
+        }
+    }
 
 	/** Helpers */
 	private static BigDecimal nvl(BigDecimal v) {
@@ -2545,5 +2680,18 @@ WHERE rn = 1;
 	            invoiceId,
 	            AccessContext.applicationId()
 	    );
+	}
+
+	@Override
+	public boolean giftcardIssuanceOutboxExists(UUID invoiceId, UUID applicationId) {
+		// TODO Auto-generated method stub
+		return false;
+	}
+
+	@Override
+	public UUID enqueueGiftcardIssuance(UUID invoiceId, UUID transactionId, UUID clientPaymentTransactionId,
+			UUID purchaserClientRoleId, UUID purchaseLevelId, UUID applicationId, UUID actorId) {
+		// TODO Auto-generated method stub
+		return null;
 	}
 }
