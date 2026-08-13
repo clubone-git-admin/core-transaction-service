@@ -33,6 +33,8 @@ public class SubscriptionBillingScheduleItemDTO {
     private UUID invoiceId;
     private String notes;
     private int quantity;
+    /** ISO-4217 code for schedule amounts (invoice currency, else purchase location). */
+    private String currencyCode;
 
     public UUID getBillingScheduleId() { return billingScheduleId; }
     public void setBillingScheduleId(UUID billingScheduleId) { this.billingScheduleId = billingScheduleId; }
@@ -123,6 +125,12 @@ public class SubscriptionBillingScheduleItemDTO {
 	public void setQuantity(int quantity) {
 		this.quantity = quantity;
 	}
-	
-    
+
+	public String getCurrencyCode() {
+		return currencyCode;
+	}
+
+	public void setCurrencyCode(String currencyCode) {
+		this.currencyCode = currencyCode;
+	}
 }

@@ -61,12 +61,25 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 st.status_code,
                 st.display_name as status_display_name,
                 coalesce(adj.total_adjustment_amount, 0) as total_adjustment_amount,
-                s.invoice_id
+                s.invoice_id,
+                coalesce(
+                    nullif(upper(trim(inv.currency_code)), ''),
+                    nullif(upper(trim(cur.currency_code)), '')
+                ) as currency_code
             from client_subscription_billing.subscription_billing_schedule s
             join client_subscription_billing.subscription_plan sp on sp.subscription_plan_id=s.subscription_plan_id
             left join billing_config.billing_schedule_status st
                    on st.billing_schedule_status_id = s.billing_schedule_status_id
-                   
+            left join transactions.invoice inv
+                   on inv.invoice_id = s.invoice_id
+            left join client_agreements.client_agreement ca
+                   on ca.client_agreement_id = sp.client_agreement_id
+            left join locations.levels lv
+                   on lv.level_id = ca.purchased_level_id
+            left join locations.location loc
+                   on loc.location_id = lv.reference_entity_id
+            left join locations.lu_currency cur
+                   on cur.currency_id = loc.currency_id
             left join (
                 select
                     billing_schedule_id,
@@ -121,12 +134,14 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
 
             dto.setInvoiceId(getUuid(rs, "invoice_id"));
             dto.setNotes(buildNotes(rs));
+            dto.setCurrencyCode(rs.getString("currency_code"));
 
             System.out.println("Mapped row #" + rowNum
                     + " | cycle=" + dto.getCycleNumber()
                     + " | billingDate=" + dto.getBillingDate()
                     + " | baseAmount=" + dto.getBaseAmount()
                     + " | finalAmount=" + dto.getFinalAmount()
+                    + " | currency=" + dto.getCurrencyCode()
                     + " | adjustmentAmount=" + dto.getSystemAdjustmentAmount());
 
             return dto;
@@ -143,8 +158,8 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
     }
 
     private String buildNotes(ResultSet rs) throws SQLException {
-        String label = rs.getString("label");
-        String periodLabel = rs.getString("period_label");
+        String label = sanitizeLabelText(rs.getString("label"));
+        String periodLabel = sanitizeLabelText(rs.getString("period_label"));
         Integer quantity = (Integer) rs.getObject("quantity");
         BigDecimal unitPrice = rs.getBigDecimal("unit_price");
 
@@ -152,6 +167,41 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 + ", periodLabel=" + periodLabel
                 + ", quantity=" + quantity
                 + ", unitPrice=" + unitPrice;
+    }
+
+    /**
+     * Normalize fancy punctuation that often mojibakes over Latin-1 HTTP paths
+     * (e.g. ● → â, – → â€"). Also repairs strings already stored as mojibake.
+     */
+    private static String sanitizeLabelText(String value) {
+        if (value == null) {
+            return null;
+        }
+        return value
+                // Already-mojibaked sequences (UTF-8 misread as Latin-1)
+                .replace("\u00E2\u0097\u008F", "-") // ● → â
+                .replace("\u00E2\u0080\u00A2", "-") // • → â€¢
+                .replace("\u00E2\u0080\u0093", "-") // – → â€“
+                .replace("\u00E2\u0080\u0094", "-") // — → â€”
+                .replace("â", "-")
+                .replace("â—", "-")
+                .replace("â—†", "-")
+                .replace("â€¢", "-")
+                .replace("â€“", "-")
+                .replace("â€”", "-")
+                .replace("Â·", "-")
+                .replace("Â ", " ")
+                .replace("Â", "")
+                // Raw Unicode bullets / dashes
+                .replace('\u25CF', '-') // ●
+                .replace('\u2022', '-') // •
+                .replace('\u25A0', '-') // ■
+                .replace('\u2013', '-') // –
+                .replace('\u2014', '-') // —
+                .replace('\u00A0', ' ')
+                .replaceAll("\\s*-\\s*", " - ")
+                .replaceAll("\\s{2,}", " ")
+                .trim();
     }
 
     @Override

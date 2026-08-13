@@ -1509,7 +1509,8 @@ public class BillingQuoteSubscriptionPersistenceService {
 		if (start == null || end == null) {
 			return null;
 		}
-		return start + " – " + end;
+		// ASCII hyphen range — avoids en-dash / bullet mojibake on Latin-1 paths.
+		return start + " - " + end;
 	}
 
 	/** Persisted {@code period_label}: quote text, or a compact ISO range aligned with resolved bounds. */

@@ -272,6 +272,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 			        0
 			    )::numeric(10,2) AS balance_due,
 			    s.status_name,
+			    upper(trim(i.currency_code)) AS currency_code,
 			    i.created_by
 			FROM "transactions".invoice i
 			JOIN "transactions".lu_invoice_status s
@@ -1473,6 +1474,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 			dto.setBalanceDue(rs.getBigDecimal("balance_due"));
 			dto.setWriteOff(rs.getBigDecimal("write_off_amount"));
 			dto.setStatus(rs.getString("status_name"));
+			dto.setCurrencyCode(rs.getString("currency_code"));
 
 			dto.setCreatedBy((UUID) rs.getObject("created_by"));
 			dto.setSalesRep(null); // No people table in schema; map externally if desired

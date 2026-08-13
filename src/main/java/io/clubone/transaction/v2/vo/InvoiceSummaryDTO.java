@@ -17,6 +17,9 @@ public class InvoiceSummaryDTO {
 
     private String status;           // lu_invoice_status.status_name
 
+    /** ISO-4217 transactional currency stamped on the invoice. */
+    private String currencyCode;
+
     // Best we can return with current schema; UI can map to a display name
     private UUID createdBy;          
     private String salesRep;         // null unless you wire a user lookup
