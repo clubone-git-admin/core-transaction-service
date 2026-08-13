@@ -249,7 +249,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 
 	private static final String SQL_INVOICE_SUMMARY = """
 			WITH pay AS (
-			    SELECT t.invoice_id, COALESCE(SUM(cpt.amount)::numeric(10,2), 0)::numeric(10,2) AS paid_amount
+			    SELECT t.invoice_id,
+			           COALESCE(SUM(cpt.amount)::numeric / 100.0, 0)::numeric(12,2) AS paid_amount
 			    FROM "transactions"."transaction" t
 			    JOIN client_payments.client_payment_transaction cpt
 			      ON cpt.client_payment_transaction_id = t.client_payment_transaction_id
@@ -1473,6 +1474,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 			dto.setAmount(rs.getBigDecimal("amount"));
 			dto.setBalanceDue(rs.getBigDecimal("balance_due"));
 			dto.setWriteOff(rs.getBigDecimal("write_off_amount"));
+			dto.setPaidAmount(rs.getBigDecimal("paid_amount"));
 			dto.setStatus(rs.getString("status_name"));
 			dto.setCurrencyCode(rs.getString("currency_code"));
 
@@ -1483,6 +1485,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 			dto.setAmount(s2(dto.getAmount()));
 			dto.setBalanceDue(s2(dto.getBalanceDue()));
 			dto.setWriteOff(s2(dto.getWriteOff()));
+			dto.setPaidAmount(s2(dto.getPaidAmount()));
 			return dto;
 		});
 	}
@@ -1567,7 +1570,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 				payment_totals AS (
 				    SELECT
 				        t.invoice_id,
-				        COALESCE(SUM(cpt.amount), 0)::numeric AS paid_amount
+				        COALESCE(SUM(cpt.amount), 0)::numeric / 100.0 AS paid_amount
 				    FROM transactions."transaction" t
 				    JOIN client_payments.client_payment_transaction cpt
 				      ON cpt.client_payment_transaction_id =

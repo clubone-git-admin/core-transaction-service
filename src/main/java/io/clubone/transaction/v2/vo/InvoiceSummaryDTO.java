@@ -14,6 +14,7 @@ public class InvoiceSummaryDTO {
     private BigDecimal amount;       // i.total_amount
     private BigDecimal balanceDue;   // total - paid - writeOff
     private BigDecimal writeOff;     // 0.00 (placeholder)
+    private BigDecimal paidAmount;
 
     private String status;           // lu_invoice_status.status_name
 

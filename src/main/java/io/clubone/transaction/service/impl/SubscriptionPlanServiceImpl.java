@@ -747,9 +747,9 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 				null, // autoPay (TODO: fetch from payment settings)
 				null, // primaryPaymentMethodMasked (TODO)
 
-				"Membership Â· Base Membership", // TODO derive from plan/entity
+				"Membership · Base Membership", // TODO derive from plan/entity
 				true, // recurring
-				"â€”", null,
+				"—", null,
 
 				timeline,
 
@@ -759,7 +759,20 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 				List.of(),
 				List.of(),
 				List.of(),
-				List.of());
+				List.of(),
+				null, // currencyCode
+				null, // subTotal
+				null, // discountAmount
+				null, // taxAmount
+				null, // paidAmount
+				null, // refundedAmount
+				null, // clientAgreementId
+				null, // billingCollectionTypeCode
+				null, // billingCollectionTypeName
+				null, // createdBy
+				List.of(), // items
+				List.of() // auditTrail
+		);
 	}
 
 	private static <T> T nvl(T v, T fallback) {

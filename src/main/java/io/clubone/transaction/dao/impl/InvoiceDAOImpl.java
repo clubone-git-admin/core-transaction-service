@@ -73,7 +73,8 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 			  i.billing_collection_type_id AS billingCollectionTypeId,
 			  lbct.code             AS billingCollectionTypeCode,
 			  lbct."name"           AS billingCollectionTypeName,
-			  lis.status_name       AS invoiceStatus
+			  lis.status_name       AS invoiceStatus,
+			  upper(trim(i.currency_code)) AS currencyCode
 			FROM "transactions".invoice i
 			JOIN "transactions".lu_invoice_status lis ON lis.invoice_status_id = i.invoice_status_id
 			LEFT JOIN "transactions".lu_billing_collection_type lbct

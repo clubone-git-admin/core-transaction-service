@@ -49,6 +49,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 
 import io.clubone.transaction.dao.EntityLookupDao;
+import io.clubone.transaction.dao.InvoiceDAO;
 import io.clubone.transaction.dao.PromotionEffectDAO;
 import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.helper.ClientAgreementCreationHelper;
@@ -70,8 +71,16 @@ import io.clubone.transaction.v2.vo.CycleBandRef;
 import io.clubone.transaction.v2.vo.DiscountDetailDTO;
 import io.clubone.transaction.v2.vo.Entity;
 import io.clubone.transaction.v2.vo.EntityLevelInfoDTO;
+import io.clubone.transaction.v2.vo.InvoiceAdjustmentDetailDTO;
+import io.clubone.transaction.v2.vo.InvoiceAuditDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailRaw;
+import io.clubone.transaction.v2.vo.InvoiceLineItemDetailDTO;
+import io.clubone.transaction.v2.vo.InvoiceRefundAllocationDTO;
+import io.clubone.transaction.v2.vo.InvoiceRefundDetailDTO;
+import io.clubone.transaction.v2.vo.InvoiceTransactionDetailDTO;
+import io.clubone.transaction.vo.InvoiceDTO;
+import io.clubone.transaction.vo.InvoiceEntityDTO;
 import io.clubone.transaction.v2.vo.InvoiceEntityDiscountDTO;
 import io.clubone.transaction.v2.vo.InvoiceEntityPriceBandDTO;
 import io.clubone.transaction.v2.vo.InvoiceEntityPromotionDTO;
@@ -100,6 +109,9 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 	@Autowired
 	private EntityLookupDao entityLookupDao;
+
+	@Autowired
+	private InvoiceDAO invoiceDAO;
 
 	@Autowired
 	private ClientAgreementCreationHelper caHelper;
@@ -2208,7 +2220,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 		List<PaymentTimelineItemDTO> timeline = buildTimeline(unit, interval, raw, priceForCurrentCycle);
 
-		UUID parentEntityId = raw.parentEntityId() != null ? raw.parentEntityId() : raw.childEntityTypeId();
+		UUID parentEntityId = raw.parentEntityId() != null ? raw.parentEntityId() : raw.childEntityId();
 		UUID parentEntityTypeId = raw.parentEntityTypeId() != null ? raw.parentEntityTypeId() : raw.childEntityTypeId();
 		UUID levelId = raw.levelId();
 
@@ -2221,24 +2233,179 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			locationName = enityDetail.get().levelName();
 		}
 
-		return new InvoiceDetailDTO(raw.invoiceId(), raw.invoiceNumber(), raw.invoiceDate(), raw.invoiceStatus(),
-				raw.invoiceAmount(), raw.invoiceBalanceDue(), raw.invoiceWriteOff(), raw.salesRep(),
+		List<InvoiceTransactionDetailDTO> transactions = transactionDAO.findInvoiceTransactions(invoiceId);
+		List<InvoiceRefundDetailDTO> refunds = transactionDAO.findInvoiceRefunds(invoiceId);
+		List<InvoiceRefundAllocationDTO> refundAllocations = transactionDAO.findInvoiceRefundAllocations(invoiceId);
+		List<InvoiceAdjustmentDetailDTO> adjustments = transactionDAO.findInvoiceAdjustments(invoiceId);
 
-				"CONTRACT", "ACTIVE", entityName, locationName, priceForCurrentCycle,
+		InvoiceDTO fullInvoice = null;
+		try {
+			fullInvoice = invoiceDAO.findResolvedFullById(invoiceId);
+		} catch (Exception ex) {
+			log.warn("Invoice full header/line enrichment failed for {}: {}", invoiceId, ex.toString());
+		}
+
+		String currencyCode = fullInvoice != null ? fullInvoice.getCurrencyCode() : null;
+		BigDecimal subTotal = fullInvoice != null ? fullInvoice.getSubTotal() : raw.invoiceAmount();
+		BigDecimal discountAmount = fullInvoice != null ? fullInvoice.getDiscountAmount() : BigDecimal.ZERO;
+		BigDecimal taxAmount = fullInvoice != null ? fullInvoice.getTaxAmount() : BigDecimal.ZERO;
+		UUID clientAgreementId = fullInvoice != null ? fullInvoice.getClientAgreementId() : null;
+		String billingCollectionTypeCode = fullInvoice != null ? fullInvoice.getBillingCollectionTypeCode() : null;
+		String billingCollectionTypeName = fullInvoice != null ? fullInvoice.getBillingCollectionTypeName() : null;
+		UUID createdBy = fullInvoice != null ? fullInvoice.getCreatedBy() : null;
+
+		BigDecimal paidAmount = transactions.stream()
+				.map(InvoiceTransactionDetailDTO::amount)
+				.filter(a -> a != null)
+				.reduce(BigDecimal.ZERO, BigDecimal::add);
+		BigDecimal refundedAmount = refunds.stream()
+				.map(InvoiceRefundDetailDTO::refundAmount)
+				.filter(a -> a != null)
+				.reduce(BigDecimal.ZERO, BigDecimal::add);
+
+		BigDecimal amount = fullInvoice != null && fullInvoice.getTotalAmount() != null
+				? fullInvoice.getTotalAmount()
+				: raw.invoiceAmount();
+		BigDecimal balanceDue = amount.subtract(paidAmount).subtract(refundedAmount).max(BigDecimal.ZERO);
+
+		List<InvoiceLineItemDetailDTO> items = mapInvoiceLineItems(fullInvoice);
+		String productLabel = items.isEmpty()
+				? (entityName == null || entityName.isBlank() ? "Membership" : entityName)
+				: Optional.ofNullable(items.get(0).planName())
+						.or(() -> Optional.ofNullable(items.get(0).entityDescription()))
+						.orElse("Membership");
+
+		List<InvoiceAuditDetailDTO> auditTrail = buildInvoiceAuditTrail(
+				raw, transactions, refunds, adjustments);
+
+		return new InvoiceDetailDTO(raw.invoiceId(), raw.invoiceNumber(), raw.invoiceDate(), raw.invoiceStatus(),
+				amount, balanceDue, raw.invoiceWriteOff(), raw.salesRep(),
+
+				"CONTRACT",
+				raw.invoiceStatus() != null ? raw.invoiceStatus().toUpperCase(Locale.ROOT) : "ACTIVE",
+				entityName, locationName, priceForCurrentCycle,
 
 				numerator, denominator, billingFrequencyLabel, raw.contractEndDate(), raw.instanceNextBillingDate(),
 				raw.instanceStartDate(), raw.contractStartDate(),
 
 				null, null,
 
-				"Membership Ãƒâ€šÃ‚Â· Base Membership", true, "ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â", null,
+				productLabel, true, "—", null,
 
 				timeline,
 
-				transactionDAO.findInvoiceTransactions(invoiceId),
-				transactionDAO.findInvoiceRefunds(invoiceId),
-				transactionDAO.findInvoiceRefundAllocations(invoiceId),
-				transactionDAO.findInvoiceAdjustments(invoiceId));
+				transactions,
+				refunds,
+				refundAllocations,
+				adjustments,
+
+				currencyCode,
+				subTotal,
+				discountAmount,
+				taxAmount,
+				paidAmount,
+				refundedAmount,
+				clientAgreementId,
+				billingCollectionTypeCode,
+				billingCollectionTypeName,
+				createdBy,
+				items,
+				auditTrail);
+	}
+
+	private static List<InvoiceLineItemDetailDTO> mapInvoiceLineItems(InvoiceDTO fullInvoice) {
+		if (fullInvoice == null || fullInvoice.getLineItems() == null || fullInvoice.getLineItems().isEmpty()) {
+			return List.of();
+		}
+		List<InvoiceLineItemDetailDTO> out = new ArrayList<>();
+		for (InvoiceEntityDTO line : fullInvoice.getLineItems()) {
+			if (line == null) continue;
+			out.add(new InvoiceLineItemDetailDTO(
+					line.getInvoiceEntityId(),
+					line.getParentInvoiceEntityId(),
+					line.getChargeLineKindCode(),
+					line.getEntityId(),
+					line.getEntityDescription() != null ? line.getEntityDescription() : line.getEntityName(),
+					line.getChargeLineKindCode(),
+					line.getChargeLineKindName(),
+					line.getPricePlanTemplateId(),
+					line.getChargeLineKindCode(),
+					line.getEntityName() != null ? line.getEntityName() : line.getEntityDescription(),
+					line.getBillingScheduleId(),
+					line.getSubscriptionInstanceId(),
+					line.getCycleNumber(),
+					line.getServicePeriodStart(),
+					line.getServicePeriodEnd(),
+					line.getQuantity(),
+					line.getUnitPrice(),
+					line.getDiscountAmount(),
+					line.getTaxAmount(),
+					line.getTotalAmount()));
+		}
+		return out;
+	}
+
+	private static List<InvoiceAuditDetailDTO> buildInvoiceAuditTrail(
+			InvoiceDetailRaw raw,
+			List<InvoiceTransactionDetailDTO> transactions,
+			List<InvoiceRefundDetailDTO> refunds,
+			List<InvoiceAdjustmentDetailDTO> adjustments) {
+		List<InvoiceAuditDetailDTO> events = new ArrayList<>();
+
+		if (raw.invoiceDate() != null) {
+			events.add(new InvoiceAuditDetailDTO(
+					"INVOICE_CREATED",
+					"Invoice created",
+					"Invoice " + Optional.ofNullable(raw.invoiceNumber()).orElse("")
+							+ " for " + Optional.ofNullable(raw.invoiceAmount()).orElse(BigDecimal.ZERO),
+					"System",
+					raw.invoiceDate().atStartOfDay().toInstant(ZoneOffset.UTC)));
+		}
+
+		for (InvoiceTransactionDetailDTO txn : transactions) {
+			if (txn == null) continue;
+			Instant when = txn.createdOn() != null ? txn.createdOn().toInstant() : Instant.EPOCH;
+			events.add(new InvoiceAuditDetailDTO(
+					"PAYMENT",
+					"Payment posted",
+					Optional.ofNullable(txn.paymentTypeName()).orElse("Payment")
+							+ " · " + Optional.ofNullable(txn.gatewayName()).orElse("Gateway")
+							+ " · " + Optional.ofNullable(txn.amount()).orElse(BigDecimal.ZERO),
+					Optional.ofNullable(txn.gatewayName()).orElse("System"),
+					when));
+		}
+
+		for (InvoiceRefundDetailDTO refund : refunds) {
+			if (refund == null) continue;
+			Instant when = refund.createdOn() != null ? refund.createdOn().toInstant() : Instant.EPOCH;
+			events.add(new InvoiceAuditDetailDTO(
+					"REFUND",
+					"Refund recorded",
+					Optional.ofNullable(refund.refundStatusCode()).orElse("Refund")
+							+ " · " + Optional.ofNullable(refund.refundAmount()).orElse(BigDecimal.ZERO),
+					Optional.ofNullable(refund.gatewayName()).orElse("System"),
+					when));
+		}
+
+		for (InvoiceAdjustmentDetailDTO adj : adjustments) {
+			if (adj == null) continue;
+			Instant when = adj.createdOn() != null ? adj.createdOn().toInstant() : Instant.EPOCH;
+			events.add(new InvoiceAuditDetailDTO(
+					"ADJUSTMENT",
+					"Adjustment applied",
+					Optional.ofNullable(adj.adjustmentTypeName()).orElse(
+							Optional.ofNullable(adj.adjustmentTypeCode()).orElse("Adjustment"))
+							+ " · " + Optional.ofNullable(adj.amount()).orElse(BigDecimal.ZERO),
+					"System",
+					when));
+		}
+
+		events.sort((a, b) -> {
+			Instant ia = a.eventOn() != null ? a.eventOn() : Instant.EPOCH;
+			Instant ib = b.eventOn() != null ? b.eventOn() : Instant.EPOCH;
+			return ib.compareTo(ia);
+		});
+		return events;
 	}
 
 	private static List<PaymentTimelineItemDTO> buildTimeline(FrequencyUnit unit, int interval, InvoiceDetailRaw raw,
