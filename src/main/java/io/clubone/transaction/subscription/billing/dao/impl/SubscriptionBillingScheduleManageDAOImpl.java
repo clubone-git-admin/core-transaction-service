@@ -384,41 +384,169 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
     ) {
 
         String sql = """
-            insert into client_subscription_billing.subscription_billing_schedule_adjustment (
-                billing_schedule_adjustment_id,
-                billing_schedule_id,
-                billing_adjustment_type_id,
-                amount,
-                is_system_generated,
-                reference_entity_type_id,
-                reference_entity_id,
-                notes,
-                created_on,
-                created_by
-            )
-            select
-                gen_random_uuid(),
-                s.billing_schedule_id,
-                ?::uuid,
-                ?,
-                false,
-                (
-                    select reference_entity_type_id
-                    from billing_config.reference_entity_type
-                    where entity_name = ?
-                      and is_active = true
+            with inserted_adjustment as (
+                insert into client_subscription_billing.subscription_billing_schedule_adjustment (
+                    billing_schedule_adjustment_id,
+                    billing_schedule_id,
+                    billing_adjustment_type_id,
+                    amount,
+                    is_system_generated,
+                    reference_entity_type_id,
+                    reference_entity_id,
+                    notes,
+                    created_on,
+                    created_by
+                )
+                select
+                    gen_random_uuid(),
+                    s.billing_schedule_id,
+                    ?::uuid,
+                    ?,
+                    false,
+                    (
+                        select reference_entity_type_id
+                        from billing_config.reference_entity_type
+                        where entity_name = ?
+                          and is_active = true
+                        limit 1
+                    ),
+                    ?::uuid,
+                    ?,
+                    now(),
+                    ?::uuid
+                from client_subscription_billing.subscription_billing_schedule s
+                where s.billing_schedule_id = ?::uuid
+                  and s.application_id = ?::uuid
+                returning
+                    billing_schedule_adjustment_id,
+                    billing_schedule_id,
+                    amount,
+                    created_by
+            ),
+            inserted_tax_lines as (
+                insert into client_subscription_billing.subscription_billing_schedule_adjustment_tax_line (
+                    billing_schedule_adjustment_tax_line_id,
+                    billing_schedule_adjustment_id,
+                    tax_rate_id,
+                    tax_rate_allocation_id,
+                    tax_name,
+                    tax_percentage,
+                    taxable_amount,
+                    tax_amount,
+                    sort_order,
+                    created_on,
+                    created_by,
+                    is_active
+                )
+                select
+                    gen_random_uuid(),
+                    ia.billing_schedule_adjustment_id,
+                    stl.tax_rate_id,
+                    stl.tax_rate_allocation_id,
+                    stl.tax_name,
+                    stl.tax_percentage,
+                    abs(ia.amount),
+                    round(abs(ia.amount) * stl.tax_percentage / 100, 2),
+                    coalesce(stl.sort_order, 0),
+                    now(),
+                    ia.created_by,
+                    true
+                from inserted_adjustment ia
+                join client_subscription_billing.subscription_billing_schedule_tax_line stl
+                  on stl.billing_schedule_id = ia.billing_schedule_id
+
+                union all
+
+                select
+                    gen_random_uuid(),
+                    ia.billing_schedule_adjustment_id,
+                    resolved_tax.tax_rate_id,
+                    tra.tax_rate_allocation_id,
+                    'Tax',
+                    tra.tax_rate_percentage,
+                    abs(ia.amount),
+                    round(abs(ia.amount) * tra.tax_rate_percentage / 100, 2),
+                    (row_number() over (
+                        partition by ia.billing_schedule_adjustment_id
+                        order by tra.tax_rate_allocation_id
+                    ) - 1)::int,
+                    now(),
+                    ia.created_by,
+                    true
+                from inserted_adjustment ia
+                join client_subscription_billing.subscription_billing_schedule s
+                  on s.billing_schedule_id = ia.billing_schedule_id
+                join client_subscription_billing.subscription_plan sp
+                  on sp.subscription_plan_id = s.subscription_plan_id
+                join client_agreements.client_agreement ca
+                  on ca.client_agreement_id = sp.client_agreement_id
+                join lateral (
+                    with recursive level_path as (
+                        select
+                            l.level_id,
+                            l.parent_level_id,
+                            0 as depth
+                        from locations.levels l
+                        where l.level_id = ca.purchased_level_id
+                          and l.application_id = s.application_id
+
+                        union all
+
+                        select
+                            parent.level_id,
+                            parent.parent_level_id,
+                            child.depth + 1
+                        from level_path child
+                        join locations.levels parent
+                          on parent.level_id = child.parent_level_id
+                         and parent.application_id = s.application_id
+                    )
+                    select
+                        tr.tax_rate_id,
+                        min(lp.depth) as depth,
+                        tr.start_date
+                    from level_path lp
+                    join finance.tax_rate tr
+                      on tr.level_id = lp.level_id
+                     and tr.application_id = s.application_id
+                     and tr.is_active = true
+                     and tr.start_date <= s.billing_date
+                     and (
+                            tr.end_date is null
+                            or tr.end_date >= s.billing_date
+                         )
+                    join finance.tax_rate_allocation candidate_tra
+                      on candidate_tra.tax_rate_id = tr.tax_rate_id
+                     and candidate_tra.application_id = s.application_id
+                     and candidate_tra.is_active = true
+                    group by
+                        tr.tax_rate_id,
+                        tr.start_date
+                    having round(sum(candidate_tra.tax_rate_percentage), 2)
+                           = round(s.tax_pct, 2)
+                    order by
+                        min(lp.depth),
+                        tr.start_date desc,
+                        tr.tax_rate_id
                     limit 1
-                ),
-                ?::uuid,
-                ?,
-                now(),
-                ?::uuid
-            from client_subscription_billing.subscription_billing_schedule s
-            where s.billing_schedule_id = ?::uuid
-              and s.application_id = ?::uuid
+                ) resolved_tax on true
+                join finance.tax_rate_allocation tra
+                  on tra.tax_rate_id = resolved_tax.tax_rate_id
+                 and tra.application_id = s.application_id
+                 and tra.is_active = true
+                where coalesce(s.tax_pct, 0) > 0
+                  and not exists (
+                        select 1
+                        from client_subscription_billing.subscription_billing_schedule_tax_line existing_stl
+                        where existing_stl.billing_schedule_id = ia.billing_schedule_id
+                  )
+                returning billing_schedule_adjustment_tax_line_id
+            )
+            select count(*)::int as inserted_count
+            from inserted_adjustment
         """;
 
-        return cluboneJdbcTemplate.update(con -> {
+        List<Integer> insertedCounts = cluboneJdbcTemplate.query(con -> {
             var ps = con.prepareStatement(sql);
 
             ps.setObject(1, adjustmentTypeId);
@@ -439,7 +567,9 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
             ps.setObject(8, AccessContext.applicationId());
 
             return ps;
-        });
+        }, (rs, rowNum) -> rs.getInt("inserted_count"));
+
+        return insertedCounts.isEmpty() ? 0 : insertedCounts.get(0);
     }
     
     
