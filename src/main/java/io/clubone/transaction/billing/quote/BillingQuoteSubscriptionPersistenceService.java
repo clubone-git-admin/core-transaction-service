@@ -311,9 +311,11 @@ public class BillingQuoteSubscriptionPersistenceService {
 			throw new IllegalStateException(
 					"Billing quote responses are required to persist schedules for invoiceId=" + invoiceId);
 		}
-		if (clientAgreementId == null) {
+		// AGREEMENT/contract quotes need client_agreement_id; package/bundle/item may be null.
+		if (clientAgreementId == null && containsAgreementQuote(quotes)) {
 			throw new IllegalStateException(
-					"clientAgreementId is required to persist billing quote schedules for invoiceId=" + invoiceId);
+					"clientAgreementId is required to persist AGREEMENT billing quote schedules for invoiceId="
+							+ invoiceId);
 		}
 		/*
 		 * Optional hint: avoids an extra lookup when the caller already resolved CPM; with REQUIRED
@@ -411,6 +413,26 @@ public class BillingQuoteSubscriptionPersistenceService {
 		log.info(
 				"[billing-quote/persist] step=client_gateway_mandate outcome=ensured rows={} parentInvoiceId={} subscriptionPlanCount={} clientPaymentMethodId={}",
 				rows, invoiceId, subscriptionPlanIds.size(), clientPaymentMethodId);
+	}
+
+	/**
+	 * True when any quote response is an AGREEMENT/contract line (needs client_agreement_id).
+	 * Package/bundle/item quotes may persist with a null client agreement.
+	 */
+	private static boolean containsAgreementQuote(List<BillingQuoteLineItemsResponse> quotes) {
+		if (quotes == null || quotes.isEmpty()) {
+			return false;
+		}
+		for (BillingQuoteLineItemsResponse q : quotes) {
+			if (q == null) {
+				continue;
+			}
+			String t = q.getEntityTypeCode();
+			if (t != null && !t.isBlank() && "AGREEMENT".equalsIgnoreCase(t.trim())) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**

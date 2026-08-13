@@ -639,12 +639,15 @@ public class TransactionServiceImpl implements TransactionService {
 				: invoiceSummary.getClientAgreementId();
 
 		if (!CollectionUtils.isEmpty(req.getBillingQuoteFinalizeSpecs())) {
-			if (effectiveClientAgreementId == null) {
+			// Client agreement is only for AGREEMENT/contract purchases. Package/bundle/item
+			// quote specs persist schedules without client_agreement_id.
+			if (containsAgreementBillingQuoteSpec(req.getBillingQuoteFinalizeSpecs())
+					&& effectiveClientAgreementId == null) {
 				logger.warn(
-						"[transactions/v3/finalize] step=validation outcome=reject invoiceId={} reason=missing_client_agreement_for_billing_quote_specs",
+						"[transactions/v3/finalize] step=validation outcome=reject invoiceId={} reason=missing_client_agreement_for_agreement_billing_quote_specs",
 						req.getInvoiceId());
 				return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null,
-						"clientAgreementId is required when billingQuoteFinalizeSpecs are present");
+						"clientAgreementId is required when AGREEMENT billingQuoteFinalizeSpecs are present");
 			}
 			if (applicationId == null) {
 				logger.warn(
