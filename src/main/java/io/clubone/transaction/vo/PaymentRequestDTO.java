@@ -20,6 +20,7 @@ public class PaymentRequestDTO {
     /**
      * Gateway supported-currency id. Serialized as {@code currencyId} for payment-service.
      * Also accepts FE/legacy name {@code paymentGatewayCurrencyTypeId}.
+     * Do not add a separate {@code currencyId} field — it conflicts with this {@code @JsonProperty}.
      */
     @JsonProperty("currencyId")
     @JsonAlias("paymentGatewayCurrencyTypeId")
@@ -27,5 +28,4 @@ public class PaymentRequestDTO {
     /** ISO-4217; payment-service can resolve supported-currency id from this + gateway. */
     private String currencyCode;
     private UUID createdBy;
-    private UUID currencyId;
 }
