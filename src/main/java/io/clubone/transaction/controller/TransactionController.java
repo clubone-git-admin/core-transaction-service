@@ -93,12 +93,14 @@ public class TransactionController {
     @PreAuthorize("@perm.canOperatePosOrRemote()")
     @Operation(summary = "Finalize transaction v3 after payment")
     public ResponseEntity<FinalizeTransactionResponse> finalizeTransactionv3(
-            @RequestHeader("X-Actor-Id") UUID actorId,
-            @RequestHeader("X-Location-Id") UUID locationId,
+            @RequestHeader(value = "X-Actor-Id", required = false) UUID actorId,
+            @RequestHeader(value = "X-Location-Id", required = false) UUID locationId,
             @RequestHeader("application-id") UUID applicationId,
             @RequestBody FinalizeTransactionRequest request) {
+        // Join / remote-close: no staff actor headers — audit via body createdBy (same as invoice create).
+        UUID effectiveActorId = actorId != null ? actorId : request.getCreatedBy();
         FinalizeTransactionResponse response = transactionService.finalizeTransactionV3(
-                request, actorId, locationId, applicationId);
+                request, effectiveActorId, locationId, applicationId);
         // Success (PAID / PARTIALLY_PAID / etc.) must be 2xx. Only true payment failures
         // use invoiceStatus=UNPAID with a message — those stay 400.
         if ("UNPAID".equalsIgnoreCase(StringUtils.trimToEmpty(response.getInvoiceStatus()))) {

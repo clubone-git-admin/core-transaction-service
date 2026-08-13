@@ -73,6 +73,8 @@ public class SecurityConfig {
             .accessDeniedHandler(this::forbidden))
         .authorizeHttpRequests(auth -> auth
             .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+            // Avoid masking MissingRequestHeader / app errors as 401 on ERROR dispatch.
+            .requestMatchers("/error", "/error/**").permitAll()
             .anyRequest().authenticated())
         .addFilterBefore(externalContextFilter, UsernamePasswordAuthenticationFilter.class)
         .addFilterAfter(actorOnlyContextFilter, ExternalContextFilter.class)
