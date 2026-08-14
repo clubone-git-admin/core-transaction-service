@@ -2193,6 +2193,23 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 	@Override
 	@Transactional(readOnly = true)
+	public Map<String, Object> searchInvoices(LocalDate fromDate, LocalDate toDate, UUID locationId,
+			String availabilityTypeCode, Integer page, Integer size) {
+		int safePage = Math.max(page != null ? page : 1, 1);
+		int safeSize = Math.min(Math.max(size != null ? size : 50, 1), 100);
+		int offset = (safePage - 1) * safeSize;
+		List<Map<String, Object>> invoices = transactionDAO.searchInvoices(fromDate, toDate, locationId,
+				availabilityTypeCode, safeSize, offset);
+		Map<String, Object> body = new HashMap<>();
+		body.put("invoices", invoices);
+		body.put("page", safePage);
+		body.put("size", safeSize);
+		body.put("count", invoices.size());
+		return body;
+	}
+
+	@Override
+	@Transactional(readOnly = true)
 	public InvoiceDetailDTO getInvoiceDetail(UUID invoiceId) {
 		final InvoiceDetailRaw raw = transactionDAO.loadInvoiceAggregate(invoiceId)
 				.orElseThrow(() -> new NoSuchElementException("Invoice not found: " + invoiceId));

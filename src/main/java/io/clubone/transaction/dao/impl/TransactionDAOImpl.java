@@ -26,6 +26,7 @@ import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -1488,6 +1489,147 @@ public class TransactionDAOImpl implements TransactionDAO {
 			dto.setPaidAmount(s2(dto.getPaidAmount()));
 			return dto;
 		});
+	}
+
+	@Override
+	public List<Map<String, Object>> searchInvoices(LocalDate fromDate, LocalDate toDate, UUID locationId,
+			String availabilityTypeCode, int limit, int offset) {
+		UUID appId = AccessContext.applicationId();
+		int safeLimit = Math.min(Math.max(limit, 1), 100);
+		int safeOffset = Math.max(offset, 0);
+		String avail = availabilityTypeCode == null || availabilityTypeCode.isBlank() ? null
+				: availabilityTypeCode.trim();
+		NamedParameterJdbcTemplate named = new NamedParameterJdbcTemplate(cluboneJdbcTemplate);
+		MapSqlParameterSource params = new MapSqlParameterSource()
+				.addValue("appId", appId)
+				.addValue("fromDate", fromDate)
+				.addValue("toDate", toDate)
+				.addValue("locationId", locationId)
+				.addValue("avail", avail)
+				.addValue("limit", safeLimit)
+				.addValue("offset", safeOffset);
+		final String headerSql = """
+				SELECT
+				    i.invoice_id,
+				    i.invoice_number,
+				    i.invoice_date,
+				    COALESCE(i.total_amount, 0) AS total_amount,
+				    s.status_name AS invoice_status,
+				    upper(trim(i.currency_code)) AS currency_code,
+				    lbct.code AS billing_collection_type_code,
+				    COALESCE(NULLIF(loc.display_name, ''), loc.name) AS location_name,
+				    TRIM(CONCAT_WS(' ', fn.val, ln.val)) AS client_name
+				FROM transactions.invoice i
+				JOIN transactions.lu_invoice_status s
+				  ON s.invoice_status_id = i.invoice_status_id
+				LEFT JOIN transactions.lu_billing_collection_type lbct
+				  ON lbct.billing_collection_type_id = i.billing_collection_type_id
+				LEFT JOIN locations.levels lvl
+				  ON lvl.level_id = i.level_id
+				LEFT JOIN locations.location loc
+				  ON loc.location_id = lvl.reference_entity_id
+				LEFT JOIN LATERAL (
+				    SELECT COALESCE(NULLIF(TRIM(cc.characteristic), ''), NULLIF(TRIM(ccv.value), '')) AS val
+				    FROM clients.client_characteristic cc
+				    JOIN clients.client_characteristic_type cct
+				      ON cct.client_characteristic_type_id = cc.client_characteristic_type_id
+				    LEFT JOIN clients.client_characteristic_values ccv
+				      ON ccv.client_characteristic_values_id = cc.client_characteristic_values_id
+				    WHERE cc.client_role_id = i.client_role_id
+				      AND COALESCE(cc.is_active, true) = true
+				      AND cct.name = 'First Name'
+				    ORDER BY cc.valid_from DESC NULLS LAST
+				    LIMIT 1
+				) fn ON true
+				LEFT JOIN LATERAL (
+				    SELECT COALESCE(NULLIF(TRIM(cc.characteristic), ''), NULLIF(TRIM(ccv.value), '')) AS val
+				    FROM clients.client_characteristic cc
+				    JOIN clients.client_characteristic_type cct
+				      ON cct.client_characteristic_type_id = cc.client_characteristic_type_id
+				    LEFT JOIN clients.client_characteristic_values ccv
+				      ON ccv.client_characteristic_values_id = cc.client_characteristic_values_id
+				    WHERE cc.client_role_id = i.client_role_id
+				      AND COALESCE(cc.is_active, true) = true
+				      AND cct.name = 'Last Name'
+				    ORDER BY cc.valid_from DESC NULLS LAST
+				    LIMIT 1
+				) ln ON true
+				WHERE i.application_id = :appId
+				  AND COALESCE(i.is_active, true) = true
+				  AND (CAST(:fromDate AS date) IS NULL OR CAST(i.invoice_date AS date) >= CAST(:fromDate AS date))
+				  AND (CAST(:toDate AS date) IS NULL OR CAST(i.invoice_date AS date) <= CAST(:toDate AS date))
+				  AND (
+				        CAST(:locationId AS uuid) IS NULL
+				        OR i.level_id = CAST(:locationId AS uuid)
+				        OR loc.location_id = CAST(:locationId AS uuid)
+				        OR lvl.reference_entity_id = CAST(:locationId AS uuid)
+				      )
+				  AND (
+				        CAST(:avail AS text) IS NULL
+				        OR UPPER(COALESCE(lbct.code, '')) = UPPER(TRIM(CAST(:avail AS text)))
+				        OR (UPPER(TRIM(CAST(:avail AS text))) = 'POS' AND i.billing_run_id IS NULL)
+				      )
+				ORDER BY i.invoice_date DESC, i.invoice_number DESC
+				LIMIT :limit OFFSET :offset
+				""";
+		List<Map<String, Object>> invoices = named.query(headerSql, params, (rs, rn) -> {
+			Map<String, Object> row = new HashMap<>();
+			UUID invoiceId = (UUID) rs.getObject("invoice_id");
+			row.put("invoiceId", invoiceId);
+			row.put("invoiceNumber", rs.getString("invoice_number"));
+			Timestamp ts = rs.getTimestamp("invoice_date");
+			row.put("invoiceDate", ts != null ? ts.toLocalDateTime().toLocalDate().toString() : null);
+			row.put("totalAmount", rs.getBigDecimal("total_amount"));
+			row.put("invoiceStatus", rs.getString("invoice_status"));
+			row.put("currencyCode", rs.getString("currency_code"));
+			String collection = rs.getString("billing_collection_type_code");
+			row.put("billingCollectionTypeCode", collection);
+			row.put("availabilityTypeCode",
+					collection != null && !collection.isBlank() ? collection : (avail != null ? avail : "POS"));
+			row.put("locationName", rs.getString("location_name"));
+			row.put("clientName", rs.getString("client_name"));
+			row.put("items", new ArrayList<Map<String, Object>>());
+			return row;
+		});
+		if (invoices.isEmpty()) {
+			return invoices;
+		}
+		Map<UUID, Map<String, Object>> byId = new HashMap<>();
+		List<UUID> ids = new ArrayList<>();
+		for (Map<String, Object> inv : invoices) {
+			UUID id = (UUID) inv.get("invoiceId");
+			ids.add(id);
+			byId.put(id, inv);
+		}
+		MapSqlParameterSource lineParams = new MapSqlParameterSource().addValue("ids", ids).addValue("appId", appId);
+		named.query("""
+				SELECT
+				    ie.invoice_id,
+				    ie.entity_description,
+				    ie.total_amount,
+				    et.entity_type
+				FROM transactions.invoice_entity ie
+				LEFT JOIN transactions.lu_entity_type et
+				  ON et.entity_type_id = ie.entity_type_id
+				WHERE ie.invoice_id IN (:ids)
+				  AND ie.application_id = :appId
+				  AND COALESCE(ie.is_active, true) = true
+				ORDER BY ie.created_on ASC
+				""", lineParams, rs -> {
+			UUID invoiceId = (UUID) rs.getObject("invoice_id");
+			Map<String, Object> inv = byId.get(invoiceId);
+			if (inv == null) {
+				return;
+			}
+			@SuppressWarnings("unchecked")
+			List<Map<String, Object>> items = (List<Map<String, Object>>) inv.get("items");
+			Map<String, Object> line = new HashMap<>();
+			line.put("entityDescription", rs.getString("entity_description"));
+			line.put("entityType", rs.getString("entity_type"));
+			line.put("totalAmount", rs.getBigDecimal("total_amount"));
+			items.add(line);
+		});
+		return invoices;
 	}
 
 	private static BigDecimal s2(BigDecimal v) {

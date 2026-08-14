@@ -47,6 +47,22 @@ public class TransactionControllerV2 {
 		return ResponseEntity.ok(response);
 	}
 
+	@GetMapping("/invoices")
+	public ResponseEntity<?> searchInvoices(
+			@RequestParam(required = false) LocalDate fromDate,
+			@RequestParam(required = false) LocalDate invoiceDateFrom,
+			@RequestParam(required = false) LocalDate toDate,
+			@RequestParam(required = false) LocalDate invoiceDateTo,
+			@RequestParam(required = false) UUID locationId,
+			@RequestParam(required = false) String availabilityTypeCode,
+			@RequestParam(required = false, defaultValue = "1") Integer page,
+			@RequestParam(required = false, defaultValue = "50") Integer size) {
+		LocalDate from = fromDate != null ? fromDate : invoiceDateFrom;
+		LocalDate to = toDate != null ? toDate : invoiceDateTo;
+		return ResponseEntity.ok(transactionService.searchInvoices(from, to, locationId, availabilityTypeCode, page,
+				size));
+	}
+
 	@GetMapping("/invoices/client/{clientRoleId}")
 	public ResponseEntity<List<InvoiceSummaryDTO>> listByClientRole(@PathVariable UUID clientRoleId,
 			@RequestParam(required = false) Integer limit, @RequestParam(required = false) Integer offset) {

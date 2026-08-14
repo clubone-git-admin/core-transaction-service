@@ -107,6 +107,10 @@ public interface TransactionDAO {
 	List<io.clubone.transaction.v2.vo.InvoiceSummaryDTO> findByClientRole(UUID clientRoleId, Integer limit,
 			Integer offset);
 
+	/** Date/location POS invoice search for Orbit / reporting (headers + line items). */
+	List<java.util.Map<String, Object>> searchInvoices(java.time.LocalDate fromDate, java.time.LocalDate toDate,
+			UUID locationId, String availabilityTypeCode, int limit, int offset);
+
 	Optional<InvoiceDetailRaw> loadInvoiceAggregate(UUID invoiceId);
 
 	/** Effective price for a specific cycle of a plan. */

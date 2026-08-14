@@ -13,6 +13,9 @@ public interface TransactionServicev2 {
 	
 	CreateInvoiceResponse createInvoice(InvoiceRequest request);
 	List<InvoiceSummaryDTO> listInvoicesByClientRole(UUID clientRoleId, Integer limit, Integer offset);
+
+	java.util.Map<String, Object> searchInvoices(LocalDate fromDate, LocalDate toDate, UUID locationId,
+			String availabilityTypeCode, Integer page, Integer size);
 	InvoiceDetailDTO getInvoiceDetail(UUID invoiceId);
 	CreateInvoiceResponse createFutureInvoice(UUID invoiceId, int cycleNumber, LocalDate billingDate, UUID actorId,
 			UUID clientAgreementId, UUID applicationId, UUID levelId);
