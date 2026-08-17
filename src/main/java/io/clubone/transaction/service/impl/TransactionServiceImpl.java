@@ -620,6 +620,8 @@ public class TransactionServiceImpl implements TransactionService {
 				req.getBillingQuoteFinalizeSpecs() == null ? 0 : req.getBillingQuoteFinalizeSpecs().size(),
 				req.getClientAgreementId());
 
+		logBillingQuoteFinalizeSpecs(req.getInvoiceId(), req.getBillingQuoteFinalizeSpecs());
+
 		if (req.getInvoiceId() == null) {
 			logger.warn("[transactions/v3/finalize] step=validation outcome=reject reason=missing_invoice_id");
 			return new FinalizeTransactionResponse(null, "UNPAID", null, null, "invoiceId is required");
@@ -794,6 +796,12 @@ public class TransactionServiceImpl implements TransactionService {
 		final boolean partialPaymentHint = partialPayment;
 		final boolean deferInventoryUntilQuotePersistence =
 				containsAgreementBillingQuoteSpec(req.getBillingQuoteFinalizeSpecs());
+		logger.info(
+				"[transactions/v3/finalize] step=inventory_defer_decision invoiceId={} "
+						+ "deferInventoryUntilQuotePersistence={} billingQuoteSpecCount={}",
+				req.getInvoiceId(),
+				deferInventoryUntilQuotePersistence,
+				req.getBillingQuoteFinalizeSpecs() == null ? 0 : req.getBillingQuoteFinalizeSpecs().size());
 
 		FinalizePersistOutcome outcome = loadPressureGuard.withFinalizeDb(() -> finalizePersistTx.execute(status -> {
 			boolean partial = partialPaymentHint;
@@ -1204,11 +1212,21 @@ public class TransactionServiceImpl implements TransactionService {
 						invoiceId, specsCopy.size(), transactionId);
 				List<BillingQuoteLineItemsResponse> quoteLineItems = subscriptionPlanHelper
 						.fetchQuoteLineItems(specsCopy);
+				logger.info(
+						"[transactions/v3/finalize] step=billing_quote_fetch outcome=ok "
+								+ "invoiceId={} requestedSpecCount={} responseCount={}",
+						invoiceId, specsCopy.size(), quoteLineItems == null ? 0 : quoteLineItems.size());
+				logBillingQuoteResponses(invoiceId, quoteLineItems);
 				Optional<UUID> cpmHint = subscriptionPlanDao.findClientPaymentMethodIdByTransactionId(transactionId);
 				if (cpmHint.isEmpty() && clientPaymentTransactionId != null) {
 					cpmHint = subscriptionPlanDao
 							.findClientPaymentMethodIdByClientPaymentTransactionId(clientPaymentTransactionId);
 				}
+				logger.info(
+						"[transactions/v3/finalize] step=billing_quote_persist start "
+								+ "invoiceId={} responseCount={} clientAgreementId={} transactionId={}",
+						invoiceId, quoteLineItems == null ? 0 : quoteLineItems.size(),
+						clientAgreementId, transactionId);
 				billingQuoteSubscriptionPersistenceService.persistFromQuoteResponses(
 						quoteLineItems,
 						transactionId,
@@ -1223,6 +1241,12 @@ public class TransactionServiceImpl implements TransactionService {
 						"[transactions/v3/finalize] step=billing_quote_persist outcome=ok invoiceId={} responseCount={}",
 						invoiceId, quoteLineItems.size());
 				if (provisionInventoryAfterPersistence) {
+					logger.info(
+							"[transactions/v3/finalize] step=inventory_event_before_publish "
+									+ "invoiceId={} clientPaymentTransactionId={} actorId={} "
+									+ "locationId={} applicationId={} responseCount={}",
+							invoiceId, clientPaymentTransactionId, actorId, locationId,
+							applicationId, quoteLineItems == null ? 0 : quoteLineItems.size());
 					publishFinalizedInvoiceInventoryEvent(
 							invoiceId,
 							clientPaymentTransactionId,
@@ -1251,6 +1275,58 @@ public class TransactionServiceImpl implements TransactionService {
 				.anyMatch(code -> "AGREEMENT".equalsIgnoreCase(code.trim()));
 	}
 
+	private void logBillingQuoteFinalizeSpecs(
+			UUID invoiceId,
+			List<BillingQuoteFinalizeSpec> specs) {
+		if (CollectionUtils.isEmpty(specs)) {
+			logger.info(
+					"[transactions/v3/finalize] step=billing_quote_specs invoiceId={} count=0",
+					invoiceId);
+			return;
+		}
+
+		for (int index = 0; index < specs.size(); index++) {
+			logger.info(
+					"[transactions/v3/finalize] step=billing_quote_spec invoiceId={} "
+							+ "index={} spec={}",
+					invoiceId, index, toDebugJson(specs.get(index)));
+		}
+	}
+
+	private void logBillingQuoteResponses(
+			UUID invoiceId,
+			List<BillingQuoteLineItemsResponse> responses) {
+		if (CollectionUtils.isEmpty(responses)) {
+			logger.warn(
+					"[transactions/v3/finalize] step=billing_quote_responses "
+							+ "invoiceId={} count=0",
+					invoiceId);
+			return;
+		}
+
+		for (int index = 0; index < responses.size(); index++) {
+			logger.info(
+					"[transactions/v3/finalize] step=billing_quote_response invoiceId={} "
+							+ "index={} response={}",
+					invoiceId, index, toDebugJson(responses.get(index)));
+		}
+	}
+
+	private String toDebugJson(Object value) {
+		if (value == null) {
+			return "null";
+		}
+		try {
+			return new ObjectMapper().writeValueAsString(value);
+		} catch (JsonProcessingException exception) {
+			logger.warn(
+					"[transactions/v3/finalize] step=debug_json_serialization "
+							+ "outcome=failed type={} message={}",
+					value.getClass().getName(), exception.getMessage());
+			return String.valueOf(value);
+		}
+	}
+
 	private void publishFinalizedInvoiceInventoryEvent(
 			UUID invoiceId,
 			UUID clientPaymentTransactionId,
@@ -1259,6 +1335,12 @@ public class TransactionServiceImpl implements TransactionService {
 			UUID applicationId,
 			String correlationId,
 			String outcome) {
+		logger.info(
+				"[transactions/v3/finalize] step=inventory_event_publish start "
+						+ "invoiceId={} clientPaymentTransactionId={} actorId={} "
+						+ "locationId={} applicationId={} correlationId={}",
+				invoiceId, clientPaymentTransactionId, actorId, locationId,
+				applicationId, correlationId);
 		applicationEventPublisher.publishEvent(
 				new FinalizedInvoiceInventoryEvent(
 						invoiceId,

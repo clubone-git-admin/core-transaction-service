@@ -303,6 +303,23 @@ public class InvoiceInventoryProvisioningRepository {
             UUID invoiceId) {
 
         return jdbc.query("""
+                WITH latest_snapshot AS (
+                    SELECT
+                        snapshot.subscription_purchase_snapshot_id
+                    FROM client_subscription_billing
+                        .subscription_purchase_snapshot snapshot
+                    JOIN client_subscription_billing
+                        .subscription_purchase_snapshot_line snapshot_line
+                      ON snapshot_line.subscription_purchase_snapshot_id =
+                         snapshot.subscription_purchase_snapshot_id
+                    WHERE snapshot_line.invoice_id = :invoiceId
+                    GROUP BY
+                        snapshot.subscription_purchase_snapshot_id
+                    ORDER BY
+                        max(snapshot_line.created_on) DESC,
+                        snapshot.subscription_purchase_snapshot_id DESC
+                    LIMIT 1
+                )
                 SELECT DISTINCT ON (
                     snapshot_line.purchase_snapshot_line_id,
                     item_version.item_version_id,
@@ -342,6 +359,9 @@ public class InvoiceInventoryProvisioningRepository {
                     .subscription_purchase_snapshot snapshot
                   ON snapshot.subscription_purchase_snapshot_id =
                      snapshot_line.subscription_purchase_snapshot_id
+                JOIN latest_snapshot
+                  ON latest_snapshot.subscription_purchase_snapshot_id =
+                     snapshot.subscription_purchase_snapshot_id
                 JOIN client_subscription_billing
                     .subscription_purchase_snapshot_entitlement entitlement
                   ON entitlement.purchase_snapshot_line_id =

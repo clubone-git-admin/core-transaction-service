@@ -207,13 +207,27 @@ public class BillingQuoteSubscriptionPersistenceService {
 	}
 
 	private VendorCatalogItemRow pickCatalogItemForLine(QuoteLineItemRow li, List<VendorCatalogItemRow> items,
-			Set<UUID> consumedItemEntityIds) {
+			Set<UUID> consumedItemEntityIds, UUID preferredBundleItemId) {
 		if (items == null || items.isEmpty()) {
 			return null;
 		}
 		boolean feeLine = isFeeItemGroupLine(li);
 		String label = li != null && li.getLabel() != null ? li.getLabel().trim() : "";
 		String labelLower = label.toLowerCase(Locale.ROOT);
+		if (preferredBundleItemId != null) {
+			for (VendorCatalogItemRow it : items) {
+				if (it == null || it.itemEntityId() == null || it.itemVersionId() == null) {
+					continue;
+				}
+				if (consumedItemEntityIds.contains(it.itemEntityId())) {
+					continue;
+				}
+				if (preferredBundleItemId.equals(it.bundleItemId())
+						&& feeLine == it.feeLikeCatalogItem()) {
+					return it;
+				}
+			}
+		}
 		for (VendorCatalogItemRow it : items) {
 			if (it == null || it.itemEntityId() == null || it.itemVersionId() == null) {
 				continue;
@@ -2720,7 +2734,12 @@ private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 			UUID pkgVersion = pos != null ? pos.getPackageVersionId() : null;
 			UUID entityVersionIdForLine = pkgVersion;
 			if (catalogItems != null && !catalogItems.isEmpty()) {
-				VendorCatalogItemRow matched = pickCatalogItemForLine(li, catalogItems, consumedCatalogItemEntityIds);
+				UUID preferredBundleItemId = pos != null ? pos.getPackageItemId() : null;
+				VendorCatalogItemRow matched = pickCatalogItemForLine(
+						li,
+						catalogItems,
+						consumedCatalogItemEntityIds,
+						preferredBundleItemId);
 				if (matched != null) {
 					entityVersionIdForLine = matched.itemVersionId();
 					if (matched.itemDisplayName() != null && !matched.itemDisplayName().isBlank()) {

@@ -499,15 +499,29 @@ public class FinalizeInventoryProvisioningHelper {
             UUID invoiceId,
             ItemEntitlement entitlement) {
 
-        String raw = String.join(
-                "|",
-                invoiceId.toString(),
-                entitlement.invoiceEntityId().toString(),
-                entitlement.itemVersionId().toString(),
-                entitlement.packageItemId() == null
-                        ? "-"
-                        : entitlement.packageItemId().toString()
-        );
+        String raw;
+        if ("AGREEMENT".equalsIgnoreCase(
+                entitlement.sourceEntityType())) {
+            raw = String.join(
+                    "|",
+                    invoiceId.toString(),
+                    "AGREEMENT",
+                    entitlement.itemVersionId().toString(),
+                    entitlement.packageItemId() == null
+                            ? "-"
+                            : entitlement.packageItemId().toString()
+            );
+        } else {
+            raw = String.join(
+                    "|",
+                    invoiceId.toString(),
+                    entitlement.invoiceEntityId().toString(),
+                    entitlement.itemVersionId().toString(),
+                    entitlement.packageItemId() == null
+                            ? "-"
+                            : entitlement.packageItemId().toString()
+            );
+        }
 
         return "finalize-inventory-"
                 + sha256(raw).substring(0, 32);

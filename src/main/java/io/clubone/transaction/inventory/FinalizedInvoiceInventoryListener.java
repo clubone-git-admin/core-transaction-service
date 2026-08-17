@@ -11,8 +11,7 @@ import org.springframework.transaction.event.TransactionalEventListener;
 @RequiredArgsConstructor
 public class FinalizedInvoiceInventoryListener {
 
-    private final FinalizeInventoryProvisioningHelper
-            inventoryProvisioningHelper;
+    private final FinalizeInventoryProvisioningHelper inventoryProvisioningHelper;
 
     /**
      * fallbackExecution is required for agreement purchases because their
@@ -23,14 +22,13 @@ public class FinalizedInvoiceInventoryListener {
             phase = TransactionPhase.AFTER_COMMIT,
             fallbackExecution = true
     )
-    public void provisionInventory(
-            FinalizedInvoiceInventoryEvent event) {
+    public void provisionInventory(FinalizedInvoiceInventoryEvent event) {
 
         log.info(
                 "[inventory-provisioning] step=listener_received "
-                        + "invoiceId={}, clientPaymentTransactionId={}, "
-                        + "actorId={}, locationId={}, applicationId={}, "
-                        + "correlationId={}",
+                        + "thread={} invoiceId={} clientPaymentTransactionId={} "
+                        + "actorId={} locationId={} applicationId={} correlationId={}",
+                Thread.currentThread().getName(),
                 event.invoiceId(),
                 event.clientPaymentTransactionId(),
                 event.actorId(),
@@ -40,36 +38,60 @@ public class FinalizedInvoiceInventoryListener {
         );
 
         try {
+            log.info(
+                    "[inventory-provisioning] step=helper_call start "
+                            + "invoiceId={} clientPaymentTransactionId={} correlationId={}",
+                    event.invoiceId(),
+                    event.clientPaymentTransactionId(),
+                    event.correlationId()
+            );
+
             InventoryProvisioningResult result =
-                    inventoryProvisioningHelper
-                            .provisionForFinalizedInvoice(
-                                    event.invoiceId(),
-                                    event.clientPaymentTransactionId(),
-                                    event.actorId(),
-                                    event.locationId(),
-                                    event.applicationId(),
-                                    event.correlationId()
-                            );
+                    inventoryProvisioningHelper.provisionForFinalizedInvoice(
+                            event.invoiceId(),
+                            event.clientPaymentTransactionId(),
+                            event.actorId(),
+                            event.locationId(),
+                            event.applicationId(),
+                            event.correlationId()
+                    );
+
+            if (result == null) {
+                log.warn(
+                        "[inventory-provisioning] step=helper_call outcome=null_result "
+                                + "invoiceId={} clientPaymentTransactionId={} correlationId={}",
+                        event.invoiceId(),
+                        event.clientPaymentTransactionId(),
+                        event.correlationId()
+                );
+                return;
+            }
 
             log.info(
                     "[inventory-provisioning] step=complete outcome=ok "
                             + "invoiceId={} clientRoleId={} "
                             + "invoiceEntityCount={} entitlementCount={} "
-                            + "createdCount={} skippedCount={}",
+                            + "createdCount={} skippedCount={} correlationId={}",
                     result.invoiceId(),
                     result.clientRoleId(),
                     result.invoiceEntityCount(),
                     result.entitlementCount(),
                     result.createdCount(),
-                    result.skippedCount()
+                    result.skippedCount(),
+                    event.correlationId()
             );
         } catch (Exception exception) {
             log.error(
                     "[inventory-provisioning] step=complete outcome=failed "
-                            + "invoiceId={} clientPaymentTransactionId={} "
+                            + "exceptionType={} invoiceId={} clientPaymentTransactionId={} "
+                            + "actorId={} locationId={} applicationId={} "
                             + "correlationId={} message={}",
+                    exception.getClass().getName(),
                     event.invoiceId(),
                     event.clientPaymentTransactionId(),
+                    event.actorId(),
+                    event.locationId(),
+                    event.applicationId(),
                     event.correlationId(),
                     exception.getMessage(),
                     exception
