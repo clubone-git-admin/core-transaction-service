@@ -162,6 +162,79 @@ public class TransactionDAOImpl implements TransactionDAO {
 			  AND i.application_id = ?
 			""";
 
+	@Override
+	public boolean assignLocationLocker(
+			UUID locationLockerId,
+			UUID clientAgreementId,
+			UUID clientRoleId,
+			UUID invoiceId,
+			UUID transactionId,
+			UUID locationId,
+			UUID applicationId,
+			UUID actorId) {
+		if (locationLockerId == null || clientAgreementId == null || clientRoleId == null
+				|| invoiceId == null || transactionId == null || locationId == null
+				|| applicationId == null || actorId == null) {
+			return false;
+		}
+
+		Boolean alreadyAssigned = cluboneJdbcTemplate.queryForObject("""
+				SELECT EXISTS (
+				    SELECT 1
+				      FROM client_agreements.client_locker_assignment cla
+				     WHERE cla.application_id = ?
+				       AND cla.location_locker_id = ?
+				       AND cla.client_agreement_id = ?
+				       AND cla.client_role_id = ?
+				       AND cla.invoice_id = ?
+				       AND cla.transaction_id = ?
+				       AND cla.status_code = 'ACTIVE'
+				)
+				""", Boolean.class, applicationId, locationLockerId, clientAgreementId,
+				clientRoleId, invoiceId, transactionId);
+		if (Boolean.TRUE.equals(alreadyAssigned)) {
+			return true;
+		}
+
+		int claimed = cluboneJdbcTemplate.update("""
+				UPDATE items.location_locker
+				   SET is_available = false,
+				       modified_by = ?,
+				       modified_on = timezone('UTC', now())
+				 WHERE location_locker_id = ?
+				   AND application_id = ?
+				   AND location_id = ?
+				   AND is_active = true
+				   AND is_available = true
+				""", actorId, locationLockerId, applicationId, locationId);
+		if (claimed != 1) {
+			return false;
+		}
+
+		int inserted = cluboneJdbcTemplate.update("""
+				INSERT INTO client_agreements.client_locker_assignment
+				       (application_id, location_locker_id, client_agreement_id,
+				        client_role_id, invoice_id, transaction_id,
+				        assigned_from, assigned_until, status_code,
+				        created_by, created_on)
+				SELECT ?, ?, ca.client_agreement_id,
+				       ca.client_role_id, ?, ?,
+				       ca.start_date_utc, ca.end_date_utc, 'ACTIVE',
+				       ?, timezone('UTC', now())
+				  FROM client_agreements.client_agreement ca
+				 WHERE ca.client_agreement_id = ?
+				   AND ca.client_role_id = ?
+				   AND ca.is_active = true
+				""", applicationId, locationLockerId, invoiceId, transactionId,
+				actorId, clientAgreementId, clientRoleId);
+
+		if (inserted != 1) {
+			throw new IllegalStateException(
+					"Unable to create Locker assignment for clientAgreementId=" + clientAgreementId);
+		}
+		return true;
+	}
+
 	private static final String UPDATE_TRANSACTION_CLIENT_AGREEMENT_SQL = """
 			UPDATE transactions.invoice i
 			SET client_agreement_id = ?,

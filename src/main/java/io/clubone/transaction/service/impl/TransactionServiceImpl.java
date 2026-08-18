@@ -639,6 +639,32 @@ public class TransactionServiceImpl implements TransactionService {
 		req.setLevelId(invoiceSummary.getLevelId());
 		final UUID effectiveClientAgreementId = req.getClientAgreementId() != null ? req.getClientAgreementId()
 				: invoiceSummary.getClientAgreementId();
+		final List<UUID> selectedLocationLockerIds = CollectionUtils
+				.isEmpty(req.getBillingQuoteFinalizeSpecs())
+						? List.of()
+						: req.getBillingQuoteFinalizeSpecs().stream()
+								.filter(Objects::nonNull)
+								.filter(spec -> "AGREEMENT".equalsIgnoreCase(
+										StringUtils.trimWhitespace(spec.getEntityTypeCode())))
+								.map(BillingQuoteFinalizeSpec::getLocationLockerId)
+								.filter(Objects::nonNull)
+								.distinct()
+								.toList();
+
+		if (!selectedLocationLockerIds.isEmpty()) {
+			if (effectiveClientAgreementId == null) {
+				return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null,
+						"clientAgreementId is required when a Locker is selected");
+			}
+			if (invoiceSummary.getClientRoleId() == null) {
+				return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null,
+						"clientRoleId is required when a Locker is selected");
+			}
+			if (applicationId == null || locationId == null || actorId == null) {
+				return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null,
+						"applicationId, locationId and actorId are required when a Locker is selected");
+			}
+		}
 
 		if (!CollectionUtils.isEmpty(req.getBillingQuoteFinalizeSpecs())) {
 			// Client agreement is only for AGREEMENT/contract purchases. Package/bundle/item
@@ -909,6 +935,23 @@ public class TransactionServiceImpl implements TransactionService {
 						req.getInvoiceId(), issuedGiftcards.size());
 
 				transactionDAO.activateAgreementAndClientStatusForInvoice(req.getInvoiceId(), req.getCreatedBy());
+
+				for (UUID locationLockerId : selectedLocationLockerIds) {
+					boolean assigned = transactionDAO.assignLocationLocker(
+							locationLockerId,
+							effectiveClientAgreementId,
+							req.getClientRoleId(),
+							req.getInvoiceId(),
+							transactionId,
+							locationId,
+							applicationId,
+							actorId);
+					if (!assigned) {
+						throw new ResponseStatusException(
+								HttpStatus.CONFLICT,
+								"The selected Locker is no longer available. Please select another Locker.");
+					}
+				}
 
 				if (!deferInventoryUntilQuotePersistence) {
 					publishFinalizedInvoiceInventoryEvent(

@@ -202,4 +202,16 @@ public interface TransactionDAO {
 	        UUID applicationId,
 	        UUID actorId
 	);
+	
+	// Add this method inside the existing TransactionDAO interface.
+	boolean assignLocationLocker(
+	        UUID locationLockerId,
+	        UUID clientAgreementId,
+	        UUID clientRoleId,
+	        UUID invoiceId,
+	        UUID transactionId,
+	        UUID locationId,
+	        UUID applicationId,
+	        UUID actorId);
+
 }
