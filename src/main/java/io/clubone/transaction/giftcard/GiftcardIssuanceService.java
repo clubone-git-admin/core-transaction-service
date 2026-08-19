@@ -9,11 +9,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
-
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.math.RoundingMode;
@@ -122,15 +120,20 @@ public class GiftcardIssuanceService {
                     source_item_id, source_item_version_id, source_cfg_giftcard_id,
                     purchase_invoice_id, purchase_invoice_entity_id, purchase_unit_sequence,
                     purchase_location_id, purchaser_client_role_id, owner_client_role_id,
-                    card_token_hash, card_last4, currency_code,
+                    giftcard_number, card_token_hash, card_last4, currency_code,
                     original_amount_minor, current_balance_minor, reserved_balance_minor,
                     status_code, issued_on, activated_on, expires_on, last_activity_on,
                     policy_snapshot, row_version, is_active, created_by, created_on
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, 0,
                     ?, ?, ?, ?, ?, ?::jsonb, 0, TRUE, ?, ?
                 )
-                ON CONFLICT (application_id, purchase_invoice_entity_id, purchase_unit_sequence)
+                ON CONFLICT (
+                    application_id,
+                    purchase_invoice_entity_id,
+                    purchase_unit_sequence
+                )
                 WHERE purchase_invoice_entity_id IS NOT NULL
                   AND purchase_unit_sequence IS NOT NULL
                 DO NOTHING
@@ -146,6 +149,10 @@ public class GiftcardIssuanceService {
                 line.purchaseLevelId(),
                 line.purchaserClientRoleId(),
                 line.purchaserClientRoleId(),
+
+                // Full GC number
+                cardNumber,
+
                 tokenHash,
                 cardLast4,
                 line.currencyCode().trim().toUpperCase(Locale.ROOT),
@@ -162,6 +169,25 @@ public class GiftcardIssuanceService {
         );
 
         if (inserted == 0) {
+            jdbc.update(
+                    """
+                    UPDATE client_giftcard.giftcard_account
+                    SET giftcard_number = ?,
+                        modified_by = ?,
+                        modified_on = ?
+                    WHERE application_id = ?
+                      AND purchase_invoice_entity_id = ?
+                      AND purchase_unit_sequence = ?
+                      AND giftcard_number IS NULL
+                    """,
+                    cardNumber,
+                    actorId,
+                    now,
+                    line.applicationId(),
+                    line.invoiceEntityId(),
+                    sequence
+            );
+
             return loadExisting(line, sequence, cardNumber);
         }
 
@@ -202,27 +228,40 @@ public class GiftcardIssuanceService {
     private GiftcardIssuedDTO loadExisting(
             GiftcardPurchaseLineRow line,
             int sequence,
-            String cardNumber
+            String generatedCardNumber
     ) {
         return jdbc.queryForObject(
                 """
-                SELECT client_giftcard_id, card_last4, current_balance_minor,
-                       currency_code, status_code, expires_on
+                SELECT client_giftcard_id,
+                       giftcard_number,
+                       card_last4,
+                       current_balance_minor,
+                       currency_code,
+                       status_code,
+                       expires_on
                 FROM client_giftcard.giftcard_account
                 WHERE application_id = ?
                   AND purchase_invoice_entity_id = ?
                   AND purchase_unit_sequence = ?
                 """,
-                (rs, rowNum) -> new GiftcardIssuedDTO(
-                        rs.getObject("client_giftcard_id", UUID.class),
-                        cardNumber,
-                        rs.getString("card_last4"),
-                        rs.getLong("current_balance_minor"),
-                        rs.getString("currency_code"),
-                        rs.getString("status_code"),
-                        rs.getObject("expires_on", OffsetDateTime.class)
-                ),
-                line.applicationId(), line.invoiceEntityId(), sequence
+                (rs, rowNum) -> {
+                    String storedCardNumber = rs.getString("giftcard_number");
+
+                    return new GiftcardIssuedDTO(
+                            rs.getObject("client_giftcard_id", UUID.class),
+                            StringUtils.hasText(storedCardNumber)
+                                    ? storedCardNumber
+                                    : generatedCardNumber,
+                            rs.getString("card_last4"),
+                            rs.getLong("current_balance_minor"),
+                            rs.getString("currency_code"),
+                            rs.getString("status_code"),
+                            rs.getObject("expires_on", OffsetDateTime.class)
+                    );
+                },
+                line.applicationId(),
+                line.invoiceEntityId(),
+                sequence
         );
     }
 
