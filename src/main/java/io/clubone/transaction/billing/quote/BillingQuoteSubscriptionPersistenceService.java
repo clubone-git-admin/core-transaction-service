@@ -69,6 +69,7 @@ public class BillingQuoteSubscriptionPersistenceService {
 	private static final Logger log = LoggerFactory.getLogger(BillingQuoteSubscriptionPersistenceService.class);
 
 	private static final Pattern CYCLE_LABEL_NUMBER = Pattern.compile("(?i)cycle\\s*#?\\s*(\\d+)");
+	private static final int ADDITIONAL_BILLING_CYCLES = 6;
 
 	/** First two ISO dates in {@code period_label} (e.g. human text with embedded yyyy-MM-dd). */
 	private static final Pattern PERIOD_LABEL_ISO_DATES = Pattern.compile("(\\d{4}-\\d{2}-\\d{2})");
@@ -1009,6 +1010,11 @@ public class BillingQuoteSubscriptionPersistenceService {
 				anyLineProrated, aggregateChargeBelowFullCycle);
 
 		List<PendingSchedule> pending = buildPendingSchedules(subscriptionLines, recurringRows);
+		RecurringForecastRow fullAmountSourceRow = findLastFullAmountRecurringRow(recurringRows);
+		log.info(
+				"[billing-quote/persist] step=additional_cycles_configuration returnedScheduleCount={} additionalCycleCount={} targetScheduleCount={} hasFullAmountSource={}",
+				pending.size(), ADDITIONAL_BILLING_CYCLES, pending.size() + ADDITIONAL_BILLING_CYCLES,
+				fullAmountSourceRow != null);
 		LocalDate contractEndResolved = resolveMembershipContractEndFromPending(pending, recurringRows, contractStart,
 				contractEnd);
 		if (contractEndResolved != null && !contractEndResolved.equals(contractEnd)) {
@@ -1083,9 +1089,12 @@ public class BillingQuoteSubscriptionPersistenceService {
 
 		UUID primaryBillingScheduleId = null;
 		LocalDate previousBillDate = null;
+		ForecastBounds lastPersistedBounds = null;
+		int lastPersistedCycleNumber = 0;
+		LocalDate finalSchedulePeriodEnd = contractEnd;
 		for (int i = 0; i < pending.size(); i++) {
 			PendingSchedule ps = pending.get(i);
-			boolean isLast = i == pending.size() - 1;
+			boolean isLast = ADDITIONAL_BILLING_CYCLES == 0 && i == pending.size() - 1;
 			UUID schStatus;
 			UUID invId;
 			Timestamp billedOn;
@@ -1111,6 +1120,11 @@ public class BillingQuoteSubscriptionPersistenceService {
 			LocalDate billDate = normalizePersistedBillingDate(rawBillDate, bounds.periodStart(), contractStart,
 					previousBillDate, ps.fromAgg(), todayInQuoteTz);
 			previousBillDate = billDate;
+			lastPersistedBounds = bounds;
+			lastPersistedCycleNumber = Math.max(lastPersistedCycleNumber, ps.cycleNumber());
+			if (bounds.periodEnd() != null) {
+				finalSchedulePeriodEnd = bounds.periodEnd();
+			}
 			boolean rowProrated = ps.fromAgg() ? firstCycleProrated : recurringRowIndicatesProration(ps.recRow());
 			String prCase = rowProrated ? billing.getProrationCase() : null;
 			String prStrat = rowProrated ? billing.getProrationStrategyCode() : null;
@@ -1165,17 +1179,90 @@ public class BillingQuoteSubscriptionPersistenceService {
 			}
 		}
 
-		if (pending.size() > 0) {
+		int additionalSchedulesCreated = 0;
+		if (ADDITIONAL_BILLING_CYCLES > 0) {
+			if (lastPersistedBounds == null || lastPersistedBounds.periodEnd() == null) {
+				throw new IllegalStateException(
+						"Cannot generate additional billing cycles because no existing billing schedule period was created");
+			}
+			if (fullAmountSourceRow == null) {
+				throw new IllegalStateException(
+						"Cannot generate additional billing cycles because the quote did not return a full-amount recurring cycle");
+			}
+
+			LocalDate additionalPeriodStart = lastPersistedBounds.periodEnd().plusDays(1);
+			LocalDate additionalBillDate = previousBillDate;
+			int billingIntervalCount = nz(billing.getIntervalCount(), 1);
+
+			for (int additionalIndex = 1; additionalIndex <= ADDITIONAL_BILLING_CYCLES; additionalIndex++) {
+				int cycleNumber = lastPersistedCycleNumber + additionalIndex;
+				LocalDate additionalPeriodEnd = calculateAdditionalPeriodEnd(additionalPeriodStart,
+						billing.getFrequencyCode(), billingIntervalCount);
+				additionalBillDate = calculateNextBillingDate(additionalBillDate, additionalPeriodStart,
+						billing.getFrequencyCode(), billingIntervalCount);
+				boolean finalAdditionalCycle = additionalIndex == ADDITIONAL_BILLING_CYCLES;
+				ForecastBounds additionalBounds = new ForecastBounds(additionalPeriodStart, additionalPeriodEnd);
+
+				UUID additionalScheduleId = insertSubscriptionBillingSchedule(
+						subscriptionInstanceId,
+						subscriptionPlanId,
+						cycleNumber,
+						"Cycle " + cycleNumber,
+						ensurePeriodLabelForBounds(additionalBounds, null),
+						additionalPeriodStart,
+						additionalPeriodEnd,
+						additionalBillDate,
+						1,
+						nzBd(fullAmountSourceRow.resolvedUnitPrice(), BigDecimal.ZERO),
+						nzBd(fullAmountSourceRow.resolvedUnitPriceBeforeDiscount(),
+								fullAmountSourceRow.resolvedUnitPrice()),
+						recurringRowBaseAmountBeforeTax(fullAmountSourceRow),
+						recurringRowDiscountAmount(fullAmountSourceRow),
+						nzBd(fullAmountSourceRow.resolvedTaxAmount(), BigDecimal.ZERO),
+						nzBd(fullAmountSourceRow.resolvedTaxPct(), BigDecimal.ZERO),
+						recurringRowNetAmount(fullAmountSourceRow),
+						false,
+						false,
+						finalAdditionalCycle,
+						plannedScheduleStatusId,
+						null,
+						null,
+						null,
+						null,
+						null,
+						null,
+						createdBy,
+						applicationId);
+
+				insertBillingScheduleTaxLinesForRecurringRow(additionalScheduleId, fullAmountSourceRow);
+				log.info(
+						"[billing-quote/persist] step=insert_additional_billing_schedule outcome=ok billingScheduleId={} cycleNumber={} billingDate={} periodStart={} periodEnd={} isFinalCycle={}",
+						additionalScheduleId, cycleNumber, additionalBillDate, additionalPeriodStart,
+						additionalPeriodEnd, finalAdditionalCycle);
+
+				additionalSchedulesCreated++;
+				finalSchedulePeriodEnd = additionalPeriodEnd;
+				additionalPeriodStart = additionalPeriodEnd.plusDays(1);
+			}
+		}
+
+		int finalTotalCycles = pending.size() + additionalSchedulesCreated;
+		if (finalTotalCycles > 0) {
 			jdbc.update("""
 					UPDATE client_subscription_billing.subscription_plan
 					SET term_total_cycles = ?
 					WHERE subscription_plan_id = ?
-					""", pending.size(), subscriptionPlanId);
+					""", finalTotalCycles, subscriptionPlanId);
 			jdbc.update("""
 					UPDATE client_subscription_billing.subscription_billing_config_snapshot
 					SET end_specific_date = ?
 					WHERE subscription_billing_config_snapshot_id = ?
-					""", contractEnd, configSnapshotId);
+					""", finalSchedulePeriodEnd, configSnapshotId);
+			jdbc.update("""
+					UPDATE client_subscription_billing.subscription_instance
+					SET billing_end_date = ?
+					WHERE subscription_instance_id = ?
+					""", finalSchedulePeriodEnd, subscriptionInstanceId);
 		}
 
 		if (invoiceId != null) {
@@ -1276,6 +1363,61 @@ public class BillingQuoteSubscriptionPersistenceService {
 			ridx++;
 		}
 		return out;
+	}
+
+	private RecurringForecastRow findLastFullAmountRecurringRow(List<RecurringForecastRow> recurringRows) {
+		if (CollectionUtils.isEmpty(recurringRows)) {
+			return null;
+		}
+		RecurringForecastRow lastValidRow = null;
+		RecurringForecastRow lastNonProratedRow = null;
+		for (RecurringForecastRow row : recurringRows) {
+			if (row == null) {
+				continue;
+			}
+			lastValidRow = row;
+			if (!recurringRowIndicatesProration(row)) {
+				lastNonProratedRow = row;
+			}
+		}
+		return lastNonProratedRow != null ? lastNonProratedRow : lastValidRow;
+	}
+
+	private LocalDate calculateAdditionalPeriodEnd(LocalDate periodStart, String frequencyCode, int intervalCount) {
+		if (periodStart == null) {
+			throw new IllegalArgumentException("periodStart is required");
+		}
+		int interval = Math.max(intervalCount, 1);
+		String frequency = frequencyCode == null ? "" : frequencyCode.trim().toUpperCase(Locale.ROOT);
+		return switch (frequency) {
+		case "DAY", "DAILY" -> periodStart.plusDays(interval).minusDays(1);
+		case "WEEK", "WEEKLY" -> periodStart.plusWeeks(interval).minusDays(1);
+		case "BIWEEKLY", "BI_WEEKLY" -> periodStart.plusWeeks(2L * interval).minusDays(1);
+		case "QUARTER", "QUARTERLY" -> periodStart.plusMonths(3L * interval).minusDays(1);
+		case "YEAR", "YEARLY", "ANNUAL", "ANNUALLY" -> periodStart.plusYears(interval).minusDays(1);
+		case "MONTH", "MONTHLY", "PIF" -> periodStart.plusMonths(interval).minusDays(1);
+		default -> throw new IllegalStateException(
+				"Unsupported billing frequency for additional cycles: " + frequencyCode);
+		};
+	}
+
+	private LocalDate calculateNextBillingDate(LocalDate previousBillingDate, LocalDate newPeriodStart,
+			String frequencyCode, int intervalCount) {
+		if (previousBillingDate == null) {
+			return newPeriodStart;
+		}
+		int interval = Math.max(intervalCount, 1);
+		String frequency = frequencyCode == null ? "" : frequencyCode.trim().toUpperCase(Locale.ROOT);
+		return switch (frequency) {
+		case "DAY", "DAILY" -> previousBillingDate.plusDays(interval);
+		case "WEEK", "WEEKLY" -> previousBillingDate.plusWeeks(interval);
+		case "BIWEEKLY", "BI_WEEKLY" -> previousBillingDate.plusWeeks(2L * interval);
+		case "QUARTER", "QUARTERLY" -> previousBillingDate.plusMonths(3L * interval);
+		case "YEAR", "YEARLY", "ANNUAL", "ANNUALLY" -> previousBillingDate.plusYears(interval);
+		case "MONTH", "MONTHLY", "PIF" -> previousBillingDate.plusMonths(interval);
+		default -> throw new IllegalStateException(
+				"Unsupported billing frequency for additional cycles: " + frequencyCode);
+		};
 	}
 
 	private int resolveForecastCycleNumber(RecurringForecastRow r, int index) {
