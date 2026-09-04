@@ -15,6 +15,8 @@ public class InvoiceEntityDTO {
 
 	private UUID invoiceEntityId;
 	private UUID entityTypeId;
+	/** Lookup name from {@code lu_entity_type} (ITEM, BUNDLE, AGREEMENT). */
+	private String entityType;
 	private UUID entityId;
 	private UUID pricePlanTemplateId;
 	private String entityDescription;

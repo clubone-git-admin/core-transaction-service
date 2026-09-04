@@ -76,6 +76,7 @@ import io.clubone.transaction.v2.vo.InvoiceAuditDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceDetailRaw;
 import io.clubone.transaction.v2.vo.InvoiceLineItemDetailDTO;
+import io.clubone.transaction.v2.vo.InvoicePromotionDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceRefundAllocationDTO;
 import io.clubone.transaction.v2.vo.InvoiceRefundDetailDTO;
 import io.clubone.transaction.v2.vo.InvoiceTransactionDetailDTO;
@@ -432,7 +433,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 						// ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ 2) promotion SECOND
 						if (pkgPromotionId != null) {
 							PromotionItemEffectDTO eff = pkgFx.get(it.getEntityId());
-							applyPromotionEffectOnLeafLine(itemLine, eff);
+							applyPromotionEffectOnLeafLine(itemLine, eff, !isClientQuotedFinalPrice(it));
 						}
 
 
@@ -590,6 +591,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 
 								// ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ 1) discountIds FIRST
+								if (!isClientQuotedFinalPrice(it)) {
 								List<UUID> agrDiscountIds = mergeDiscountIds(e, it);
 								if (!agrDiscountIds.isEmpty()) {
 									Optional<DiscountDetailDTO> best = transactionDAO.findBestDiscountForItemByIds(
@@ -626,11 +628,12 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 										itemLine.setDiscounts(Collections.singletonList(row));
 									});
 								}
+								}
 
 								// ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ 2) promotion SECOND
 								if (agreementPromotionId != null) {
 									PromotionItemEffectDTO eff = agreementFx.get(it.getEntityId());
-									applyPromotionEffectOnLeafLine(itemLine, eff);
+									applyPromotionEffectOnLeafLine(itemLine, eff, !isClientQuotedFinalPrice(it));
 								}
 
 								// ==========================================================
@@ -783,10 +786,12 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 									nextLine.setQuantity(billedQty);
 
 									// re-apply discount + promo
-									applyDiscountIds(e, it, nextLine, invoiceLevelId);
+									if (!isClientQuotedFinalPrice(it)) {
+										applyDiscountIds(e, it, nextLine, invoiceLevelId);
+									}
 									if (agreementPromotionId != null) {
 										PromotionItemEffectDTO eff = agreementFx.get(it.getEntityId());
-										applyPromotionEffectOnLeafLine(nextLine, eff);
+										applyPromotionEffectOnLeafLine(nextLine, eff, !isClientQuotedFinalPrice(it));
 									}
 
 									computeTaxesFromItemOnly(nextLine, it, invoiceLevelId);
@@ -966,7 +971,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 						if (bundlePromotionId != null) {
 							PromotionItemEffectDTO eff = bundleFx.get(it.getEntityId());
-							applyPromotionEffectOnLeafLine(itemLine, eff);
+							applyPromotionEffectOnLeafLine(itemLine, eff, !isClientQuotedFinalPrice(it));
 						}
 
 
@@ -1071,7 +1076,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 						if (itemPromotionId != null) {
 							PromotionItemEffectDTO eff = itemFx.get(it.getEntityId());
-							applyPromotionEffectOnLeafLine(itemLine, eff);
+							applyPromotionEffectOnLeafLine(itemLine, eff, !isClientQuotedFinalPrice(it));
 						}
 
 
@@ -1173,7 +1178,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 					if (itemPromotionId != null) {
 						PromotionItemEffectDTO eff = itemFx.get(it.getEntityId());
-						applyPromotionEffectOnLeafLine(itemLine, eff);
+						applyPromotionEffectOnLeafLine(itemLine, eff, !isClientQuotedFinalPrice(it));
 					}
 
 
@@ -1508,42 +1513,37 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 	 * ============================================================
 	 */
 
+	/**
+	 * POS checkout sends already-quoted net {@code price} + {@code taxAmount}.
+	 * Re-applying catalog promo/discount on that payload understates invoice total.
+	 */
+	private static boolean isClientQuotedFinalPrice(Item it) {
+		return it != null && it.getPrice() != null && it.getTaxAmount() != null;
+	}
+
 	private static void applyPromotionEffectOnLeafLine(InvoiceEntityDTO line, PromotionItemEffectDTO eff) {
+		applyPromotionEffectOnLeafLine(line, eff, true);
+	}
+
+	private static void applyPromotionEffectOnLeafLine(InvoiceEntityDTO line, PromotionItemEffectDTO eff,
+			boolean applyAsInvoiceDiscount) {
 
 		if (eff == null)
 			return;
 
 		BigDecimal qty = BigDecimal.valueOf(def(line.getQuantity(), 1));
-		BigDecimal unitPrice = nz(line.getUnitPrice());
-		BigDecimal lineSub = unitPrice.multiply(qty);
+		BigDecimal lineSub = nz(line.getUnitPrice()).multiply(qty);
+		BigDecimal promoDiscount = computeCatalogPromoDiscount(eff, lineSub, qty);
 
-		String desc = (eff.getEffectTypeDescription() == null) ? ""
-				: eff.getEffectTypeDescription().trim().toLowerCase();
-		BigDecimal valueAmount = nz(eff.getValueAmount());
-		BigDecimal valuePercent = nz(eff.getValuePercent());
-
-		BigDecimal promoDiscount = BigDecimal.ZERO;
-
-		if (desc.contains("fixed amount off")) {
-			promoDiscount = valueAmount.multiply(qty);
-		} else if (desc.contains("percentage off")) {
-			if (valuePercent.compareTo(BigDecimal.ZERO) > 0) {
-				promoDiscount = lineSub.multiply(valuePercent).divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
-			}
-		} else if (desc.contains("set final amount")) {
-			BigDecimal finalLine = valueAmount.multiply(qty);
-			promoDiscount = lineSub.subtract(finalLine);
+		if (applyAsInvoiceDiscount) {
+			line.setDiscountAmount(scale2(nz(line.getDiscountAmount()).add(promoDiscount)));
 		}
-
-		promoDiscount = promoDiscount.max(BigDecimal.ZERO).min(lineSub);
-
-		line.setDiscountAmount(scale2(nz(line.getDiscountAmount()).add(promoDiscount)));
 
 		UUID pvId = eff.getPromotionVersionId();
 		UUID paId = eff.getPromotionApplicabilityId();
 		UUID peId = eff.getPromotionEffectId();
 
-		if (pvId != null && paId != null && peId != null && promoDiscount.compareTo(BigDecimal.ZERO) > 0) {
+		if (pvId != null && promoDiscount.compareTo(BigDecimal.ZERO) > 0) {
 
 			InvoiceEntityPromotionDTO row = new InvoiceEntityPromotionDTO();
 			row.setPromotionVersionId(pvId);
@@ -1557,6 +1557,32 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			line.setPromotions(list);
 		}
 
+	}
+
+	static BigDecimal computeCatalogPromoDiscount(PromotionItemEffectDTO eff, BigDecimal lineSub, BigDecimal qty) {
+		if (eff == null) {
+			return BigDecimal.ZERO;
+		}
+		String desc = (eff.getEffectTypeDescription() == null) ? ""
+				: eff.getEffectTypeDescription().trim().toLowerCase(Locale.ROOT);
+		BigDecimal valueAmount = nz(eff.getValueAmount());
+		BigDecimal valuePercent = nz(eff.getValuePercent());
+		BigDecimal promoDiscount = BigDecimal.ZERO;
+
+		if (desc.contains("percent")) {
+			if (valuePercent.compareTo(BigDecimal.ZERO) > 0) {
+				promoDiscount = lineSub.multiply(valuePercent).divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
+			}
+		} else if (desc.contains("set final") || desc.contains("set price") || desc.contains("final amount")) {
+			BigDecimal finalLine = valueAmount.multiply(qty);
+			promoDiscount = lineSub.subtract(finalLine);
+		} else if (desc.contains("amount off") || desc.contains("fixed") || valueAmount.compareTo(BigDecimal.ZERO) > 0) {
+			promoDiscount = valueAmount.multiply(qty);
+		} else if (valuePercent.compareTo(BigDecimal.ZERO) > 0) {
+			promoDiscount = lineSub.multiply(valuePercent).divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
+		}
+
+		return promoDiscount.max(BigDecimal.ZERO);
 	}
 
 	/*
@@ -2260,6 +2286,11 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			fullInvoice = invoiceDAO.findResolvedFullById(invoiceId);
 		} catch (Exception ex) {
 			log.warn("Invoice full header/line enrichment failed for {}: {}", invoiceId, ex.toString());
+			try {
+				fullInvoice = invoiceDAO.findResolvedById(invoiceId);
+			} catch (Exception ex2) {
+				log.warn("Invoice basic line enrichment also failed for {}: {}", invoiceId, ex2.toString());
+			}
 		}
 
 		String currencyCode = fullInvoice != null ? fullInvoice.getCurrencyCode() : null;
@@ -2285,12 +2316,24 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 				: raw.invoiceAmount();
 		BigDecimal balanceDue = amount.subtract(paidAmount).subtract(refundedAmount).max(BigDecimal.ZERO);
 
-		List<InvoiceLineItemDetailDTO> items = mapInvoiceLineItems(fullInvoice);
-		String productLabel = items.isEmpty()
-				? (entityName == null || entityName.isBlank() ? "Membership" : entityName)
-				: Optional.ofNullable(items.get(0).planName())
-						.or(() -> Optional.ofNullable(items.get(0).entityDescription()))
-						.orElse("Membership");
+		List<InvoicePromotionDetailDTO> promotions = resolveInvoicePromotions(invoiceId, clientAgreementId, fullInvoice);
+		List<InvoiceLineItemDetailDTO> items = overlayPromoDiscountsOnItems(
+				mapInvoiceLineItems(fullInvoice), promotions);
+		BigDecimal promoTotal = promotions.stream()
+				.map(InvoicePromotionDetailDTO::promotionAmount)
+				.filter(a -> a != null)
+				.reduce(BigDecimal.ZERO, BigDecimal::add);
+		if (nz(discountAmount).compareTo(BigDecimal.ZERO) == 0 && promoTotal.compareTo(BigDecimal.ZERO) > 0) {
+			discountAmount = promoTotal;
+			subTotal = nz(subTotal).add(promoTotal);
+		}
+		String productLabel = (entityName != null && !entityName.isBlank())
+				? entityName
+				: (items.isEmpty()
+						? "Membership"
+						: Optional.ofNullable(items.get(0).planName())
+								.or(() -> Optional.ofNullable(items.get(0).entityDescription()))
+								.orElse("Membership"));
 
 		List<InvoiceAuditDetailDTO> auditTrail = buildInvoiceAuditTrail(
 				raw, transactions, refunds, adjustments);
@@ -2327,20 +2370,39 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 				billingCollectionTypeName,
 				createdBy,
 				items,
-				auditTrail);
+				auditTrail,
+				promotions);
 	}
 
 	private static List<InvoiceLineItemDetailDTO> mapInvoiceLineItems(InvoiceDTO fullInvoice) {
 		if (fullInvoice == null || fullInvoice.getLineItems() == null || fullInvoice.getLineItems().isEmpty()) {
 			return List.of();
 		}
-		List<InvoiceLineItemDetailDTO> out = new ArrayList<>();
-		for (InvoiceEntityDTO line : fullInvoice.getLineItems()) {
+		List<InvoiceEntityDTO> lines = fullInvoice.getLineItems();
+		Set<UUID> parentIds = new HashSet<>();
+		boolean hasItemLeaves = false;
+		for (InvoiceEntityDTO line : lines) {
 			if (line == null) continue;
+			if (line.getParentInvoiceEntityId() != null) {
+				parentIds.add(line.getParentInvoiceEntityId());
+			}
+			if (line.getEntityType() != null && "ITEM".equalsIgnoreCase(line.getEntityType().trim())) {
+				hasItemLeaves = true;
+			}
+		}
+		List<InvoiceLineItemDetailDTO> out = new ArrayList<>();
+		for (InvoiceEntityDTO line : lines) {
+			if (line == null) continue;
+			if (line.getInvoiceEntityId() != null && parentIds.contains(line.getInvoiceEntityId())) {
+				continue;
+			}
+			if (hasItemLeaves && isContainerEntityType(line.getEntityType())) {
+				continue;
+			}
 			out.add(new InvoiceLineItemDetailDTO(
 					line.getInvoiceEntityId(),
 					line.getParentInvoiceEntityId(),
-					line.getChargeLineKindCode(),
+					displayEntityType(line),
 					line.getEntityId(),
 					line.getEntityDescription() != null ? line.getEntityDescription() : line.getEntityName(),
 					line.getChargeLineKindCode(),
@@ -2355,11 +2417,271 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 					line.getServicePeriodEnd(),
 					line.getQuantity(),
 					line.getUnitPrice(),
-					line.getDiscountAmount(),
+					displayLineDiscount(line),
 					line.getTaxAmount(),
 					line.getTotalAmount()));
 		}
 		return out;
+	}
+
+	private List<InvoicePromotionDetailDTO> resolveInvoicePromotions(UUID invoiceId, UUID clientAgreementId,
+			InvoiceDTO fullInvoice) {
+		List<InvoicePromotionDetailDTO> fromLines = mapInvoicePromotions(fullInvoice);
+		if (!fromLines.isEmpty()) {
+			return fromLines;
+		}
+		try {
+			List<InvoicePromotionDetailDTO> fromTable = invoiceDAO.findPromotionDetailsByInvoiceId(invoiceId);
+			if (fromTable != null && !fromTable.isEmpty()) {
+				return fromTable;
+			}
+		} catch (Exception ex) {
+			log.warn("Invoice promotion lookup failed for {}: {}", invoiceId, ex.toString());
+		}
+		return synthesizePromotionsFromAgreement(clientAgreementId, fullInvoice);
+	}
+
+	private List<InvoicePromotionDetailDTO> synthesizePromotionsFromAgreement(UUID clientAgreementId,
+			InvoiceDTO fullInvoice) {
+		if (clientAgreementId == null) {
+			return List.of();
+		}
+		List<InvoiceDAO.AgreementPromotionSummary> summaries;
+		try {
+			summaries = invoiceDAO.findAgreementPromotionSummaries(clientAgreementId);
+		} catch (Exception ex) {
+			log.warn("Agreement promotion lookup failed for {}: {}", clientAgreementId, ex.toString());
+			return List.of();
+		}
+		if (summaries == null || summaries.isEmpty()) {
+			return List.of();
+		}
+
+		List<InvoiceEntityDTO> leaves = leafInvoiceEntities(fullInvoice);
+		Set<UUID> itemIds = new HashSet<>();
+		for (InvoiceEntityDTO line : leaves) {
+			if (line != null && line.getEntityId() != null) {
+				itemIds.add(line.getEntityId());
+			}
+		}
+
+		List<InvoicePromotionDetailDTO> out = new ArrayList<>();
+		UUID applicationId = AccessContext.applicationId();
+		for (InvoiceDAO.AgreementPromotionSummary summary : summaries) {
+			if (summary == null || summary.promotionId() == null) {
+				continue;
+			}
+			Map<UUID, PromotionItemEffectDTO> fx = Map.of();
+			try {
+				if (summary.promotionVersionId() != null) {
+					fx = promotionEffectDAO.fetchEffectsByPromotionVersionForItems(
+							summary.promotionVersionId(), itemIds, applicationId);
+				}
+				if (fx.isEmpty()) {
+					fx = promotionEffectDAO.fetchEffectsByPromotionForItems(
+							summary.promotionId(), itemIds, applicationId);
+				}
+			} catch (Exception ex) {
+				log.warn("Promotion effect lookup failed for {}: {}", summary.promotionId(), ex.toString());
+			}
+
+			boolean addedLine = false;
+			for (InvoiceEntityDTO line : leaves) {
+				if (line == null || line.getEntityId() == null) {
+					continue;
+				}
+				PromotionItemEffectDTO eff = fx.get(line.getEntityId());
+				if (eff == null) {
+					continue;
+				}
+				BigDecimal qty = BigDecimal.valueOf(def(line.getQuantity(), 1));
+				BigDecimal lineSub = nz(line.getUnitPrice()).multiply(qty);
+				BigDecimal amount = computeCatalogPromoDiscount(eff, lineSub, qty);
+				if (amount.compareTo(BigDecimal.ZERO) <= 0) {
+					continue;
+				}
+				out.add(new InvoicePromotionDetailDTO(
+						null,
+						line.getInvoiceEntityId(),
+						summary.promotionVersionId() != null ? summary.promotionVersionId() : eff.getPromotionVersionId(),
+						summary.promotionName(),
+						scale2(amount),
+						eff.getPromotionApplicabilityId(),
+						eff.getPromotionEffectId()));
+				addedLine = true;
+			}
+
+			if (!addedLine) {
+				BigDecimal amount = summary.discountAmount();
+				if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+					amount = fx.values().stream()
+							.map(eff -> computeCatalogPromoDiscount(eff, BigDecimal.ZERO, BigDecimal.ONE))
+							.reduce(BigDecimal.ZERO, BigDecimal::add);
+				}
+				if (summary.promotionName() != null && !summary.promotionName().isBlank()) {
+					out.add(new InvoicePromotionDetailDTO(
+							null,
+							null,
+							summary.promotionVersionId(),
+							summary.promotionName(),
+							scale2(nz(amount)),
+							null,
+							null));
+				}
+			}
+		}
+		return out;
+	}
+
+	private static List<InvoiceEntityDTO> leafInvoiceEntities(InvoiceDTO fullInvoice) {
+		if (fullInvoice == null || fullInvoice.getLineItems() == null || fullInvoice.getLineItems().isEmpty()) {
+			return List.of();
+		}
+		List<InvoiceEntityDTO> lines = fullInvoice.getLineItems();
+		Set<UUID> parentIds = new HashSet<>();
+		boolean hasItemLeaves = false;
+		for (InvoiceEntityDTO line : lines) {
+			if (line == null) {
+				continue;
+			}
+			if (line.getParentInvoiceEntityId() != null) {
+				parentIds.add(line.getParentInvoiceEntityId());
+			}
+			if (line.getEntityType() != null && "ITEM".equalsIgnoreCase(line.getEntityType().trim())) {
+				hasItemLeaves = true;
+			}
+		}
+		List<InvoiceEntityDTO> out = new ArrayList<>();
+		for (InvoiceEntityDTO line : lines) {
+			if (line == null) {
+				continue;
+			}
+			if (line.getInvoiceEntityId() != null && parentIds.contains(line.getInvoiceEntityId())) {
+				continue;
+			}
+			if (hasItemLeaves && isContainerEntityType(line.getEntityType())) {
+				continue;
+			}
+			out.add(line);
+		}
+		return out;
+	}
+
+	private static List<InvoiceLineItemDetailDTO> overlayPromoDiscountsOnItems(
+			List<InvoiceLineItemDetailDTO> items, List<InvoicePromotionDetailDTO> promotions) {
+		if (items == null || items.isEmpty() || promotions == null || promotions.isEmpty()) {
+			return items == null ? List.of() : items;
+		}
+		Map<UUID, BigDecimal> byEntity = new HashMap<>();
+		for (InvoicePromotionDetailDTO p : promotions) {
+			if (p == null || p.invoiceEntityId() == null || p.promotionAmount() == null) {
+				continue;
+			}
+			byEntity.merge(p.invoiceEntityId(), p.promotionAmount(), BigDecimal::add);
+		}
+		if (byEntity.isEmpty()) {
+			return items;
+		}
+		List<InvoiceLineItemDetailDTO> out = new ArrayList<>(items.size());
+		for (InvoiceLineItemDetailDTO item : items) {
+			if (item == null) {
+				continue;
+			}
+			BigDecimal extra = item.invoiceEntityId() == null ? null : byEntity.get(item.invoiceEntityId());
+			if (extra == null || extra.compareTo(BigDecimal.ZERO) <= 0
+					|| nz(item.discountAmount()).compareTo(BigDecimal.ZERO) > 0) {
+				out.add(item);
+				continue;
+			}
+			out.add(new InvoiceLineItemDetailDTO(
+					item.invoiceEntityId(),
+					item.parentInvoiceEntityId(),
+					item.entityType(),
+					item.entityId(),
+					item.entityDescription(),
+					item.chargeLineKindCode(),
+					item.chargeLineKindName(),
+					item.planTemplateId(),
+					item.planCode(),
+					item.planName(),
+					item.billingScheduleId(),
+					item.subscriptionInstanceId(),
+					item.cycleNumber(),
+					item.servicePeriodStart(),
+					item.servicePeriodEnd(),
+					item.quantity(),
+					item.unitPrice(),
+					extra,
+					item.taxAmount(),
+					item.totalAmount()));
+		}
+		return out;
+	}
+
+	private static List<InvoicePromotionDetailDTO> mapInvoicePromotions(InvoiceDTO fullInvoice) {
+		if (fullInvoice == null || fullInvoice.getLineItems() == null || fullInvoice.getLineItems().isEmpty()) {
+			return List.of();
+		}
+		List<InvoicePromotionDetailDTO> out = new ArrayList<>();
+		for (InvoiceEntityDTO line : fullInvoice.getLineItems()) {
+			if (line == null || line.getPromotions() == null) continue;
+			for (InvoiceEntityPromotionDTO p : line.getPromotions()) {
+				if (p == null) continue;
+				BigDecimal amount = p.getPromotionAmount();
+				if (amount == null || amount.compareTo(BigDecimal.ZERO) == 0) continue;
+				out.add(new InvoicePromotionDetailDTO(
+						p.getInvoiceEntityPromotionId(),
+						p.getInvoiceEntityId() != null ? p.getInvoiceEntityId() : line.getInvoiceEntityId(),
+						p.getPromotionVersionId(),
+						p.getPromotionName(),
+						amount,
+						p.getPromotionApplicabilityId(),
+						p.getPromotionEffectId()));
+			}
+		}
+		return out;
+	}
+
+	private static String displayEntityType(InvoiceEntityDTO line) {
+		String kind = line.getChargeLineKindName();
+		if (kind != null && !kind.isBlank()) {
+			return kind.trim();
+		}
+		String type = line.getEntityType();
+		if (type != null && !type.isBlank()) {
+			String t = type.trim();
+			if (t.length() == 1) {
+				return t.toUpperCase(Locale.ROOT);
+			}
+			return t.substring(0, 1).toUpperCase(Locale.ROOT) + t.substring(1).toLowerCase(Locale.ROOT);
+		}
+		String name = Optional.ofNullable(line.getEntityName()).orElse(line.getEntityDescription());
+		if (name != null && name.toLowerCase(Locale.ROOT).contains("fee")) {
+			return "Fee";
+		}
+		return "Item";
+	}
+
+	private static boolean isContainerEntityType(String entityType) {
+		if (entityType == null || entityType.isBlank()) {
+			return false;
+		}
+		String t = entityType.trim().toUpperCase(Locale.ROOT);
+		return t.equals("BUNDLE") || t.equals("AGREEMENT");
+	}
+
+	private static BigDecimal displayLineDiscount(InvoiceEntityDTO line) {
+		BigDecimal stored = nz(line.getDiscountAmount());
+		if (stored.compareTo(BigDecimal.ZERO) > 0) {
+			return stored;
+		}
+		if (line.getPromotions() == null || line.getPromotions().isEmpty()) {
+			return stored;
+		}
+		return line.getPromotions().stream()
+				.filter(p -> p != null && p.getPromotionAmount() != null)
+				.map(InvoiceEntityPromotionDTO::getPromotionAmount)
+				.reduce(BigDecimal.ZERO, BigDecimal::add);
 	}
 
 	private static List<InvoiceAuditDetailDTO> buildInvoiceAuditTrail(
@@ -2385,9 +2707,10 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			events.add(new InvoiceAuditDetailDTO(
 					"PAYMENT",
 					"Payment posted",
-					Optional.ofNullable(txn.paymentTypeName()).orElse("Payment")
-							+ " · " + Optional.ofNullable(txn.gatewayName()).orElse("Gateway")
-							+ " · " + Optional.ofNullable(txn.amount()).orElse(BigDecimal.ZERO),
+					joinAuditDetail(
+							Optional.ofNullable(txn.paymentTypeName()).orElse("Payment"),
+							txn.gatewayName(),
+							txn.amount()),
 					Optional.ofNullable(txn.gatewayName()).orElse("System"),
 					when));
 		}
@@ -2398,8 +2721,9 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			events.add(new InvoiceAuditDetailDTO(
 					"REFUND",
 					"Refund recorded",
-					Optional.ofNullable(refund.refundStatusCode()).orElse("Refund")
-							+ " · " + Optional.ofNullable(refund.refundAmount()).orElse(BigDecimal.ZERO),
+					joinAuditDetail(
+							Optional.ofNullable(refund.refundStatusCode()).orElse("Refund"),
+							refund.refundAmount()),
 					Optional.ofNullable(refund.gatewayName()).orElse("System"),
 					when));
 		}
@@ -2410,9 +2734,10 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			events.add(new InvoiceAuditDetailDTO(
 					"ADJUSTMENT",
 					"Adjustment applied",
-					Optional.ofNullable(adj.adjustmentTypeName()).orElse(
-							Optional.ofNullable(adj.adjustmentTypeCode()).orElse("Adjustment"))
-							+ " · " + Optional.ofNullable(adj.amount()).orElse(BigDecimal.ZERO),
+					joinAuditDetail(
+							Optional.ofNullable(adj.adjustmentTypeName()).orElse(
+									Optional.ofNullable(adj.adjustmentTypeCode()).orElse("Adjustment")),
+							adj.amount()),
 					"System",
 					when));
 		}
@@ -2423,6 +2748,25 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			return ib.compareTo(ia);
 		});
 		return events;
+	}
+
+	/** ASCII-safe middle-dot separator so Windows/Cp1252 compiles cannot emit {@code Â·}. */
+	private static String joinAuditDetail(Object... parts) {
+		StringBuilder sb = new StringBuilder();
+		for (Object part : parts) {
+			if (part == null) {
+				continue;
+			}
+			String text = String.valueOf(part).trim();
+			if (text.isEmpty()) {
+				continue;
+			}
+			if (sb.length() > 0) {
+				sb.append(" \u00B7 ");
+			}
+			sb.append(text);
+		}
+		return sb.toString();
 	}
 
 	private static List<PaymentTimelineItemDTO> buildTimeline(FrequencyUnit unit, int interval, InvoiceDetailRaw raw,

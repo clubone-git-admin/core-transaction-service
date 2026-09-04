@@ -14,4 +14,7 @@ public interface PromotionEffectDAO {
 
     // Batch lookup (recommended)
     Map<UUID, PromotionItemEffectDTO> fetchEffectsByPromotionForItems(UUID promotionId, Set<UUID> itemIds, UUID applicationId);
+
+    Map<UUID, PromotionItemEffectDTO> fetchEffectsByPromotionVersionForItems(
+            UUID promotionVersionId, Set<UUID> itemIds, UUID applicationId);
 }

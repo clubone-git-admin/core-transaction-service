@@ -771,7 +771,8 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 				null, // billingCollectionTypeName
 				null, // createdBy
 				List.of(), // items
-				List.of() // auditTrail
+				List.of(), // auditTrail
+				List.of() // promotions
 		);
 	}
 

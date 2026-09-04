@@ -54,9 +54,10 @@ public class PromotionEffectDAOImpl implements PromotionEffectDAO {
             """
             SELECT
                 p.promotion_id,
-                pv.promotion_version_id,
-                pes.entity_scope_id AS item_id,
-                pe.promotion_effect_id,
+				pv.promotion_version_id,
+				pa.promotion_applicability_id,
+				pes.entity_scope_id AS item_id,
+				pe.promotion_effect_id,
                 pe.effect_type_id,
                 et.name AS effect_type_description,
                 pe.value_amount,
@@ -201,6 +202,91 @@ public class PromotionEffectDAOImpl implements PromotionEffectDAO {
             }
         }
 
+        return map;
+    }
+
+    @Override
+    public Map<UUID, PromotionItemEffectDTO> fetchEffectsByPromotionVersionForItems(
+            UUID promotionVersionId, Set<UUID> itemIds, UUID applicationId
+    ) {
+        if (promotionVersionId == null || applicationId == null) return Collections.emptyMap();
+        if (itemIds == null) itemIds = Collections.emptySet();
+
+        String placeholders = itemIds.isEmpty()
+                ? ""
+                : String.join(",", Collections.nCopies(itemIds.size(), "?"));
+
+        String sql =
+            """
+            SELECT
+                p.promotion_id,
+                pv.promotion_version_id,
+                pa.promotion_applicability_id,
+                pes.entity_scope_id AS item_id,
+                pe.promotion_effect_id,
+                pe.effect_type_id,
+                et.name AS effect_type_description,
+                pe.value_amount,
+                pe.value_percent,
+                ato.code AS apply_to_code,
+                av.code  AS availability_code
+            FROM promotions.promotion_version pv
+            JOIN promotions.promotion p
+                ON p.promotion_id = pv.promotion_id
+            JOIN promotions.promotion_applicability pa
+                ON pa.promotion_version_id = pv.promotion_version_id
+               AND pa.is_active = true
+               AND pa.application_id = p.application_id
+            JOIN promotions.lu_availability_type av
+                ON av.availability_type_id = pa.availability_type_id
+            JOIN promotions.promotion_entity_scope pes
+                ON pes.promotion_applicability_id = pa.promotion_applicability_id
+               AND pes.is_active = true
+               AND pes.application_id = p.application_id
+            JOIN promotions.lu_entity_scope_type est
+                ON est.entity_scope_type_id = pes.entity_scope_type_id
+            JOIN promotions.lu_apply_to ato
+                ON ato.apply_to_id = pes.apply_to_id
+            JOIN promotions.promotion_effects pe
+                ON pe.promotion_entity_scope_id = pes.promotion_entity_scope_id
+               AND pe.is_active = true
+            JOIN promotions.lu_effect_type et
+                ON et.effect_type_id = pe.effect_type_id
+               AND et.is_active = true
+            WHERE pv.promotion_version_id = ?
+              AND p.application_id = ?
+              AND est.code = 'ITEM'
+              AND (
+                    ato.code = 'ALL'
+                 """ +
+                 (itemIds.isEmpty()
+                    ? ""
+                    : " OR (ato.code = 'INCLUDE' AND pes.entity_scope_id IN (" + placeholders + "))"
+                 ) +
+            """
+              )
+            ORDER BY pes.entity_scope_id, pe.display_order ASC
+            """;
+
+        List<Object> params = new ArrayList<>();
+        params.add(promotionVersionId);
+        params.add(applicationId);
+        if (!itemIds.isEmpty()) params.addAll(itemIds);
+
+        List<PromotionItemEffectDTO> rows =
+                cluboneJdbcTemplate.query(sql, new PromotionItemEffectRowMapper(), params.toArray());
+
+        Map<UUID, PromotionItemEffectDTO> map = new HashMap<>();
+        for (PromotionItemEffectDTO r : rows) {
+            UUID keyItemId = r.getItemId();
+            if (keyItemId == null) {
+                for (UUID id : itemIds) {
+                    map.putIfAbsent(id, r);
+                }
+            } else {
+                map.putIfAbsent(keyItemId, r);
+            }
+        }
         return map;
     }
 

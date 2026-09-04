@@ -4,10 +4,32 @@ import java.math.BigDecimal;
 import java.util.UUID;
 
 public class InvoiceEntityPromotionDTO {
+    private UUID invoiceEntityPromotionId;
+    private UUID invoiceEntityId;
     private UUID promotionVersionId;
     private UUID promotionApplicabilityId;
     private UUID promotionEffectId;
     private BigDecimal promotionAmount;
+    private String promotionName;
+
+	public UUID getInvoiceEntityPromotionId() {
+		return invoiceEntityPromotionId;
+	}
+	public void setInvoiceEntityPromotionId(UUID invoiceEntityPromotionId) {
+		this.invoiceEntityPromotionId = invoiceEntityPromotionId;
+	}
+	public UUID getInvoiceEntityId() {
+		return invoiceEntityId;
+	}
+	public void setInvoiceEntityId(UUID invoiceEntityId) {
+		this.invoiceEntityId = invoiceEntityId;
+	}
+	public String getPromotionName() {
+		return promotionName;
+	}
+	public void setPromotionName(String promotionName) {
+		this.promotionName = promotionName;
+	}
 	public UUID getPromotionVersionId() {
 		return promotionVersionId;
 	}

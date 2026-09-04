@@ -44,7 +44,8 @@ public interface InvoiceEntityPromotionDAO {
             UUID promotionVersionId,
             UUID promotionEffectId,
             UUID promotionApplicabilityId,
-            java.math.BigDecimal promotionAmount
+            java.math.BigDecimal promotionAmount,
+            String promotionName
     ) {}
 }
 

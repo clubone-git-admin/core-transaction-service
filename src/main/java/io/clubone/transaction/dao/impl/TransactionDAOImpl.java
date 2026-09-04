@@ -2377,8 +2377,6 @@ WHERE rn = 1;
 	        for (InvoiceEntityPromotionDTO p : promos) {
 	            if (p == null) continue;
 	            if (p.getPromotionVersionId() == null) continue;
-	            if (p.getPromotionApplicabilityId() == null) continue;
-	            if (p.getPromotionEffectId() == null) continue;
 	            if (p.getPromotionAmount() == null || p.getPromotionAmount().compareTo(BigDecimal.ZERO) <= 0) continue;
 
 	            rows.add(new Row(line.getInvoiceEntityId(), p));

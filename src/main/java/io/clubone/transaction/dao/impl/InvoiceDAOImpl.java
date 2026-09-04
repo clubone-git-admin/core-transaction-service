@@ -23,6 +23,7 @@ import org.springframework.stereotype.Service;
 
 import io.clubone.transaction.dao.EntityLookupDao;
 import io.clubone.transaction.dao.InvoiceDAO;
+import io.clubone.transaction.dao.InvoiceDAO.AgreementPromotionSummary;
 import io.clubone.transaction.dao.InvoiceEntityPromotionDAO;
 import io.clubone.transaction.dao.TransactionDAO;
 import io.clubone.transaction.dao.InvoiceEntityPromotionDAO.InvoiceEntityPromotionRow;
@@ -30,6 +31,7 @@ import io.clubone.transaction.security.AccessContext;
 import io.clubone.transaction.v2.vo.EntityLevelInfoDTO;
 import io.clubone.transaction.v2.vo.InvoiceEntityPriceBandDTO;
 import io.clubone.transaction.v2.vo.InvoiceEntityPromotionDTO;
+import io.clubone.transaction.v2.vo.InvoicePromotionDetailDTO;
 import io.clubone.transaction.vo.InvoiceDTO;
 import io.clubone.transaction.vo.InvoiceEntityDTO;
 import io.clubone.transaction.vo.InvoiceEntityTaxDTO;
@@ -112,6 +114,7 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 			SELECT
 			  ie.invoice_entity_id        AS invoiceEntityId,
 			  ie.entity_type_id           AS entityTypeId,
+			  let.entity_type             AS entityType,
 			  ie.entity_id                AS entityId,
 			  ie.price_plan_template_id   AS pricePlanTemplateId,
 			  ie.entity_description       AS entityDescription,
@@ -133,6 +136,9 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 			  lclk."name"                 AS chargeLineKindName,
 			  ie.entity_version_id        AS entityVersionId
 			FROM "transactions".invoice_entity ie
+			LEFT JOIN "transactions".lu_entity_type let
+			  ON let.entity_type_id = ie.entity_type_id
+			 AND COALESCE(let.is_active, true) = true
 			LEFT JOIN "transactions".lu_charge_line_kind lclk
 			  ON lclk.charge_line_kind_id = ie.charge_line_kind_id
 			 AND COALESCE(lclk.is_active, true) = true
@@ -212,9 +218,16 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 		}
 		Map<UUID, List<InvoiceEntityTaxDTO>> taxes = fetchTaxesFor(lines);
 		Map<UUID, List<InvoiceEntityPriceBandDTO>> bands = fetchPriceBandsFor(lines);
-		List<UUID> ids = lines.stream().map(InvoiceEntityDTO::getInvoiceEntityId).toList();
-		Map<UUID, List<InvoiceEntityPromotionRow>> promos = invoiceEntityPromotionDAO
-				.fetchActivePromotionsByInvoiceEntityIds(ids);
+		List<UUID> ids = lines.stream()
+				.map(InvoiceEntityDTO::getInvoiceEntityId)
+				.filter(id -> id != null)
+				.toList();
+		Map<UUID, List<InvoiceEntityPromotionRow>> promos = Collections.emptyMap();
+		try {
+			promos = invoiceEntityPromotionDAO.fetchActivePromotionsByInvoiceEntityIds(ids);
+		} catch (Exception ignored) {
+			promos = Collections.emptyMap();
+		}
 
 		for (InvoiceEntityDTO li : lines) {
 			resolveEntityName(invoice, li);
@@ -356,10 +369,13 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 		List<InvoiceEntityPromotionDTO> out = new ArrayList<>();
 		for (InvoiceEntityPromotionRow r : rows) {
 			InvoiceEntityPromotionDTO d = new InvoiceEntityPromotionDTO();
+			d.setInvoiceEntityPromotionId(r.invoiceEntityPromotionId());
+			d.setInvoiceEntityId(r.invoiceEntityId());
 			d.setPromotionVersionId(r.promotionVersionId());
 			d.setPromotionApplicabilityId(r.promotionApplicabilityId());
 			d.setPromotionEffectId(r.promotionEffectId());
 			d.setPromotionAmount(r.promotionAmount());
+			d.setPromotionName(r.promotionName());
 			out.add(d);
 		}
 		return out;
@@ -500,6 +516,78 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 			  AND application_id = ?
 			""";
 		return cluboneJdbcTemplate.update(sql, clientAgreementId, invoiceId, AccessContext.applicationId());
+	}
+
+	@Override
+	public List<InvoicePromotionDetailDTO> findPromotionDetailsByInvoiceId(UUID invoiceId) {
+		if (invoiceId == null) {
+			return List.of();
+		}
+		try {
+			return cluboneJdbcTemplate.query("""
+					SELECT
+					    iep.invoice_entity_promotion_id,
+					    iep.invoice_entity_id,
+					    iep.promotion_version_id,
+					    COALESCE(p.promo_name, p.promo_code) AS promotion_name,
+					    iep.promotion_amount,
+					    iep.promotion_applicability_id,
+					    iep.promotion_effect_id
+					FROM transactions.invoice_entity_promotion iep
+					JOIN transactions.invoice_entity ie
+					  ON ie.invoice_entity_id = iep.invoice_entity_id
+					LEFT JOIN promotions.promotion_version pv
+					  ON pv.promotion_version_id = iep.promotion_version_id
+					LEFT JOIN promotions.promotion p
+					  ON p.promotion_id = pv.promotion_id
+					WHERE ie.invoice_id = ?
+					  AND ie.application_id = ?
+					  AND COALESCE(iep.is_active, true) = true
+					  AND COALESCE(ie.is_active, true) = true
+					ORDER BY iep.created_on ASC, iep.invoice_entity_promotion_id ASC
+					""", (rs, rowNum) -> new InvoicePromotionDetailDTO(
+					rs.getObject("invoice_entity_promotion_id", UUID.class),
+					rs.getObject("invoice_entity_id", UUID.class),
+					rs.getObject("promotion_version_id", UUID.class),
+					rs.getString("promotion_name"),
+					rs.getBigDecimal("promotion_amount"),
+					rs.getObject("promotion_applicability_id", UUID.class),
+					rs.getObject("promotion_effect_id", UUID.class)
+			), invoiceId, AccessContext.applicationId());
+		} catch (Exception ex) {
+			return List.of();
+		}
+	}
+
+	@Override
+	public List<AgreementPromotionSummary> findAgreementPromotionSummaries(UUID clientAgreementId) {
+		if (clientAgreementId == null) {
+			return List.of();
+		}
+		try {
+			return cluboneJdbcTemplate.query("""
+					SELECT
+					    pv.promotion_id,
+					    cap.promotion_version_id,
+					    COALESCE(p.promo_name, p.promo_code) AS promotion_name,
+					    COALESCE(cap.discount_amount, 0) AS discount_amount
+					FROM client_agreements.client_agreement_promotion cap
+					JOIN promotions.promotion_version pv
+					  ON pv.promotion_version_id = cap.promotion_version_id
+					JOIN promotions.promotion p
+					  ON p.promotion_id = pv.promotion_id
+					WHERE cap.client_agreement_id = ?
+					  AND COALESCE(cap.is_active, true) = true
+					ORDER BY cap.created_on ASC
+					""", (rs, rowNum) -> new AgreementPromotionSummary(
+					rs.getObject("promotion_id", UUID.class),
+					rs.getObject("promotion_version_id", UUID.class),
+					rs.getString("promotion_name"),
+					rs.getBigDecimal("discount_amount")
+			), clientAgreementId);
+		} catch (Exception ex) {
+			return List.of();
+		}
 	}
 
 }

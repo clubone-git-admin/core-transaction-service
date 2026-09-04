@@ -30,8 +30,13 @@ public class InvoiceEntityPromotionDAOImpl implements InvoiceEntityPromotionDAO 
             iep.promotion_version_id,
             iep.promotion_effect_id,
             iep.promotion_applicability_id,
-            iep.promotion_amount
+            iep.promotion_amount,
+            COALESCE(p.promo_name, p.promo_code) AS promotion_name
         FROM transactions.invoice_entity_promotion iep
+        LEFT JOIN promotions.promotion_version pv
+          ON pv.promotion_version_id = iep.promotion_version_id
+        LEFT JOIN promotions.promotion p
+          ON p.promotion_id = pv.promotion_id
         WHERE iep.invoice_entity_id = ?
           AND COALESCE(iep.is_active, true) = true
         ORDER BY iep.created_on ASC, iep.invoice_entity_promotion_id ASC
@@ -57,8 +62,13 @@ public class InvoiceEntityPromotionDAOImpl implements InvoiceEntityPromotionDAO 
         	        iep.promotion_version_id,
         	        iep.promotion_effect_id,
         	        iep.promotion_applicability_id,
-        	        iep.promotion_amount
+        	        iep.promotion_amount,
+        	        COALESCE(p.promo_name, p.promo_code) AS promotion_name
         	    FROM transactions.invoice_entity_promotion iep
+        	    LEFT JOIN promotions.promotion_version pv
+        	      ON pv.promotion_version_id = iep.promotion_version_id
+        	    LEFT JOIN promotions.promotion p
+        	      ON p.promotion_id = pv.promotion_id
         	    WHERE iep.invoice_entity_id IN (%s)
         	      AND COALESCE(iep.is_active, true) = true
         	    ORDER BY
@@ -68,11 +78,34 @@ public class InvoiceEntityPromotionDAOImpl implements InvoiceEntityPromotionDAO 
         	    """, placeholders);
 
 
-        List<InvoiceEntityPromotionRow> all =
-                cluboneJdbcTemplate.query(sql, invoiceEntityIds.toArray(), (rs, rowNum) -> mapRow(rs));
+        List<InvoiceEntityPromotionRow> all;
+        try {
+            all = cluboneJdbcTemplate.query(sql, invoiceEntityIds.toArray(), (rs, rowNum) -> mapRow(rs));
+        } catch (Exception ex) {
+            // Name lookup is best-effort; still return stamped promo amounts.
+            String fallbackSql = String.format("""
+                    SELECT
+                        iep.invoice_entity_promotion_id,
+                        iep.invoice_entity_id,
+                        iep.promotion_version_id,
+                        iep.promotion_effect_id,
+                        iep.promotion_applicability_id,
+                        iep.promotion_amount,
+                        CAST(NULL AS varchar) AS promotion_name
+                    FROM transactions.invoice_entity_promotion iep
+                    WHERE iep.invoice_entity_id IN (%s)
+                      AND COALESCE(iep.is_active, true) = true
+                    ORDER BY
+                        iep.invoice_entity_id ASC,
+                        iep.created_on ASC,
+                        iep.invoice_entity_promotion_id ASC
+                    """, placeholders);
+            all = cluboneJdbcTemplate.query(fallbackSql, invoiceEntityIds.toArray(), (rs, rowNum) -> mapRow(rs));
+        }
 
-        // Group by invoice_entity_id
-        return all.stream().collect(Collectors.groupingBy(
+        return all.stream()
+                .filter(r -> r.invoiceEntityId() != null)
+                .collect(Collectors.groupingBy(
                 InvoiceEntityPromotionRow::invoiceEntityId,
                 LinkedHashMap::new,
                 Collectors.toList()
@@ -127,8 +160,9 @@ public class InvoiceEntityPromotionDAOImpl implements InvoiceEntityPromotionDAO 
         UUID peId = (UUID) rs.getObject("promotion_effect_id");
         UUID paId = (UUID) rs.getObject("promotion_applicability_id");
         BigDecimal amt = rs.getBigDecimal("promotion_amount");
+        String name = rs.getString("promotion_name");
 
-        return new InvoiceEntityPromotionRow(iepId, ieId, pvId, peId, paId, amt);
+        return new InvoiceEntityPromotionRow(iepId, ieId, pvId, peId, paId, amt, name);
     }
 }
 

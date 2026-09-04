@@ -100,7 +100,8 @@ public record InvoiceDetailDTO(
 		UUID createdBy,
 
 		List<InvoiceLineItemDetailDTO> items,
-		List<InvoiceAuditDetailDTO> auditTrail
+		List<InvoiceAuditDetailDTO> auditTrail,
+		List<InvoicePromotionDetailDTO> promotions
 
 ) {
 
@@ -112,5 +113,6 @@ public record InvoiceDetailDTO(
 		adjustments = adjustments == null ? List.of() : List.copyOf(adjustments);
 		items = items == null ? List.of() : List.copyOf(items);
 		auditTrail = auditTrail == null ? List.of() : List.copyOf(auditTrail);
+		promotions = promotions == null ? List.of() : List.copyOf(promotions);
 	}
 }
