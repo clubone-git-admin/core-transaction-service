@@ -772,7 +772,10 @@ public class SubscriptionPlanServiceImpl implements SubscriptionPlanService {
 				null, // createdBy
 				List.of(), // items
 				List.of(), // auditTrail
-				List.of() // promotions
+				List.of(), // promotions
+				null, // salesAdvisorUserId
+				null, // salesAdvisorName
+				null // salesAdvisorEmail
 		);
 	}
 

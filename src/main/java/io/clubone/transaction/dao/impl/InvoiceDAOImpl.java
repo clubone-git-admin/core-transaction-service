@@ -69,6 +69,9 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 			  COALESCE(i.is_paid, false) AS isPaid,
 			  i.level_id            AS levelId,
 			  i.created_by          AS createdBy,
+			  i.sales_advisor_user_id AS salesAdvisorUserId,
+			  NULLIF(BTRIM(CONCAT_WS(' ', au.first_name, au.last_name)), '') AS salesAdvisorName,
+			  au.email             AS salesAdvisorEmail,
 			  i.client_agreement_id AS clientAgreementId,
 			  ca.client_agreement_code AS clientAgreementCode,
 			  i.billing_run_id      AS billingRunId,
@@ -84,6 +87,8 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 			 AND COALESCE(lbct.is_active, true) = true
 			LEFT JOIN client_agreements.client_agreement ca
 			  ON ca.client_agreement_id = i.client_agreement_id
+			LEFT JOIN access.access_user au
+			  ON au.user_id = i.sales_advisor_user_id
 			WHERE i.invoice_id = ?
 			  AND i.application_id = ?
 			  AND COALESCE(i.is_active, true) = true
@@ -515,7 +520,23 @@ public class InvoiceDAOImpl implements InvoiceDAO {
 			WHERE invoice_id = ?
 			  AND application_id = ?
 			""";
-		return cluboneJdbcTemplate.update(sql, clientAgreementId, invoiceId, AccessContext.applicationId());
+		int updated = cluboneJdbcTemplate.update(sql, clientAgreementId, invoiceId, AccessContext.applicationId());
+		if (updated > 0 && clientAgreementId != null) {
+			try {
+				cluboneJdbcTemplate.update("""
+						UPDATE client_agreements.client_agreement ca
+						SET sales_advisor_id = i.sales_advisor_user_id
+						FROM transactions.invoice i
+						WHERE i.invoice_id = ?
+						  AND ca.client_agreement_id = ?
+						  AND ca.sales_advisor_id IS NULL
+						  AND i.sales_advisor_user_id IS NOT NULL
+						""", invoiceId, clientAgreementId);
+			} catch (Exception ignored) {
+				// sales_advisor_id already exists; copy is best-effort
+			}
+		}
+		return updated;
 	}
 
 	@Override

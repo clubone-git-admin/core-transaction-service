@@ -2,6 +2,7 @@ package io.clubone.transaction.helper;
 
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
+import com.fasterxml.jackson.annotation.JsonAlias;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.http.*;
@@ -1108,6 +1109,7 @@ public class ClientAgreementController {
         public String clientAgreementStatusCode;
 
         public UUID leadSourceId;
+        @JsonAlias("salesAdvisorUserId")
         public UUID salesAdvisorId;
 
         public Boolean isSigned;

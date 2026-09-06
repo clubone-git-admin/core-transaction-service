@@ -57,6 +57,7 @@ import io.clubone.transaction.helper.OrganizationAgreementLinkService;
 import io.clubone.transaction.helper.OrganizationContractLinkResult;
 import io.clubone.transaction.helper.TransactionUtils;
 import io.clubone.transaction.response.CreateInvoiceResponse;
+import io.clubone.transaction.salesadvisor.SalesAdvisorDao;
 import io.clubone.transaction.security.AccessContext;
 import io.clubone.transaction.security.TenantContext;
 import io.clubone.transaction.service.CorporateAgreementSplitService;
@@ -113,6 +114,9 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 
 	@Autowired
 	private InvoiceDAO invoiceDAO;
+
+	@Autowired
+	private SalesAdvisorDao salesAdvisorDao;
 
 	@Autowired
 	private ClientAgreementCreationHelper caHelper;
@@ -273,6 +277,11 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		inv.setInvoiceStatusId(invoiceStatusId);
 		inv.setPaid(false);
 		inv.setCreatedBy(request.getCreatedBy());
+		UUID salesAdvisorUserId = request.getSalesAdvisorUserId();
+		if (salesAdvisorUserId == null && TenantContext.get() != null) {
+			salesAdvisorUserId = TenantContext.get().userId();
+		}
+		inv.setSalesAdvisorUserId(salesAdvisorUserId);
 
 		// ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Always use invoice level id consistently
 		final UUID invoiceLevelId = inv.getLevelId();
@@ -1261,6 +1270,9 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 				perAgreementReq.setApplicationId(request.getApplicationId());
 				perAgreementReq.setBillingAddress(request.getBillingAddress());
 				perAgreementReq.setCreatedBy(request.getCreatedBy());
+				perAgreementReq.setSalesAdvisorUserId(request.getSalesAdvisorUserId() != null
+						? request.getSalesAdvisorUserId()
+						: inv.getSalesAdvisorUserId());
 				perAgreementReq.setLevelId(request.getLevelId());
 				perAgreementReq.setBillingRunId(request.getBillingRunId());
 				perAgreementReq.setBillingCollectionTypeId(request.getBillingCollectionTypeId());
@@ -1361,6 +1373,11 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			}
 
 			UUID invoiceId = transactionDAO.saveInvoiceV3(inv);
+			if (inv.getSalesAdvisorUserId() != null) {
+				UUID changedBy = TenantContext.get() != null ? TenantContext.get().userId() : inv.getSalesAdvisorUserId();
+				salesAdvisorDao.recordInitial(invoiceId, inv.getClientAgreementId(), inv.getSalesAdvisorUserId(),
+						changedBy, "POS");
+			}
 			for (OrganizationContractLinkResult link : organizationContractLinks) {
 				organizationAgreementLinkService.linkInvoice(
 						request.getApplicationId(),
@@ -2301,6 +2318,9 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		String billingCollectionTypeCode = fullInvoice != null ? fullInvoice.getBillingCollectionTypeCode() : null;
 		String billingCollectionTypeName = fullInvoice != null ? fullInvoice.getBillingCollectionTypeName() : null;
 		UUID createdBy = fullInvoice != null ? fullInvoice.getCreatedBy() : null;
+		UUID salesAdvisorUserId = fullInvoice != null ? fullInvoice.getSalesAdvisorUserId() : null;
+		String salesAdvisorName = fullInvoice != null ? fullInvoice.getSalesAdvisorName() : null;
+		String salesAdvisorEmail = fullInvoice != null ? fullInvoice.getSalesAdvisorEmail() : null;
 
 		BigDecimal paidAmount = transactions.stream()
 				.map(InvoiceTransactionDetailDTO::amount)
@@ -2371,7 +2391,10 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 				createdBy,
 				items,
 				auditTrail,
-				promotions);
+				promotions,
+				salesAdvisorUserId,
+				salesAdvisorName,
+				salesAdvisorEmail);
 	}
 
 	private static List<InvoiceLineItemDetailDTO> mapInvoiceLineItems(InvoiceDTO fullInvoice) {
@@ -2904,6 +2927,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		req.setLevelId(levelId);
 		req.setBillingAddress(seed.billingAddress());
 		req.setCreatedBy(createdBy);
+		req.setSalesAdvisorUserId(seed.salesAdvisorUserId());
 		req.setEntities(List.of(root));
 
 		return req;

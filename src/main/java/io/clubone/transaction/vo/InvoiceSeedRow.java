@@ -8,5 +8,6 @@ public record InvoiceSeedRow(
     UUID levelId,
     String billingAddress,
     UUID clientAgreementId,
-    UUID createdBy
+    UUID createdBy,
+    UUID salesAdvisorUserId
 ) {}

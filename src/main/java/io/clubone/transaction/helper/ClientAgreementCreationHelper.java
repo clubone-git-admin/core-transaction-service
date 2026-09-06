@@ -1,5 +1,6 @@
 package io.clubone.transaction.helper;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -182,6 +183,7 @@ public class ClientAgreementCreationHelper {
         caReq.setUpsellItems(Collections.emptyList());
         // Public remote-close has no X-Actor-Id; persist audit using invoice createdBy.
         caReq.setCreatedBy(invoice.getCreatedBy());
+        caReq.setSalesAdvisorId(invoice.getSalesAdvisorUserId());
 
         // 3) Prefer same-DB insert under high load (skips gateway + agreement pool).
         return createClientAgreement(caReq);
@@ -739,6 +741,7 @@ public class ClientAgreementCreationHelper {
         private String clientAgreementStatusCode;
 
         private UUID leadSourceId;
+        @JsonAlias("salesAdvisorUserId")
         private UUID salesAdvisorId;
 
         private Boolean isSigned;

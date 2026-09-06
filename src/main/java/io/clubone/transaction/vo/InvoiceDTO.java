@@ -27,6 +27,10 @@ public class InvoiceDTO {
     private boolean isPaid;
     private UUID levelId;
     private UUID createdBy;
+    /** access.access_user.user_id of the Sales Advisor (not createdBy). */
+    private UUID salesAdvisorUserId;
+    private String salesAdvisorName;
+    private String salesAdvisorEmail;
     private UUID clientAgreementId;
     /** Friendly code from client_agreements.client_agreement (e.g. CTR-2026-000123). */
     private String clientAgreementCode;

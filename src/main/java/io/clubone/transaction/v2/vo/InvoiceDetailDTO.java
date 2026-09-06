@@ -101,7 +101,11 @@ public record InvoiceDetailDTO(
 
 		List<InvoiceLineItemDetailDTO> items,
 		List<InvoiceAuditDetailDTO> auditTrail,
-		List<InvoicePromotionDetailDTO> promotions
+		List<InvoicePromotionDetailDTO> promotions,
+
+		UUID salesAdvisorUserId,
+		String salesAdvisorName,
+		String salesAdvisorEmail
 
 ) {
 

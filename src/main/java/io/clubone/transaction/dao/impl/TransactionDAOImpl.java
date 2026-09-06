@@ -493,10 +493,11 @@ public class TransactionDAOImpl implements TransactionDAO {
 				    fx_rate_id,
 				    fx_as_of,
 				    application_id,
+				    sales_advisor_user_id,
 				    created_on,
 				    created_by
 				) VALUES (
-				    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?
+				    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?
 				);
 								""";
 
@@ -510,7 +511,7 @@ public class TransactionDAOImpl implements TransactionDAO {
 				dto.getAmountReporting(),
 				dto.getFxRateId(),
 				dto.getFxAsOf() != null ? Timestamp.from(dto.getFxAsOf()) : null,
-				appId, dto.getCreatedBy());
+				appId, dto.getSalesAdvisorUserId(), dto.getCreatedBy());
 
 		final String insertEntitySql = """
 				INSERT INTO transactions.invoice_entity (
@@ -2136,7 +2137,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 	          i.level_id,
 	          i.billing_address,
 	          i.client_agreement_id,
-	          i.created_by
+	          i.created_by,
+	          i.sales_advisor_user_id
 	        from transactions.invoice i
 	        where i.invoice_id = ?
 	          and i.application_id = ?
@@ -2147,7 +2149,8 @@ public class TransactionDAOImpl implements TransactionDAO {
 	        rs.getObject("level_id", UUID.class),
 	        rs.getString("billing_address"),
 	        rs.getObject("client_agreement_id", UUID.class),
-	        rs.getObject("created_by", UUID.class)
+	        rs.getObject("created_by", UUID.class),
+	        rs.getObject("sales_advisor_user_id", UUID.class)
 	    ), invoiceId, AccessContext.applicationId());
 	}
 

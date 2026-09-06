@@ -42,4 +42,11 @@ public class InvoiceRequest {
 	private String timezone;
 	private String availabilityTypeCode;
 
+	/**
+	 * Sales Advisor {@code access.access_user.user_id}. Distinct from {@link #createdBy}
+	 * (cashier / application_user_id). Defaults to the logged-in user's userId when omitted.
+	 */
+	@JsonAlias({ "salesAdvisorId", "sales_advisor_user_id", "sales_advisor_id" })
+	private UUID salesAdvisorUserId;
+
 }
