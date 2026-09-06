@@ -62,6 +62,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                 st.display_name as status_display_name,
                 coalesce(adj.total_adjustment_amount, 0) as total_adjustment_amount,
                 s.invoice_id,
+                inv.invoice_number,
                 coalesce(
                     nullif(upper(trim(inv.currency_code)), ''),
                     nullif(upper(trim(cur.currency_code)), '')
@@ -107,12 +108,15 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
             dto.setSubscriptionInstanceId(getUuid(rs, "subscription_instance_id"));
 
             dto.setCycleNumber(rs.getInt("cycle_number"));
+            dto.setLabel(sanitizeLabelText(rs.getString("label")));
+            dto.setPeriodLabel(sanitizeLabelText(rs.getString("period_label")));
             dto.setBillingPeriodStart(rs.getDate("billing_period_start").toLocalDate());
             dto.setBillingPeriodEnd(rs.getDate("billing_period_end").toLocalDate());
             dto.setBillingDate(rs.getDate("billing_date").toLocalDate());
 
             dto.setBaseAmount(rs.getBigDecimal("base_amount"));
             dto.setUnitPrice(rs.getBigDecimal("unit_price"));
+            dto.setUnitPriceBeforeDiscount(rs.getBigDecimal("unit_price_before_discount"));
             dto.setOverrideAmount(rs.getBigDecimal("override_amount"));
             dto.setSystemAdjustmentAmount(rs.getBigDecimal("total_adjustment_amount"));
             dto.setManualAdjustmentAmount(BigDecimal.ZERO);
@@ -121,6 +125,7 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
             dto.setDiscountAmount(rs.getBigDecimal("discount_amount"));
             dto.setTaxAmount(rs.getBigDecimal("tax_amount"));
             dto.setTaxPct(rs.getBigDecimal("tax_pct"));
+            dto.setSubtotalBeforeTax(rs.getBigDecimal("subtotal_before_tax"));
             dto.setFinalAmount(rs.getBigDecimal("final_amount"));
 
             dto.setStatusCode(rs.getString("status_code"));
@@ -129,10 +134,13 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
             dto.setIsFreezeCycle(false);
             dto.setIsCancellationCycle(false);
             dto.setIsProrated(rs.getObject("is_prorated", Boolean.class));
+            dto.setIsOneTime(rs.getObject("is_one_time", Boolean.class));
+            dto.setIsFinalCycle(rs.getObject("is_final_cycle", Boolean.class));
             dto.setIsGenerated(true);
             dto.setIsLocked(false);
 
             dto.setInvoiceId(getUuid(rs, "invoice_id"));
+            dto.setInvoiceNumber(rs.getString("invoice_number"));
             dto.setNotes(buildNotes(rs));
             dto.setCurrencyCode(rs.getString("currency_code"));
 
@@ -162,11 +170,45 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
         String periodLabel = sanitizeLabelText(rs.getString("period_label"));
         Integer quantity = (Integer) rs.getObject("quantity");
         BigDecimal unitPrice = rs.getBigDecimal("unit_price");
+        BigDecimal unitPriceBeforeDiscount = rs.getBigDecimal("unit_price_before_discount");
+        BigDecimal discountAmount = rs.getBigDecimal("discount_amount");
+        BigDecimal taxAmount = rs.getBigDecimal("tax_amount");
+        BigDecimal taxPct = rs.getBigDecimal("tax_pct");
+        BigDecimal subtotalBeforeTax = rs.getBigDecimal("subtotal_before_tax");
+        BigDecimal adjustmentAmount = rs.getBigDecimal("total_adjustment_amount");
+        Boolean isOneTime = rs.getObject("is_one_time", Boolean.class);
+        Boolean isFinalCycle = rs.getObject("is_final_cycle", Boolean.class);
 
-        return "label=" + label
-                + ", periodLabel=" + periodLabel
-                + ", quantity=" + quantity
-                + ", unitPrice=" + unitPrice;
+        StringBuilder sb = new StringBuilder();
+        sb.append("label=").append(label);
+        sb.append(", periodLabel=").append(periodLabel);
+        sb.append(", quantity=").append(quantity);
+        sb.append(", unitPrice=").append(unitPrice);
+        if (unitPriceBeforeDiscount != null) {
+            sb.append(", unitPriceBeforeDiscount=").append(unitPriceBeforeDiscount);
+        }
+        if (discountAmount != null) {
+            sb.append(", discountAmount=").append(discountAmount);
+        }
+        if (taxAmount != null) {
+            sb.append(", taxAmount=").append(taxAmount);
+        }
+        if (taxPct != null) {
+            sb.append(", taxPct=").append(taxPct);
+        }
+        if (subtotalBeforeTax != null) {
+            sb.append(", subtotalBeforeTax=").append(subtotalBeforeTax);
+        }
+        if (adjustmentAmount != null) {
+            sb.append(", adjustmentAmount=").append(adjustmentAmount);
+        }
+        if (Boolean.TRUE.equals(isOneTime)) {
+            sb.append(", oneTime=true");
+        }
+        if (Boolean.TRUE.equals(isFinalCycle)) {
+            sb.append(", finalCycle=true");
+        }
+        return sb.toString();
     }
 
     /**

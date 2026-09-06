@@ -11,26 +11,34 @@ public class SubscriptionBillingScheduleItemDTO {
     private UUID subscriptionPlanId;
     private UUID subscriptionInstanceId;
     private Integer cycleNumber;
+    private String label;
+    private String periodLabel;
     private LocalDate billingPeriodStart;
     private LocalDate billingPeriodEnd;
     private LocalDate billingDate;
     private BigDecimal baseAmount; 
     private BigDecimal unitPrice;
+    private BigDecimal unitPriceBeforeDiscount;
     private BigDecimal overrideAmount;
     private BigDecimal systemAdjustmentAmount;
     private BigDecimal manualAdjustmentAmount;
     private BigDecimal discountAmount;
     private BigDecimal taxAmount;
     private BigDecimal taxPct;
+    private BigDecimal subtotalBeforeTax;
     private BigDecimal finalAmount;
     private String statusCode;
     private String statusDisplayName;
     private Boolean isFreezeCycle;
     private Boolean isCancellationCycle;
     private Boolean isProrated;
+    private Boolean isOneTime;
+    private Boolean isFinalCycle;
     private Boolean isGenerated;
     private Boolean isLocked;
     private UUID invoiceId;
+    /** Human-readable invoice code (e.g. IN-...), not the UUID. */
+    private String invoiceNumber;
     private String notes;
     private int quantity;
     /** ISO-4217 code for schedule amounts (invoice currency, else purchase location). */
@@ -50,6 +58,12 @@ public class SubscriptionBillingScheduleItemDTO {
 
     public Integer getCycleNumber() { return cycleNumber; }
     public void setCycleNumber(Integer cycleNumber) { this.cycleNumber = cycleNumber; }
+
+    public String getLabel() { return label; }
+    public void setLabel(String label) { this.label = label; }
+
+    public String getPeriodLabel() { return periodLabel; }
+    public void setPeriodLabel(String periodLabel) { this.periodLabel = periodLabel; }
 
     public LocalDate getBillingPeriodStart() { return billingPeriodStart; }
     public void setBillingPeriodStart(LocalDate billingPeriodStart) { this.billingPeriodStart = billingPeriodStart; }
@@ -96,6 +110,12 @@ public class SubscriptionBillingScheduleItemDTO {
     public Boolean getIsProrated() { return isProrated; }
     public void setIsProrated(Boolean isProrated) { this.isProrated = isProrated; }
 
+    public Boolean getIsOneTime() { return isOneTime; }
+    public void setIsOneTime(Boolean isOneTime) { this.isOneTime = isOneTime; }
+
+    public Boolean getIsFinalCycle() { return isFinalCycle; }
+    public void setIsFinalCycle(Boolean isFinalCycle) { this.isFinalCycle = isFinalCycle; }
+
     public Boolean getIsGenerated() { return isGenerated; }
     public void setIsGenerated(Boolean isGenerated) { this.isGenerated = isGenerated; }
 
@@ -105,6 +125,9 @@ public class SubscriptionBillingScheduleItemDTO {
     public UUID getInvoiceId() { return invoiceId; }
     public void setInvoiceId(UUID invoiceId) { this.invoiceId = invoiceId; }
 
+    public String getInvoiceNumber() { return invoiceNumber; }
+    public void setInvoiceNumber(String invoiceNumber) { this.invoiceNumber = invoiceNumber; }
+
     public String getNotes() { return notes; }
     public void setNotes(String notes) { this.notes = notes; }
 	public BigDecimal getUnitPrice() {
@@ -113,11 +136,23 @@ public class SubscriptionBillingScheduleItemDTO {
 	public void setUnitPrice(BigDecimal unitPrice) {
 		this.unitPrice = unitPrice;
 	}
+	public BigDecimal getUnitPriceBeforeDiscount() {
+		return unitPriceBeforeDiscount;
+	}
+	public void setUnitPriceBeforeDiscount(BigDecimal unitPriceBeforeDiscount) {
+		this.unitPriceBeforeDiscount = unitPriceBeforeDiscount;
+	}
 	public BigDecimal getTaxPct() {
 		return taxPct;
 	}
 	public void setTaxPct(BigDecimal taxPct) {
 		this.taxPct = taxPct;
+	}
+	public BigDecimal getSubtotalBeforeTax() {
+		return subtotalBeforeTax;
+	}
+	public void setSubtotalBeforeTax(BigDecimal subtotalBeforeTax) {
+		this.subtotalBeforeTax = subtotalBeforeTax;
 	}
 	public int getQuantity() {
 		return quantity;
