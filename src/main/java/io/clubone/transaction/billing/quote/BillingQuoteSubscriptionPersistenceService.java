@@ -1139,7 +1139,7 @@ public class BillingQuoteSubscriptionPersistenceService {
 					ps.fromAgg() ? agg.unitPrice() : nzBd(ps.recRow().resolvedUnitPrice(), BigDecimal.ZERO),
 					ps.fromAgg() ? agg.unitPriceBeforeDiscount()
 							: nzBd(ps.recRow().resolvedUnitPriceBeforeDiscount(), ps.recRow().resolvedUnitPrice()),
-					ps.fromAgg() ? agg.baseAmount() : recurringRowBaseAmountBeforeTax(ps.recRow()),
+					ps.fromAgg() ? agg.baseAmount() : recurringRowGrossBaseAmountBeforeTax(ps.recRow()),
 					ps.fromAgg() ? agg.discountAmount() : recurringRowDiscountAmount(ps.recRow()),
 					ps.fromAgg() ? agg.taxAmount() : nzBd(ps.recRow().resolvedTaxAmount(), BigDecimal.ZERO),
 					ps.fromAgg() ? agg.taxPct() : nzBd(ps.recRow().resolvedTaxPct(), BigDecimal.ZERO),
@@ -1216,7 +1216,7 @@ public class BillingQuoteSubscriptionPersistenceService {
 						nzBd(fullAmountSourceRow.resolvedUnitPrice(), BigDecimal.ZERO),
 						nzBd(fullAmountSourceRow.resolvedUnitPriceBeforeDiscount(),
 								fullAmountSourceRow.resolvedUnitPrice()),
-						recurringRowBaseAmountBeforeTax(fullAmountSourceRow),
+						recurringRowGrossBaseAmountBeforeTax(fullAmountSourceRow),
 						recurringRowDiscountAmount(fullAmountSourceRow),
 						nzBd(fullAmountSourceRow.resolvedTaxAmount(), BigDecimal.ZERO),
 						nzBd(fullAmountSourceRow.resolvedTaxPct(), BigDecimal.ZERO),
@@ -1799,6 +1799,16 @@ private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 			return unit.setScale(2, RoundingMode.HALF_UP);
 		}
 		return recurringRowNetAmount(r);
+	}
+
+	private static BigDecimal recurringRowGrossBaseAmountBeforeTax(RecurringForecastRow r) {
+		if (r == null) {
+			return BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
+		}
+		return recurringRowNetAmount(r)
+				.add(recurringRowDiscountAmount(r))
+				.max(BigDecimal.ZERO)
+				.setScale(2, RoundingMode.HALF_UP);
 	}
 
 	private static boolean recurringRowIndicatesProration(RecurringForecastRow r) {
@@ -3203,9 +3213,12 @@ private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 		if (periodLabelOut == null) {
 			periodLabelOut = formatIsoPeriodLabel(pStart, pEnd);
 		}
+		BigDecimal normalizedDiscount = discountTotal.max(BigDecimal.ZERO).setScale(2, RoundingMode.HALF_UP);
+		BigDecimal grossBaseAmount = subtotalBeforeTax.add(normalizedDiscount).max(BigDecimal.ZERO)
+				.setScale(2, RoundingMode.HALF_UP);
 		return new ScheduleAgg(label, trunc(periodLabelOut, 100), pStart, pEnd, billDate, qty, avgFullCycleUnit,
-				avgBefDisc, subtotalBeforeTax,
-				discountTotal.setScale(2, RoundingMode.HALF_UP), tax, taxPct, subtotalBeforeTax);
+				avgBefDisc, grossBaseAmount,
+				normalizedDiscount, tax, taxPct, subtotalBeforeTax);
 	}
 
 	private static boolean isPaidInFull(String frequencyCode) {
