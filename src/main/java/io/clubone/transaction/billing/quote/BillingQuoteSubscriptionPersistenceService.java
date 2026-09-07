@@ -79,7 +79,15 @@ public class BillingQuoteSubscriptionPersistenceService {
 
 	private static final DateTimeFormatter MONTH_DAY_EN = DateTimeFormatter.ofPattern("MMM d uuuu", Locale.ENGLISH);
 
-	private record PendingSchedule(boolean fromAgg, RecurringForecastRow recRow, int recurringIndex, int cycleNumber) {
+	/**
+	 * One upcoming schedule row. {@code agg} is set for quote {@code lineItems[]} (one row per distinct
+	 * service period); {@code recRow} is set for {@code recurring[]} forecast rows.
+	 */
+	private record PendingSchedule(ScheduleAgg agg, RecurringForecastRow recRow, int recurringIndex, int cycleNumber,
+			boolean collectAtPurchase) {
+		boolean fromAgg() {
+			return agg != null;
+		}
 	}
 
 	/** Per-quote persistence summary; used to build one merged purchase snapshot for the same agreement cart. */
@@ -999,17 +1007,19 @@ public class BillingQuoteSubscriptionPersistenceService {
 		LocalDate todayInQuoteTz = LocalDate.now(quoteZone);
 		List<RecurringForecastRow> recurringRows = readRecurringForecastRows(quote);
 
-		ScheduleAgg agg = aggregateSchedule(subscriptionLines, contractStart, contractEnd, quoteZone);
-		boolean anyLineProrated = subscriptionLines.stream()
-				.anyMatch(li -> li != null && Boolean.TRUE.equals(li.getIsProrated()));
-		boolean aggregateChargeBelowFullCycle = aggregateChargeLessThanFullCycleUnitTotal(subscriptionLines);
-		boolean firstCycleProrated = anyLineProrated || aggregateChargeBelowFullCycle;
+		List<ScheduleAgg> periodAggs = aggregateScheduleByPeriod(subscriptionLines, contractStart, contractEnd,
+				quoteZone);
+		ScheduleAgg firstAgg = periodAggs.isEmpty() ? null : periodAggs.get(0);
 		log.info(
-				"[billing-quote/persist] step=aggregate_schedule cycle=1 label={} periodStart={} periodEnd={} billingDate={} baseAmount={} taxAmount={} anyLineProrated={} aggregateChargeBelowFullCycle={}",
-				agg.label(), agg.periodStart(), agg.periodEnd(), agg.billingDate(), agg.baseAmount(), agg.taxAmount(),
-				anyLineProrated, aggregateChargeBelowFullCycle);
+				"[billing-quote/persist] step=aggregate_schedule_by_period periodCount={} firstLabel={} firstPeriodStart={} firstPeriodEnd={} firstBillingDate={}",
+				periodAggs.size(),
+				firstAgg != null ? firstAgg.label() : null,
+				firstAgg != null ? firstAgg.periodStart() : null,
+				firstAgg != null ? firstAgg.periodEnd() : null,
+				firstAgg != null ? firstAgg.billingDate() : null);
 
-		List<PendingSchedule> pending = buildPendingSchedules(subscriptionLines, recurringRows);
+		List<PendingSchedule> pending = buildPendingSchedules(periodAggs, recurringRows, contractStart, contractEnd,
+				todayInQuoteTz);
 		RecurringForecastRow fullAmountSourceRow = findLastFullAmountRecurringRow(recurringRows);
 		log.info(
 				"[billing-quote/persist] step=additional_cycles_configuration returnedScheduleCount={} additionalCycleCount={} targetScheduleCount={} hasFullAmountSource={}",
@@ -1024,12 +1034,13 @@ public class BillingQuoteSubscriptionPersistenceService {
 		}
 
 		boolean paidFirstCycle = invoicePaid && invoiceId != null;
-		UUID firstCycleScheduleStatusId = paidFirstCycle ? paidScheduleStatusId : plannedScheduleStatusId;
 		Timestamp billedOnPaidCycle = paidFirstCycle ? Timestamp.from(Instant.now()) : null;
 		UUID invoiceIdForPaidCycle = paidFirstCycle ? invoiceId : null;
 
-		LocalDate firstCycleBillDate = normalizePersistedBillingDate(
-				agg.billingDate(), agg.periodStart(), contractStart, null, true, todayInQuoteTz);
+		LocalDate firstCycleBillDate = firstAgg != null
+				? normalizePersistedBillingDate(firstAgg.billingDate(), firstAgg.periodStart(), contractStart, null,
+						true, todayInQuoteTz)
+				: normalizePersistedBillingDate(null, contractStart, contractStart, null, true, todayInQuoteTz);
 		LocalDate nextBillingDate = resolveInstanceNextBillingDate(pending, recurringRows, subscriptionLines,
 				contractStart, firstCycleBillDate, paidFirstCycle, quoteZone);
 		LocalDate lastBilledOn = paidFirstCycle ? firstCycleBillDate : null;
@@ -1092,58 +1103,56 @@ public class BillingQuoteSubscriptionPersistenceService {
 		ForecastBounds lastPersistedBounds = null;
 		int lastPersistedCycleNumber = 0;
 		LocalDate finalSchedulePeriodEnd = contractEnd;
+		boolean appliedPurchaseDayBillAnchor = false;
 		for (int i = 0; i < pending.size(); i++) {
 			PendingSchedule ps = pending.get(i);
 			boolean isLast = ADDITIONAL_BILLING_CYCLES == 0 && i == pending.size() - 1;
-			UUID schStatus;
-			UUID invId;
-			Timestamp billedOn;
+			boolean markPaid = paidFirstCycle && ps.collectAtPurchase();
+			UUID schStatus = markPaid ? paidScheduleStatusId : plannedScheduleStatusId;
+			UUID invId = markPaid ? invoiceIdForPaidCycle : null;
+			Timestamp billedOn = markPaid ? billedOnPaidCycle : null;
 			UUID billingRunId = null;
-			if (ps.fromAgg()) {
-				schStatus = firstCycleScheduleStatusId;
-				invId = invoiceIdForPaidCycle;
-				billedOn = billedOnPaidCycle;
-			} else {
-				schStatus = plannedScheduleStatusId;
-				invId = null;
-				billedOn = null;
-			}
+			ScheduleAgg rowAgg = ps.agg();
 			ForecastBounds bounds;
 			if (ps.fromAgg()) {
-				bounds = new ForecastBounds(agg.periodStart(), agg.periodEnd());
+				bounds = new ForecastBounds(rowAgg.periodStart(), rowAgg.periodEnd());
 			} else {
 				bounds = computeForecastPeriodBounds(recurringRows, ps.recurringIndex(), contractStart, contractEnd);
 				bounds = resolveBillingPeriodBounds(bounds, ps.recRow().resolvedPeriodLabel(), contractStart, contractEnd);
 			}
-			LocalDate rawBillDate = ps.fromAgg() ? agg.billingDate()
+			LocalDate rawBillDate = ps.fromAgg() ? rowAgg.billingDate()
 					: nzDate(ps.recRow().resolvedBillingDate(), bounds.periodStart());
+			boolean forcePurchaseDayBill = ps.fromAgg() && ps.collectAtPurchase() && !appliedPurchaseDayBillAnchor;
 			LocalDate billDate = normalizePersistedBillingDate(rawBillDate, bounds.periodStart(), contractStart,
-					previousBillDate, ps.fromAgg(), todayInQuoteTz);
+					previousBillDate, forcePurchaseDayBill, todayInQuoteTz);
+			if (forcePurchaseDayBill) {
+				appliedPurchaseDayBillAnchor = true;
+			}
 			previousBillDate = billDate;
 			lastPersistedBounds = bounds;
 			lastPersistedCycleNumber = Math.max(lastPersistedCycleNumber, ps.cycleNumber());
 			if (bounds.periodEnd() != null) {
 				finalSchedulePeriodEnd = bounds.periodEnd();
 			}
-			boolean rowProrated = ps.fromAgg() ? firstCycleProrated : recurringRowIndicatesProration(ps.recRow());
+			boolean rowProrated = ps.fromAgg() ? rowAgg.prorated() : recurringRowIndicatesProration(ps.recRow());
 			String prCase = rowProrated ? billing.getProrationCase() : null;
 			String prStrat = rowProrated ? billing.getProrationStrategyCode() : null;
 			String prSource = rowProrated ? trunc(billing.getProrationSource(), 50) : null;
 			UUID sid = insertSubscriptionBillingSchedule(subscriptionInstanceId, subscriptionPlanId,
 					ps.cycleNumber(),
-					ps.fromAgg() ? agg.label() : trunc(ps.recRow().resolvedScheduleLabel(), 100),
-					ps.fromAgg() ? agg.periodLabel()
+					ps.fromAgg() ? rowAgg.label() : trunc(ps.recRow().resolvedScheduleLabel(), 100),
+					ps.fromAgg() ? rowAgg.periodLabel()
 							: ensurePeriodLabelForBounds(bounds, ps.recRow().resolvedPeriodLabel()),
 					bounds.periodStart(), bounds.periodEnd(), billDate,
-					ps.fromAgg() ? agg.quantity() : 1,
-					ps.fromAgg() ? agg.unitPrice() : nzBd(ps.recRow().resolvedUnitPrice(), BigDecimal.ZERO),
-					ps.fromAgg() ? agg.unitPriceBeforeDiscount()
+					ps.fromAgg() ? rowAgg.quantity() : 1,
+					ps.fromAgg() ? rowAgg.unitPrice() : nzBd(ps.recRow().resolvedUnitPrice(), BigDecimal.ZERO),
+					ps.fromAgg() ? rowAgg.unitPriceBeforeDiscount()
 							: nzBd(ps.recRow().resolvedUnitPriceBeforeDiscount(), ps.recRow().resolvedUnitPrice()),
-					ps.fromAgg() ? agg.baseAmount() : recurringRowGrossBaseAmountBeforeTax(ps.recRow()),
-					ps.fromAgg() ? agg.discountAmount() : recurringRowDiscountAmount(ps.recRow()),
-					ps.fromAgg() ? agg.taxAmount() : nzBd(ps.recRow().resolvedTaxAmount(), BigDecimal.ZERO),
-					ps.fromAgg() ? agg.taxPct() : nzBd(ps.recRow().resolvedTaxPct(), BigDecimal.ZERO),
-					ps.fromAgg() ? agg.subtotalBeforeTax() : recurringRowNetAmount(ps.recRow()),
+					ps.fromAgg() ? rowAgg.baseAmount() : recurringRowGrossBaseAmountBeforeTax(ps.recRow()),
+					ps.fromAgg() ? rowAgg.discountAmount() : recurringRowDiscountAmount(ps.recRow()),
+					ps.fromAgg() ? rowAgg.taxAmount() : nzBd(ps.recRow().resolvedTaxAmount(), BigDecimal.ZERO),
+					ps.fromAgg() ? rowAgg.taxPct() : nzBd(ps.recRow().resolvedTaxPct(), BigDecimal.ZERO),
+					ps.fromAgg() ? rowAgg.subtotalBeforeTax() : recurringRowNetAmount(ps.recRow()),
 					rowProrated,
 					ps.fromAgg() && isPaidInFull(billing.getFrequencyCode()),
 					isLast,
@@ -1160,14 +1169,16 @@ public class BillingQuoteSubscriptionPersistenceService {
 				primaryBillingScheduleId = sid;
 			}
 			if (ps.fromAgg()) {
-				log.info("[billing-quote/persist] step=insert_billing_schedule outcome=ok billingScheduleId={} cycle={} fromAgg=true billDate={}",
-						sid, ps.cycleNumber(), billDate);
-				for (QuoteLineItemRow li : subscriptionLines) {
+				log.info(
+						"[billing-quote/persist] step=insert_billing_schedule outcome=ok billingScheduleId={} cycle={} fromAgg=true billDate={} collectAtPurchase={} markPaid={}",
+						sid, ps.cycleNumber(), billDate, ps.collectAtPurchase(), markPaid);
+				List<QuoteLineItemRow> taxSource = rowAgg.sourceLines() != null ? rowAgg.sourceLines() : List.of();
+				for (QuoteLineItemRow li : taxSource) {
 					insertBillingScheduleTaxLinesForQuoteLine(sid, li);
 				}
 				log.info("[billing-quote/persist] step=insert_schedule_tax_lines outcome=ok lineItemTaxPassCount={}",
-						subscriptionLines.size());
-				if (purchaseSnapshotId != null) {
+						taxSource.size());
+				if (purchaseSnapshotId != null && forcePurchaseDayBill) {
 					UUID cycleLineId = lineIdForFirstNonFeeLine(orderedLinesForPurchaseSnapshot, 1,
 							purchaseSnapshotLineIdsBySequence);
 					insertSnapshotCyclePricesFromApplied(purchaseSnapshotId, applied, cycleLineId);
@@ -1329,28 +1340,42 @@ public class BillingQuoteSubscriptionPersistenceService {
 		return out;
 	}
 
-	private List<PendingSchedule> buildPendingSchedules(List<QuoteLineItemRow> subscriptionLines,
-			List<RecurringForecastRow> recurringRows) {
+	private List<PendingSchedule> buildPendingSchedules(List<ScheduleAgg> periodAggs,
+			List<RecurringForecastRow> recurringRows, LocalDate contractStart, LocalDate contractEnd,
+			LocalDate purchaseDay) {
 		List<PendingSchedule> out = new ArrayList<>();
 		if (recurringRows == null) {
 			recurringRows = List.of();
 		}
-		if (subscriptionLines == null || subscriptionLines.isEmpty()) {
+		if (periodAggs == null) {
+			periodAggs = List.of();
+		}
+		int maxLineCycle = 0;
+		for (int i = 0; i < periodAggs.size(); i++) {
+			ScheduleAgg agg = periodAggs.get(i);
+			int cn = i + 1;
+			boolean collectAtPurchase = isCollectAtPurchase(agg.billingDate(), purchaseDay);
+			out.add(new PendingSchedule(agg, null, -1, cn, collectAtPurchase));
+			maxLineCycle = Math.max(maxLineCycle, cn);
+			log.info(
+					"[billing-quote/persist] step=pending_line_period cycle={} periodStart={} periodEnd={} billingDate={} collectAtPurchase={} amount={}",
+					cn, agg.periodStart(), agg.periodEnd(), agg.billingDate(), collectAtPurchase, agg.baseAmount());
+		}
+		if (periodAggs.isEmpty()) {
 			int ridx = 0;
 			for (RecurringForecastRow r : recurringRows) {
 				int cn = resolveForecastCycleNumber(r, ridx);
-				out.add(new PendingSchedule(false, r, ridx, cn));
+				out.add(new PendingSchedule(null, r, ridx, cn, false));
 				ridx++;
 			}
 			return out;
 		}
-		out.add(new PendingSchedule(true, null, -1, 1));
 		int ridx = 0;
 		for (RecurringForecastRow r : recurringRows) {
 			int cn = resolveForecastCycleNumber(r, ridx);
 			/*
 			 * Legacy quotes repeated "cycle 1" in recurring[] alongside line-item cycle 1; skip that duplicate. New API
-			 * sends billingCycle starting at 2 for the first full billing period, so this rarely triggers.
+			 * sends billingCycle starting at 2/3 for the first full billing period, so this rarely triggers.
 			 */
 			if (cn == 1 && r.getBillingCycle() == null && r.getBillingCycleSnake() == null) {
 				log.info(
@@ -1359,10 +1384,56 @@ public class BillingQuoteSubscriptionPersistenceService {
 				ridx++;
 				continue;
 			}
-			out.add(new PendingSchedule(false, r, ridx, cn));
+			if (cn > 0 && cn <= maxLineCycle) {
+				log.info(
+						"[billing-quote/persist] step=skip_recurring_row reason=cycle_covered_by_line_items cycle={} recurringIndex={}",
+						cn, ridx);
+				ridx++;
+				continue;
+			}
+			ForecastBounds rb = computeForecastPeriodBounds(recurringRows, ridx, contractStart, contractEnd);
+			rb = resolveBillingPeriodBounds(rb, r.resolvedPeriodLabel(), contractStart, contractEnd);
+			if (overlapsAnyPeriodAgg(rb, periodAggs)) {
+				log.info(
+						"[billing-quote/persist] step=skip_recurring_row reason=period_overlaps_line_items cycle={} periodStart={} periodEnd={} recurringIndex={}",
+						cn, rb.periodStart(), rb.periodEnd(), ridx);
+				ridx++;
+				continue;
+			}
+			out.add(new PendingSchedule(null, r, ridx, cn, false));
 			ridx++;
 		}
 		return out;
+	}
+
+	private static boolean isCollectAtPurchase(LocalDate billingDate, LocalDate purchaseDay) {
+		if (purchaseDay == null) {
+			return true;
+		}
+		if (billingDate == null) {
+			return true;
+		}
+		return !billingDate.isAfter(purchaseDay);
+	}
+
+	private static boolean overlapsAnyPeriodAgg(ForecastBounds bounds, List<ScheduleAgg> periodAggs) {
+		if (bounds == null || periodAggs == null || periodAggs.isEmpty()) {
+			return false;
+		}
+		LocalDate s = bounds.periodStart();
+		LocalDate e = bounds.periodEnd();
+		if (s == null || e == null) {
+			return false;
+		}
+		for (ScheduleAgg agg : periodAggs) {
+			if (agg == null || agg.periodStart() == null || agg.periodEnd() == null) {
+				continue;
+			}
+			if (!e.isBefore(agg.periodStart()) && !s.isAfter(agg.periodEnd())) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private RecurringForecastRow findLastFullAmountRecurringRow(List<RecurringForecastRow> recurringRows) {
@@ -2628,7 +2699,8 @@ private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 
 	/**
 	 * Normalize schedule {@code billing_date}: never before membership start; first paid cycle uses
-	 * membership/purchase day; later cycles must be strictly after the previous bill date.
+	 * membership/purchase day; later cycles must not be before the previous bill date (equal allowed when
+	 * two periods were collected the same day).
 	 */
 	private static LocalDate normalizePersistedBillingDate(LocalDate rawBillingDate, LocalDate periodStart,
 			LocalDate contractStart, LocalDate previousBillDate, boolean firstCycle, LocalDate purchaseDay) {
@@ -2651,19 +2723,16 @@ private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 		if (d != null && contractStart != null && d.isBefore(contractStart)) {
 			d = periodStart != null && !periodStart.isBefore(contractStart) ? periodStart : contractStart;
 		}
-		if (previousBillDate != null && d != null && !d.isAfter(previousBillDate)) {
-			if (periodStart != null && periodStart.isAfter(previousBillDate)) {
-				d = periodStart;
-			} else {
-				d = previousBillDate.plusDays(1);
-			}
+		if (previousBillDate != null && d != null && d.isBefore(previousBillDate)) {
+			// Keep IN_ADVANCE bill dates that fall before periodStart; only bump when strictly before prior bill.
+			d = previousBillDate.plusDays(1);
 		}
 		return d;
 	}
 
 	/**
-	 * Instance {@code next_billing_date}: after a paid first cycle, the next unpaid schedule's bill
-	 * date; otherwise the first cycle bill date.
+	 * Instance {@code next_billing_date}: after paid due-today cycle(s), the next unpaid schedule's bill date;
+	 * otherwise the first cycle bill date.
 	 */
 	private LocalDate resolveInstanceNextBillingDate(List<PendingSchedule> pending,
 			List<RecurringForecastRow> recurringRows, List<QuoteLineItemRow> subscriptionLines,
@@ -2676,11 +2745,26 @@ private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 		LocalDate purchaseDay = LocalDate.now(quoteZone);
 		if (pending != null) {
 			for (PendingSchedule ps : pending) {
-				if (ps == null || ps.fromAgg() || ps.recRow() == null) {
+				if (ps == null) {
 					continue;
 				}
-				LocalDate periodStart = ps.recRow().resolvedPeriodStart();
-				LocalDate raw = nzDate(ps.recRow().resolvedBillingDate(), periodStart);
+				if (ps.collectAtPurchase()) {
+					if (ps.fromAgg() && ps.agg() != null && ps.agg().billingDate() != null) {
+						previous = ps.agg().billingDate();
+					}
+					continue;
+				}
+				LocalDate periodStart;
+				LocalDate raw;
+				if (ps.fromAgg() && ps.agg() != null) {
+					periodStart = ps.agg().periodStart();
+					raw = nzDate(ps.agg().billingDate(), periodStart);
+				} else if (ps.recRow() != null) {
+					periodStart = ps.recRow().resolvedPeriodStart();
+					raw = nzDate(ps.recRow().resolvedBillingDate(), periodStart);
+				} else {
+					continue;
+				}
 				LocalDate normalized = normalizePersistedBillingDate(raw, periodStart, contractStart, previous, false,
 						purchaseDay);
 				if (normalized != null) {
@@ -3118,7 +3202,58 @@ private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 	private record ScheduleAgg(String label, String periodLabel, LocalDate periodStart, LocalDate periodEnd,
 			LocalDate billingDate, int quantity, BigDecimal unitPrice, BigDecimal unitPriceBeforeDiscount,
 			BigDecimal baseAmount, BigDecimal discountAmount, BigDecimal taxAmount, BigDecimal taxPct,
-			BigDecimal subtotalBeforeTax) {
+			BigDecimal subtotalBeforeTax, boolean prorated, List<QuoteLineItemRow> sourceLines) {
+	}
+
+	/**
+	 * One schedule aggregate per distinct service period in quote {@code lineItems[]}. Mid-cycle enrollments
+	 * often send Sep (prorated) + Oct (full) as separate line items — those must remain separate schedule
+	 * cycles (not one merged Sep–Oct paid row).
+	 */
+	private List<ScheduleAgg> aggregateScheduleByPeriod(List<QuoteLineItemRow> lines, LocalDate contractStart,
+			LocalDate contractEnd, ZoneId quoteZone) {
+		if (lines == null || lines.isEmpty()) {
+			return List.of(aggregateSchedule(List.of(), contractStart, contractEnd, quoteZone));
+		}
+		List<QuoteLineItemRow> ordered = new ArrayList<>(lines);
+		ordered.sort(Comparator
+				.comparing((QuoteLineItemRow li) -> li.getStartDate() != null ? li.getStartDate() : LocalDate.MAX)
+				.thenComparing(li -> nzInt(li.getSequence(), Integer.MAX_VALUE)));
+		List<List<QuoteLineItemRow>> groups = new ArrayList<>();
+		List<QuoteLineItemRow> current = new ArrayList<>();
+		LocalDate curStart = null;
+		LocalDate curEnd = null;
+		for (QuoteLineItemRow li : ordered) {
+			if (li == null) {
+				continue;
+			}
+			LocalDate s = li.getStartDate();
+			LocalDate e = li.getEndDate();
+			if (current.isEmpty()) {
+				current.add(li);
+				curStart = s;
+				curEnd = e;
+				continue;
+			}
+			boolean samePeriod = Objects.equals(curStart, s) && Objects.equals(curEnd, e);
+			if (samePeriod) {
+				current.add(li);
+			} else {
+				groups.add(current);
+				current = new ArrayList<>();
+				current.add(li);
+				curStart = s;
+				curEnd = e;
+			}
+		}
+		if (!current.isEmpty()) {
+			groups.add(current);
+		}
+		List<ScheduleAgg> out = new ArrayList<>(groups.size());
+		for (List<QuoteLineItemRow> group : groups) {
+			out.add(aggregateSchedule(group, contractStart, contractEnd, quoteZone));
+		}
+		return out;
 	}
 
 	private ScheduleAgg aggregateSchedule(List<QuoteLineItemRow> lines, LocalDate contractStart, LocalDate contractEnd,
@@ -3129,7 +3264,7 @@ private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 			LocalDate ce = nzDate(contractEnd, cs);
 			String pl = trunc(formatIsoPeriodLabel(cs, ce), 100);
 			return new ScheduleAgg("Billing", pl, cs, ce, today, 1, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
-					BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO);
+					BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, false, List.of());
 		}
 		BigDecimal sumPricePreTax = BigDecimal.ZERO;
 		BigDecimal sumChargeAmount = BigDecimal.ZERO;
@@ -3141,9 +3276,13 @@ private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 		LocalDate pStart = null;
 		LocalDate pEnd = null;
 		LocalDate billDate = null;
+		boolean anyProrated = false;
 		for (QuoteLineItemRow li : lines) {
 			if (li == null) {
 				continue;
+			}
+			if (Boolean.TRUE.equals(li.getIsProrated())) {
+				anyProrated = true;
 			}
 			int q = nz(li.getQuantity(), 1);
 			qty += q;
@@ -3176,7 +3315,8 @@ private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 				pEnd = pEnd == null ? li.getEndDate() : li.getEndDate().isAfter(pEnd) ? li.getEndDate() : pEnd;
 			}
 			if (li.getBillingDate() != null) {
-				billDate = li.getBillingDate();
+				// Prefer earliest bill date within the period group (due-today before later IN_ADVANCE).
+				billDate = billDate == null || li.getBillingDate().isBefore(billDate) ? li.getBillingDate() : billDate;
 			}
 		}
 		QuoteLineItemRow first = lines.get(0);
@@ -3216,9 +3356,11 @@ private static BigDecimal recurringRowNetAmount(RecurringForecastRow r) {
 		BigDecimal normalizedDiscount = discountTotal.max(BigDecimal.ZERO).setScale(2, RoundingMode.HALF_UP);
 		BigDecimal grossBaseAmount = subtotalBeforeTax.add(normalizedDiscount).max(BigDecimal.ZERO)
 				.setScale(2, RoundingMode.HALF_UP);
+		boolean chargeBelowFull = aggregateChargeLessThanFullCycleUnitTotal(lines);
+		boolean prorated = anyProrated || chargeBelowFull;
 		return new ScheduleAgg(label, trunc(periodLabelOut, 100), pStart, pEnd, billDate, qty, avgFullCycleUnit,
 				avgBefDisc, grossBaseAmount,
-				normalizedDiscount, tax, taxPct, subtotalBeforeTax);
+				normalizedDiscount, tax, taxPct, subtotalBeforeTax, prorated, List.copyOf(lines));
 	}
 
 	private static boolean isPaidInFull(String frequencyCode) {
