@@ -48,6 +48,7 @@ public class FinalizeInventoryProvisioningHelper {
             UUID actorId,
             UUID locationId,
             UUID applicationId,
+            List<UUID> promotionApplicabilityIds,
             String correlationId) {
 
         Objects.requireNonNull(
@@ -100,6 +101,29 @@ public class FinalizeInventoryProvisioningHelper {
                     entitlements.isEmpty() ? "empty" : "resolved",
                     entitlements.size()
             );
+        }
+
+        List<ItemEntitlement> promotionEntitlements = repository
+                .loadPromotionFreeItemEntitlementsByApplicabilityIds(
+                        invoiceId,
+                        promotionApplicabilityIds
+                );
+        if (promotionEntitlements.isEmpty()) {
+            promotionEntitlements = repository
+                    .loadPromotionFreeItemEntitlements(invoiceId);
+        }
+        log.info(
+                "[inventory-provisioning] step=promotion_free_item_entitlements "
+                        + "invoiceId={} outcome={} entitlementCount={}",
+                invoiceId,
+                promotionEntitlements.isEmpty() ? "empty" : "resolved",
+                promotionEntitlements.size()
+        );
+        if (!promotionEntitlements.isEmpty()) {
+            if (!(entitlements instanceof ArrayList<?>)) {
+                entitlements = new ArrayList<>(entitlements);
+            }
+            entitlements.addAll(promotionEntitlements);
         }
 
         log.info(

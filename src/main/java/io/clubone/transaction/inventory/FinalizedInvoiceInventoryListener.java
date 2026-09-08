@@ -27,22 +27,26 @@ public class FinalizedInvoiceInventoryListener {
         log.info(
                 "[inventory-provisioning] step=listener_received "
                         + "thread={} invoiceId={} clientPaymentTransactionId={} "
-                        + "actorId={} locationId={} applicationId={} correlationId={}",
+                        + "actorId={} locationId={} applicationId={} "
+                        + "promotionApplicabilityCount={} correlationId={}",
                 Thread.currentThread().getName(),
                 event.invoiceId(),
                 event.clientPaymentTransactionId(),
                 event.actorId(),
                 event.locationId(),
                 event.applicationId(),
+                event.promotionApplicabilityIds().size(),
                 event.correlationId()
         );
 
         try {
             log.info(
                     "[inventory-provisioning] step=helper_call start "
-                            + "invoiceId={} clientPaymentTransactionId={} correlationId={}",
+                            + "invoiceId={} clientPaymentTransactionId={} "
+                            + "promotionApplicabilityCount={} correlationId={}",
                     event.invoiceId(),
                     event.clientPaymentTransactionId(),
+                    event.promotionApplicabilityIds().size(),
                     event.correlationId()
             );
 
@@ -53,6 +57,7 @@ public class FinalizedInvoiceInventoryListener {
                             event.actorId(),
                             event.locationId(),
                             event.applicationId(),
+                            event.promotionApplicabilityIds(),
                             event.correlationId()
                     );
 

@@ -409,6 +409,252 @@ public class InvoiceInventoryProvisioningRepository {
                 ));
     }
 
+    /**
+     * Loads complimentary ITEM entities configured for a promotion that was
+     * persisted against this invoice. This is intentionally additive to the
+     * existing direct-item, bundle and agreement-snapshot entitlement paths.
+     */
+    public List<ItemEntitlement> loadPromotionFreeItemEntitlements(
+            UUID invoiceId) {
+
+        return jdbc.query("""
+                SELECT DISTINCT ON (
+                    free_entity.promotion_free_entities_id,
+                    item_version.item_version_id
+                )
+                    free_entity.promotion_free_entities_id
+                        AS source_line_id,
+                    free_entity.entity_id AS source_entity_id,
+                    item_version.item_id,
+                    item_version.item_version_id,
+                    item_version.application_id,
+                    coalesce(
+                        nullif(item.item_name, ''),
+                        item_version.item_version_id::text
+                    ) AS item_name,
+                    coalesce(
+                        nullif(item.item_name, ''),
+                        item_version.item_version_id::text
+                    ) AS item_code,
+                    coalesce(
+                        nullif(item_version.description, ''),
+                        nullif(item.description, ''),
+                        'Complimentary promotion item'
+                    ) AS item_description,
+                    free_entity.quantity::numeric
+                        AS entitlement_quantity
+                FROM transactions.invoice invoice
+                JOIN transactions.invoice_entity invoice_entity
+                  ON invoice_entity.invoice_id = invoice.invoice_id
+                 AND invoice_entity.is_active = true
+                JOIN transactions.invoice_entity_promotion invoice_promotion
+                  ON invoice_promotion.invoice_entity_id =
+                     invoice_entity.invoice_entity_id
+                 AND invoice_promotion.is_active = true
+                JOIN promotions.promotion_version promotion_version
+                  ON promotion_version.promotion_version_id =
+                     invoice_promotion.promotion_version_id
+                 AND promotion_version.application_id =
+                     invoice.application_id
+                 AND promotion_version.is_active = true
+                JOIN promotions.promotion_applicability applicability
+                  ON applicability.promotion_version_id =
+                     promotion_version.promotion_version_id
+                 AND applicability.application_id = invoice.application_id
+                 AND applicability.is_active = true
+                 AND applicability.is_deleted = false
+                 AND (
+                     invoice_promotion.promotion_applicability_id IS NULL
+                     OR applicability.promotion_applicability_id =
+                        invoice_promotion.promotion_applicability_id
+                 )
+                JOIN promotions.promotion_free_entities free_entity
+                  ON free_entity.promotion_applicability_id =
+                     applicability.promotion_applicability_id
+                 AND free_entity.is_active = true
+                 AND (
+                     free_entity.application_id IS NULL
+                     OR free_entity.application_id = invoice.application_id
+                 )
+                JOIN transactions.lu_entity_type entity_type
+                  ON entity_type.entity_type_id = free_entity.entity_type_id
+                 AND coalesce(entity_type.is_active, true) = true
+                 AND upper(entity_type.entity_type) = 'ITEM'
+                JOIN LATERAL (
+                    SELECT candidate.*
+                    FROM items.item_version candidate
+                    JOIN items.item candidate_item
+                      ON candidate_item.item_id = candidate.item_id
+                     AND candidate_item.is_active = true
+                    WHERE candidate.is_active = true
+                      AND candidate.application_id = invoice.application_id
+                      AND (
+                          candidate.item_version_id = free_entity.entity_id
+                          OR candidate.item_id = free_entity.entity_id
+                      )
+                    ORDER BY
+                        CASE
+                            WHEN candidate.item_version_id =
+                                 free_entity.entity_id THEN 0
+                            WHEN candidate_item.current_version_id =
+                                 candidate.item_version_id THEN 1
+                            ELSE 2
+                        END,
+                        candidate.created_on DESC NULLS LAST,
+                        candidate.item_version_id
+                    LIMIT 1
+                ) item_version ON true
+                JOIN items.item item
+                  ON item.item_id = item_version.item_id
+                 AND item.is_active = true
+                WHERE invoice.invoice_id = :invoiceId
+                  AND invoice.is_active = true
+                ORDER BY
+                    free_entity.promotion_free_entities_id,
+                    item_version.item_version_id
+                """,
+                new MapSqlParameterSource("invoiceId", invoiceId),
+                (rs, rowNum) -> new ItemEntitlement(
+                        uuid(rs, "source_line_id"),
+                        "PROMOTION",
+                        uuid(rs, "source_entity_id"),
+                        uuid(rs, "item_version_id"),
+                        null,
+                        null,
+                        null,
+                        uuid(rs, "item_id"),
+                        uuid(rs, "item_version_id"),
+                        uuid(rs, "application_id"),
+                        rs.getString("item_code"),
+                        rs.getString("item_name"),
+                        rs.getString("item_description"),
+                        positiveQuantity(
+                                decimal(rs, "entitlement_quantity")
+                        )
+                ));
+    }
+
+    /**
+     * Loads complimentary items using promotion applicability identifiers
+     * supplied by finalize. The existing invoice-linked method remains the
+     * fallback for callers that do not supply those identifiers.
+     */
+    public List<ItemEntitlement> loadPromotionFreeItemEntitlementsByApplicabilityIds(
+            UUID invoiceId,
+            List<UUID> promotionApplicabilityIds) {
+
+        if (promotionApplicabilityIds == null
+                || promotionApplicabilityIds.isEmpty()) {
+            return List.of();
+        }
+
+        return jdbc.query("""
+                SELECT DISTINCT ON (
+                    free_entity.promotion_free_entities_id,
+                    item_version.item_version_id
+                )
+                    free_entity.promotion_free_entities_id
+                        AS source_line_id,
+                    free_entity.entity_id AS source_entity_id,
+                    item_version.item_id,
+                    item_version.item_version_id,
+                    item_version.application_id,
+                    coalesce(
+                        nullif(item.item_name, ''),
+                        item_version.item_version_id::text
+                    ) AS item_name,
+                    coalesce(
+                        nullif(item.item_name, ''),
+                        item_version.item_version_id::text
+                    ) AS item_code,
+                    coalesce(
+                        nullif(item_version.description, ''),
+                        nullif(item.description, ''),
+                        'Complimentary promotion item'
+                    ) AS item_description,
+                    free_entity.quantity::numeric
+                        AS entitlement_quantity
+                FROM transactions.invoice invoice
+                JOIN promotions.promotion_applicability applicability
+                  ON applicability.promotion_applicability_id IN
+                     (:promotionApplicabilityIds)
+                 AND applicability.application_id = invoice.application_id
+                 AND applicability.is_active = true
+                 AND applicability.is_deleted = false
+                JOIN promotions.promotion_free_entities free_entity
+                  ON free_entity.promotion_applicability_id =
+                     applicability.promotion_applicability_id
+                 AND free_entity.is_active = true
+                 AND (
+                     free_entity.application_id IS NULL
+                     OR free_entity.application_id = invoice.application_id
+                 )
+                LEFT JOIN transactions.lu_entity_type entity_type
+                  ON entity_type.entity_type_id = free_entity.entity_type_id
+                 AND coalesce(entity_type.is_active, true) = true
+                JOIN LATERAL (
+                    SELECT candidate.*
+                    FROM items.item_version candidate
+                    JOIN items.item candidate_item
+                      ON candidate_item.item_id = candidate.item_id
+                     AND candidate_item.is_active = true
+                    WHERE candidate.is_active = true
+                      AND candidate.application_id = invoice.application_id
+                      AND (
+                          candidate.item_version_id = free_entity.entity_id
+                          OR candidate.item_id = free_entity.entity_id
+                      )
+                    ORDER BY
+                        CASE
+                            WHEN candidate.item_version_id =
+                                 free_entity.entity_id THEN 0
+                            WHEN candidate_item.current_version_id =
+                                 candidate.item_version_id THEN 1
+                            ELSE 2
+                        END,
+                        candidate.created_on DESC NULLS LAST,
+                        candidate.item_version_id
+                    LIMIT 1
+                ) item_version ON true
+                JOIN items.item item
+                  ON item.item_id = item_version.item_id
+                 AND item.is_active = true
+                WHERE invoice.invoice_id = :invoiceId
+                  AND invoice.is_active = true
+                  AND (
+                      free_entity.entity_type_id IS NULL
+                      OR upper(entity_type.entity_type) = 'ITEM'
+                  )
+                ORDER BY
+                    free_entity.promotion_free_entities_id,
+                    item_version.item_version_id
+                """,
+                new MapSqlParameterSource()
+                        .addValue("invoiceId", invoiceId)
+                        .addValue(
+                                "promotionApplicabilityIds",
+                                promotionApplicabilityIds
+                        ),
+                (rs, rowNum) -> new ItemEntitlement(
+                        uuid(rs, "source_line_id"),
+                        "PROMOTION",
+                        uuid(rs, "source_entity_id"),
+                        uuid(rs, "item_version_id"),
+                        null,
+                        null,
+                        null,
+                        uuid(rs, "item_id"),
+                        uuid(rs, "item_version_id"),
+                        uuid(rs, "application_id"),
+                        rs.getString("item_code"),
+                        rs.getString("item_name"),
+                        rs.getString("item_description"),
+                        positiveQuantity(
+                                decimal(rs, "entitlement_quantity")
+                        )
+                ));
+    }
+
     public MappingContext resolveMapping(UUID itemVersionId) {
         List<MappingContext> mappings = jdbc.query("""
                 SELECT

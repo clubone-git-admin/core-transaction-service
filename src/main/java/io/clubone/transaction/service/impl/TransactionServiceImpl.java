@@ -956,6 +956,7 @@ public class TransactionServiceImpl implements TransactionService {
 				if (!deferInventoryUntilQuotePersistence) {
 					publishFinalizedInvoiceInventoryEvent(
 							req.getInvoiceId(), cptId, actorId, locationId, applicationId,
+							extractPromotionApplicabilityIds(req.getBillingQuoteFinalizeSpecs()),
 							"finalize-inventory-" + req.getInvoiceId(),
 							"registered_for_after_commit");
 				} else {
@@ -1296,6 +1297,7 @@ public class TransactionServiceImpl implements TransactionService {
 							actorId,
 							locationId,
 							applicationId,
+							extractPromotionApplicabilityIds(specsCopy),
 							"finalize-inventory-" + invoiceId,
 							"published_after_quote_persistence");
 				}
@@ -1316,6 +1318,19 @@ public class TransactionServiceImpl implements TransactionService {
 				.map(BillingQuoteFinalizeSpec::getEntityTypeCode)
 				.filter(Objects::nonNull)
 				.anyMatch(code -> "AGREEMENT".equalsIgnoreCase(code.trim()));
+	}
+
+	private List<UUID> extractPromotionApplicabilityIds(
+			List<BillingQuoteFinalizeSpec> specs) {
+		if (CollectionUtils.isEmpty(specs)) {
+			return List.of();
+		}
+		return specs.stream()
+				.filter(Objects::nonNull)
+				.map(BillingQuoteFinalizeSpec::getPromotionId)
+				.filter(Objects::nonNull)
+				.distinct()
+				.toList();
 	}
 
 	private void logBillingQuoteFinalizeSpecs(
@@ -1376,6 +1391,7 @@ public class TransactionServiceImpl implements TransactionService {
 			UUID actorId,
 			UUID locationId,
 			UUID applicationId,
+			List<UUID> promotionApplicabilityIds,
 			String correlationId,
 			String outcome) {
 		logger.info(
@@ -1391,6 +1407,7 @@ public class TransactionServiceImpl implements TransactionService {
 						actorId,
 						locationId,
 						applicationId,
+						promotionApplicabilityIds,
 						correlationId));
 		logger.info(
 				"[transactions/v3/finalize] step=inventory_provisioning "
