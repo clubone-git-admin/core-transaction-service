@@ -868,6 +868,20 @@ public class BillingQuoteSubscriptionPersistenceService {
 				pos.getEntitlements() == null ? 0 : pos.getEntitlements().size());
 
 		/*
+		 * Paid-in-full quotes are one-time purchases. Persist their purchase/config snapshot only;
+		 * do not create subscription plan, instance, schedule, history, or mandate rows.
+		 */
+		if (isPaidInFull(billing.getFrequencyCode())) {
+			log.info(
+					"[billing-quote/persist] step=paid_in_full_snapshot planTemplateId={} packagePlanTemplateId={} lineCount={}",
+					quote.getPlanTemplateId(), pos.getPackagePlanTemplateId(), lines.size());
+			UUID pifSnapshotId = persistFeeOnlyQuoteSnapshot(quote, billing, pos, lines, clientPaymentMethodId,
+					clientAgreementId, invoiceId, clientPaymentTransactionId, transactionId, createdBy,
+					mergeAgreementSnapshots);
+			return new MergedQuoteRunOutcome(null, null, null, pifSnapshotId, true, pos, quote);
+		}
+
+		/*
 		 * Fee-only quotes (e.g. PIF upfront fee line with itemGroupCode FEE) must not create subscription_* rows.
 		 * Previously we only omitted FEE lines from line-item inserts but still inserted plan/snapshot/instance/schedule.
 		 */
@@ -1191,70 +1205,122 @@ public class BillingQuoteSubscriptionPersistenceService {
 		}
 
 		int additionalSchedulesCreated = 0;
-		if (ADDITIONAL_BILLING_CYCLES > 0) {
-			if (lastPersistedBounds == null || lastPersistedBounds.periodEnd() == null) {
-				throw new IllegalStateException(
-						"Cannot generate additional billing cycles because no existing billing schedule period was created");
-			}
-			if (fullAmountSourceRow == null) {
-				throw new IllegalStateException(
-						"Cannot generate additional billing cycles because the quote did not return a full-amount recurring cycle");
-			}
 
-			LocalDate additionalPeriodStart = lastPersistedBounds.periodEnd().plusDays(1);
-			LocalDate additionalBillDate = previousBillDate;
-			int billingIntervalCount = nz(billing.getIntervalCount(), 1);
+		boolean paidInFull = isPaidInFull(billing.getFrequencyCode());
+		boolean recurringSubscription = !paidInFull
+		        && recurringRows != null
+		        && !recurringRows.isEmpty();
 
-			for (int additionalIndex = 1; additionalIndex <= ADDITIONAL_BILLING_CYCLES; additionalIndex++) {
-				int cycleNumber = lastPersistedCycleNumber + additionalIndex;
-				LocalDate additionalPeriodEnd = calculateAdditionalPeriodEnd(additionalPeriodStart,
-						billing.getFrequencyCode(), billingIntervalCount);
-				additionalBillDate = calculateNextBillingDate(additionalBillDate, additionalPeriodStart,
-						billing.getFrequencyCode(), billingIntervalCount);
-				boolean finalAdditionalCycle = additionalIndex == ADDITIONAL_BILLING_CYCLES;
-				ForecastBounds additionalBounds = new ForecastBounds(additionalPeriodStart, additionalPeriodEnd);
+		if (ADDITIONAL_BILLING_CYCLES > 0 && recurringSubscription) {
 
-				UUID additionalScheduleId = insertSubscriptionBillingSchedule(
-						subscriptionInstanceId,
-						subscriptionPlanId,
-						cycleNumber,
-						"Cycle " + cycleNumber,
-						ensurePeriodLabelForBounds(additionalBounds, null),
-						additionalPeriodStart,
-						additionalPeriodEnd,
-						additionalBillDate,
-						1,
-						nzBd(fullAmountSourceRow.resolvedUnitPrice(), BigDecimal.ZERO),
-						nzBd(fullAmountSourceRow.resolvedUnitPriceBeforeDiscount(),
-								fullAmountSourceRow.resolvedUnitPrice()),
-						recurringRowGrossBaseAmountBeforeTax(fullAmountSourceRow),
-						recurringRowDiscountAmount(fullAmountSourceRow),
-						nzBd(fullAmountSourceRow.resolvedTaxAmount(), BigDecimal.ZERO),
-						nzBd(fullAmountSourceRow.resolvedTaxPct(), BigDecimal.ZERO),
-						recurringRowNetAmount(fullAmountSourceRow),
-						false,
-						false,
-						finalAdditionalCycle,
-						plannedScheduleStatusId,
-						null,
-						null,
-						null,
-						null,
-						null,
-						null,
-						createdBy,
-						applicationId);
+		    if (lastPersistedBounds == null || lastPersistedBounds.periodEnd() == null) {
+		        throw new IllegalStateException(
+		                "Cannot generate additional billing cycles because no existing billing schedule period was created");
+		    }
 
-				insertBillingScheduleTaxLinesForRecurringRow(additionalScheduleId, fullAmountSourceRow);
-				log.info(
-						"[billing-quote/persist] step=insert_additional_billing_schedule outcome=ok billingScheduleId={} cycleNumber={} billingDate={} periodStart={} periodEnd={} isFinalCycle={}",
-						additionalScheduleId, cycleNumber, additionalBillDate, additionalPeriodStart,
-						additionalPeriodEnd, finalAdditionalCycle);
+		    if (fullAmountSourceRow == null) {
+		        throw new IllegalStateException(
+		                "Cannot generate additional billing cycles because the recurring quote did not return a full-amount recurring cycle");
+		    }
 
-				additionalSchedulesCreated++;
-				finalSchedulePeriodEnd = additionalPeriodEnd;
-				additionalPeriodStart = additionalPeriodEnd.plusDays(1);
-			}
+		    LocalDate additionalPeriodStart = lastPersistedBounds.periodEnd().plusDays(1);
+		    LocalDate additionalBillDate = previousBillDate;
+		    int billingIntervalCount = nz(billing.getIntervalCount(), 1);
+
+		    for (int additionalIndex = 1;
+		            additionalIndex <= ADDITIONAL_BILLING_CYCLES;
+		            additionalIndex++) {
+
+		        int cycleNumber = lastPersistedCycleNumber + additionalIndex;
+
+		        LocalDate additionalPeriodEnd = calculateAdditionalPeriodEnd(
+		                additionalPeriodStart,
+		                billing.getFrequencyCode(),
+		                billingIntervalCount);
+
+		        additionalBillDate = calculateNextBillingDate(
+		                additionalBillDate,
+		                additionalPeriodStart,
+		                billing.getFrequencyCode(),
+		                billingIntervalCount);
+
+		        boolean finalAdditionalCycle =
+		                additionalIndex == ADDITIONAL_BILLING_CYCLES;
+
+		        ForecastBounds additionalBounds =
+		                new ForecastBounds(additionalPeriodStart, additionalPeriodEnd);
+
+		        UUID additionalScheduleId = insertSubscriptionBillingSchedule(
+		                subscriptionInstanceId,
+		                subscriptionPlanId,
+		                cycleNumber,
+		                "Cycle " + cycleNumber,
+		                ensurePeriodLabelForBounds(additionalBounds, null),
+		                additionalPeriodStart,
+		                additionalPeriodEnd,
+		                additionalBillDate,
+		                1,
+		                nzBd(fullAmountSourceRow.resolvedUnitPrice(), BigDecimal.ZERO),
+		                nzBd(
+		                        fullAmountSourceRow.resolvedUnitPriceBeforeDiscount(),
+		                        fullAmountSourceRow.resolvedUnitPrice()),
+		                recurringRowGrossBaseAmountBeforeTax(fullAmountSourceRow),
+		                recurringRowDiscountAmount(fullAmountSourceRow),
+		                nzBd(fullAmountSourceRow.resolvedTaxAmount(), BigDecimal.ZERO),
+		                nzBd(fullAmountSourceRow.resolvedTaxPct(), BigDecimal.ZERO),
+		                recurringRowNetAmount(fullAmountSourceRow),
+		                false,
+		                false,
+		                finalAdditionalCycle,
+		                plannedScheduleStatusId,
+		                null,
+		                null,
+		                null,
+		                null,
+		                null,
+		                null,
+		                createdBy,
+		                applicationId);
+
+		        insertBillingScheduleTaxLinesForRecurringRow(
+		                additionalScheduleId,
+		                fullAmountSourceRow);
+
+		        log.info(
+		                "[billing-quote/persist] "
+		                        + "step=insert_additional_billing_schedule "
+		                        + "outcome=ok billingScheduleId={} cycleNumber={} "
+		                        + "billingDate={} periodStart={} periodEnd={} "
+		                        + "isFinalCycle={}",
+		                additionalScheduleId,
+		                cycleNumber,
+		                additionalBillDate,
+		                additionalPeriodStart,
+		                additionalPeriodEnd,
+		                finalAdditionalCycle);
+
+		        additionalSchedulesCreated++;
+		        finalSchedulePeriodEnd = additionalPeriodEnd;
+		        additionalPeriodStart = additionalPeriodEnd.plusDays(1);
+		    }
+
+		} else if (paidInFull) {
+
+		    log.info(
+		            "[billing-quote/persist] step=additional_billing_cycles "
+		                    + "outcome=skip reason=paid_in_full "
+		                    + "planTemplateId={} frequencyCode={}",
+		            pos.getPackagePlanTemplateId(),
+		            billing.getFrequencyCode());
+
+		} else if (CollectionUtils.isEmpty(recurringRows)) {
+
+		    log.info(
+		            "[billing-quote/persist] step=additional_billing_cycles "
+		                    + "outcome=skip reason=non_recurring_quote "
+		                    + "planTemplateId={} frequencyCode={}",
+		            pos.getPackagePlanTemplateId(),
+		            billing.getFrequencyCode());
 		}
 
 		int finalTotalCycles = pending.size() + additionalSchedulesCreated;
