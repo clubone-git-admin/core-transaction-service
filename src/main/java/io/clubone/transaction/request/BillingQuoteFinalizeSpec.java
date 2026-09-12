@@ -30,6 +30,10 @@ public class BillingQuoteFinalizeSpec {
 	/** Quote mode passed through to vendor (e.g. INITIAL / SCHEDULE). */
 	private String quoteMode;
 
+	/** Client agreement created for this specific agreement quote. */
+	@JsonProperty(access = JsonProperty.Access.WRITE_ONLY)
+	private UUID clientAgreementId;
+
 	/**
 	 * Physical locker selected in POS for this agreement purchase.
 	 * WRITE_ONLY keeps it available to transaction finalization but prevents it

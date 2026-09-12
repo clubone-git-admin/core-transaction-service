@@ -7,6 +7,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -639,20 +640,19 @@ public class TransactionServiceImpl implements TransactionService {
 		req.setLevelId(invoiceSummary.getLevelId());
 		final UUID effectiveClientAgreementId = req.getClientAgreementId() != null ? req.getClientAgreementId()
 				: invoiceSummary.getClientAgreementId();
-		final List<UUID> selectedLocationLockerIds = CollectionUtils
+		final List<BillingQuoteFinalizeSpec> lockerQuoteSpecs = CollectionUtils
 				.isEmpty(req.getBillingQuoteFinalizeSpecs())
 						? List.of()
 						: req.getBillingQuoteFinalizeSpecs().stream()
 								.filter(Objects::nonNull)
 								.filter(spec -> "AGREEMENT".equalsIgnoreCase(
 										StringUtils.trimWhitespace(spec.getEntityTypeCode())))
-								.map(BillingQuoteFinalizeSpec::getLocationLockerId)
-								.filter(Objects::nonNull)
-								.distinct()
+								.filter(spec -> spec.getLocationLockerId() != null)
 								.toList();
 
-		if (!selectedLocationLockerIds.isEmpty()) {
-			if (effectiveClientAgreementId == null) {
+		if (!lockerQuoteSpecs.isEmpty()) {
+			if (lockerQuoteSpecs.stream().anyMatch(spec -> spec.getClientAgreementId() == null)
+					&& effectiveClientAgreementId == null) {
 				return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null,
 						"clientAgreementId is required when a Locker is selected");
 			}
@@ -669,7 +669,16 @@ public class TransactionServiceImpl implements TransactionService {
 		if (!CollectionUtils.isEmpty(req.getBillingQuoteFinalizeSpecs())) {
 			// Client agreement is only for AGREEMENT/contract purchases. Package/bundle/item
 			// quote specs persist schedules without client_agreement_id.
-			if (containsAgreementBillingQuoteSpec(req.getBillingQuoteFinalizeSpecs())
+			if (hasMultipleAgreementEntities(req.getBillingQuoteFinalizeSpecs())
+					&& containsAgreementBillingQuoteSpecWithoutClientAgreementId(
+							req.getBillingQuoteFinalizeSpecs())) {
+				logger.warn(
+						"[transactions/v3/finalize] step=validation outcome=reject invoiceId={} reason=missing_per_quote_client_agreement_id",
+						req.getInvoiceId());
+				return new FinalizeTransactionResponse(req.getInvoiceId(), "UNPAID", null, null,
+						"clientAgreementId is required on every AGREEMENT billing quote when purchasing multiple agreements");
+			}
+			if (containsAgreementBillingQuoteSpecWithoutClientAgreementId(req.getBillingQuoteFinalizeSpecs())
 					&& effectiveClientAgreementId == null) {
 				logger.warn(
 						"[transactions/v3/finalize] step=validation outcome=reject invoiceId={} reason=missing_client_agreement_for_agreement_billing_quote_specs",
@@ -935,11 +944,15 @@ public class TransactionServiceImpl implements TransactionService {
 						req.getInvoiceId(), issuedGiftcards.size());
 
 				transactionDAO.activateAgreementAndClientStatusForInvoice(req.getInvoiceId(), req.getCreatedBy());
+				activateClientAgreementsFromQuoteSpecs(req.getBillingQuoteFinalizeSpecs(), req.getCreatedBy());
 
-				for (UUID locationLockerId : selectedLocationLockerIds) {
+				for (BillingQuoteFinalizeSpec lockerSpec : lockerQuoteSpecs) {
+					UUID lockerClientAgreementId = lockerSpec.getClientAgreementId() != null
+							? lockerSpec.getClientAgreementId()
+							: effectiveClientAgreementId;
 					boolean assigned = transactionDAO.assignLocationLocker(
-							locationLockerId,
-							effectiveClientAgreementId,
+							lockerSpec.getLocationLockerId(),
+							lockerClientAgreementId,
 							req.getClientRoleId(),
 							req.getInvoiceId(),
 							transactionId,
@@ -1271,16 +1284,9 @@ public class TransactionServiceImpl implements TransactionService {
 								+ "invoiceId={} responseCount={} clientAgreementId={} transactionId={}",
 						invoiceId, quoteLineItems == null ? 0 : quoteLineItems.size(),
 						clientAgreementId, transactionId);
-				billingQuoteSubscriptionPersistenceService.persistFromQuoteResponses(
-						quoteLineItems,
-						transactionId,
-						clientAgreementId,
-						invoiceId,
-						clientPaymentTransactionId,
-						createdBy,
-						true,
-						cpmHint.orElse(null),
-						applicationId);
+				persistBillingQuotesByClientAgreement(
+						quoteLineItems, specsCopy, transactionId, clientAgreementId, invoiceId,
+						clientPaymentTransactionId, createdBy, cpmHint.orElse(null), applicationId);
 				logger.info(
 						"[transactions/v3/finalize] step=billing_quote_persist outcome=ok invoiceId={} responseCount={}",
 						invoiceId, quoteLineItems.size());
@@ -1318,6 +1324,123 @@ public class TransactionServiceImpl implements TransactionService {
 				.map(BillingQuoteFinalizeSpec::getEntityTypeCode)
 				.filter(Objects::nonNull)
 				.anyMatch(code -> "AGREEMENT".equalsIgnoreCase(code.trim()));
+	}
+
+	private boolean containsAgreementBillingQuoteSpecWithoutClientAgreementId(
+			List<BillingQuoteFinalizeSpec> specs) {
+		if (CollectionUtils.isEmpty(specs)) {
+			return false;
+		}
+		return specs.stream()
+				.filter(Objects::nonNull)
+				.filter(spec -> "AGREEMENT".equalsIgnoreCase(
+						StringUtils.trimWhitespace(spec.getEntityTypeCode())))
+				.anyMatch(spec -> spec.getClientAgreementId() == null);
+	}
+
+	private boolean hasMultipleAgreementEntities(List<BillingQuoteFinalizeSpec> specs) {
+		if (CollectionUtils.isEmpty(specs)) {
+			return false;
+		}
+		return specs.stream()
+				.filter(Objects::nonNull)
+				.filter(spec -> "AGREEMENT".equalsIgnoreCase(
+						StringUtils.trimWhitespace(spec.getEntityTypeCode())))
+				.map(BillingQuoteFinalizeSpec::getEntityId)
+				.filter(Objects::nonNull)
+				.distinct()
+				.limit(2)
+				.count() > 1;
+	}
+
+	private void persistBillingQuotesByClientAgreement(
+			List<BillingQuoteLineItemsResponse> quotes,
+			List<BillingQuoteFinalizeSpec> specs,
+			UUID transactionId,
+			UUID fallbackClientAgreementId,
+			UUID invoiceId,
+			UUID clientPaymentTransactionId,
+			UUID createdBy,
+			UUID clientPaymentMethodIdHint,
+			UUID applicationId) {
+		Map<UUID, List<BillingQuoteLineItemsResponse>> quotesByClientAgreement = new LinkedHashMap<>();
+		List<BillingQuoteLineItemsResponse> nonAgreementQuotes = new ArrayList<>();
+
+		for (BillingQuoteLineItemsResponse quote : quotes) {
+			if (quote == null) {
+				continue;
+			}
+			if (!"AGREEMENT".equalsIgnoreCase(StringUtils.trimWhitespace(quote.getEntityTypeCode()))) {
+				nonAgreementQuotes.add(quote);
+				continue;
+			}
+
+			BillingQuoteFinalizeSpec matchedSpec = specs.stream()
+					.filter(Objects::nonNull)
+					.filter(spec -> "AGREEMENT".equalsIgnoreCase(
+							StringUtils.trimWhitespace(spec.getEntityTypeCode())))
+					.filter(spec -> Objects.equals(spec.getEntityId(), quote.getEntityId()))
+					.filter(spec -> Objects.equals(spec.getPlanTemplateId(), quote.getPlanTemplateId()))
+					.findFirst()
+					.orElseThrow(() -> new IllegalStateException(
+							"No billing quote finalize spec matched AGREEMENT quote entityId="
+									+ quote.getEntityId() + " planTemplateId=" + quote.getPlanTemplateId()));
+
+			UUID quoteClientAgreementId = matchedSpec.getClientAgreementId() != null
+					? matchedSpec.getClientAgreementId()
+					: fallbackClientAgreementId;
+			if (quoteClientAgreementId == null) {
+				throw new IllegalStateException(
+						"clientAgreementId is required for AGREEMENT quote entityId=" + quote.getEntityId()
+								+ " planTemplateId=" + quote.getPlanTemplateId());
+			}
+			quotesByClientAgreement
+					.computeIfAbsent(quoteClientAgreementId, ignored -> new ArrayList<>())
+					.add(quote);
+		}
+
+		for (Map.Entry<UUID, List<BillingQuoteLineItemsResponse>> entry : quotesByClientAgreement.entrySet()) {
+			billingQuoteSubscriptionPersistenceService.persistFromQuoteResponses(
+					entry.getValue(), transactionId, entry.getKey(), invoiceId,
+					clientPaymentTransactionId, createdBy, true, clientPaymentMethodIdHint, applicationId);
+		}
+
+		if (!nonAgreementQuotes.isEmpty()) {
+			billingQuoteSubscriptionPersistenceService.persistFromQuoteResponses(
+					nonAgreementQuotes, transactionId, null, invoiceId,
+					clientPaymentTransactionId, createdBy, true, clientPaymentMethodIdHint, applicationId);
+		}
+	}
+
+	private void activateClientAgreementsFromQuoteSpecs(
+			List<BillingQuoteFinalizeSpec> specs,
+			UUID modifiedBy) {
+		if (CollectionUtils.isEmpty(specs)) {
+			return;
+		}
+		List<UUID> clientAgreementIds = specs.stream()
+				.filter(Objects::nonNull)
+				.filter(spec -> "AGREEMENT".equalsIgnoreCase(
+						StringUtils.trimWhitespace(spec.getEntityTypeCode())))
+				.map(BillingQuoteFinalizeSpec::getClientAgreementId)
+				.filter(Objects::nonNull)
+				.distinct()
+				.toList();
+		if (clientAgreementIds.isEmpty()) {
+			return;
+		}
+		jdbc.update("""
+				UPDATE client_agreements.client_agreement ca
+				SET client_agreement_status_id = s.client_agreement_status_id,
+				    modified_on = now(),
+				    modified_by = :modifiedBy
+				FROM client_agreements.lu_client_agreement_status s
+				WHERE ca.client_agreement_id IN (:clientAgreementIds)
+				  AND s.code = 'ACTIVE'
+				  AND s.is_active = true
+				""", new MapSqlParameterSource()
+				.addValue("clientAgreementIds", clientAgreementIds)
+				.addValue("modifiedBy", modifiedBy));
 	}
 
 	private List<UUID> extractPromotionApplicabilityIds(

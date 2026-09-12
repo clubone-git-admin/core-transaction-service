@@ -17,6 +17,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.NoSuchElementException;
@@ -1228,6 +1229,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 		inv.setLineItems(lines);
 
 		UUID firstClientAgreementId = null;
+		Map<UUID, UUID> clientAgreementIdsByAgreementId = new LinkedHashMap<>();
 
 		if (isAgreement) {
 
@@ -1329,6 +1331,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 				}
 
 				stampClientAgreementForRoot(lines, parentMap, p.rootInvoiceEntityId(), clientAgreementId);
+				clientAgreementIdsByAgreementId.put(p.entity().getEntityId(), clientAgreementId);
 			}
 
 			if (firstClientAgreementId != null) {
@@ -1336,11 +1339,12 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			}
 
 			return persistInvoiceAfterClientAgreements(
-					request, inv, corporateInvoiceContexts, applicationId, createdClientAgreementIds, invoiceZone);
+					request, inv, corporateInvoiceContexts, applicationId, createdClientAgreementIds,
+					clientAgreementIdsByAgreementId, invoiceZone);
 		}
 
 		return persistInvoiceAfterClientAgreements(
-				request, inv, corporateInvoiceContexts, applicationId, List.of(), invoiceZone);
+				request, inv, corporateInvoiceContexts, applicationId, List.of(), Map.of(), invoiceZone);
 	}
 
 	/**
@@ -1354,6 +1358,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			List<CorporateInvoiceContext> corporateInvoiceContexts,
 			UUID applicationId,
 			List<UUID> createdClientAgreementIds,
+			Map<UUID, UUID> clientAgreementIdsByAgreementId,
 			ZoneId invoiceZone) {
 
 		return invoicePersistTx.execute(status -> {
@@ -1407,6 +1412,7 @@ public class TransactionServiceV2Impl implements TransactionServicev2 {
 			response.setInvoiceNumber(invoiceNumber);
 			response.setStatus(transactionDAO.currentInvoiceStatusName(invoiceId));
 			response.setClientAgreementId(inv.getClientAgreementId());
+			response.setClientAgreementIdsByAgreementId(clientAgreementIdsByAgreementId);
 			response.setBillingRunId(inv.getBillingRunId());
 			response.setBillingCollectionTypeId(inv.getBillingCollectionTypeId());
 			if (StringUtils.hasText(request.getBillingCollectionTypeCode())) {
