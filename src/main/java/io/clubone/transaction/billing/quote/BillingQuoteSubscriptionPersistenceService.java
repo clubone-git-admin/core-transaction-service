@@ -69,7 +69,7 @@ public class BillingQuoteSubscriptionPersistenceService {
 	private static final Logger log = LoggerFactory.getLogger(BillingQuoteSubscriptionPersistenceService.class);
 
 	private static final Pattern CYCLE_LABEL_NUMBER = Pattern.compile("(?i)cycle\\s*#?\\s*(\\d+)");
-	private static final int ADDITIONAL_BILLING_CYCLES = 6;
+	private static final int ADDITIONAL_BILLING_CYCLES = 0;
 
 	/** First two ISO dates in {@code period_label} (e.g. human text with embedded yyyy-MM-dd). */
 	private static final Pattern PERIOD_LABEL_ISO_DATES = Pattern.compile("(\\d{4}-\\d{2}-\\d{2})");
