@@ -133,9 +133,9 @@ public class SubscriptionBillingScheduleManageServiceImpl implements Subscriptio
 	    );
 	    System.out.println("Rows inserted: " + inserted);
 
-	    // Optional recompute
-	    // System.out.println("Recomputing manual adjustment amount...");
-	    // scheduleDAO.recomputeManualAdjustmentAmount(billingScheduleId, createdBy);
+	    if (inserted > 0) {
+	        scheduleDAO.recomputeManualAdjustmentAmount(billingScheduleId, createdBy);
+	    }
 
 	    // 🔍 Response
 	    SimpleActionResponse resp = new SimpleActionResponse();
@@ -177,7 +177,9 @@ public class SubscriptionBillingScheduleManageServiceImpl implements Subscriptio
 		}
 
 		int updated = scheduleDAO.updateAdjustment(billingScheduleAdjustmentId, request, modifiedBy);
-		//scheduleDAO.recomputeManualAdjustmentAmount(billingScheduleId, modifiedBy);
+		if (updated > 0) {
+			scheduleDAO.recomputeManualAdjustmentAmount(billingScheduleId, modifiedBy);
+		}
 
 		writeAudit("BILLING_SCHEDULE", "SCHEDULE_ADJUSTMENT", billingScheduleAdjustmentId,
 				"SCHEDULE_ADJUSTMENT_UPDATED", modifiedBy, userEmail, ipAddress, userAgent, request);
@@ -199,7 +201,9 @@ public class SubscriptionBillingScheduleManageServiceImpl implements Subscriptio
 		}
 
 		int updated = scheduleDAO.deactivateAdjustment(billingScheduleAdjustmentId, modifiedBy);
-		//scheduleDAO.recomputeManualAdjustmentAmount(billingScheduleId, modifiedBy);
+		if (updated > 0) {
+			scheduleDAO.recomputeManualAdjustmentAmount(billingScheduleId, modifiedBy);
+		}
 
 		writeAudit("BILLING_SCHEDULE", "SCHEDULE_ADJUSTMENT", billingScheduleAdjustmentId,
 				"SCHEDULE_ADJUSTMENT_DEACTIVATED", modifiedBy, userEmail, ipAddress, userAgent, null);
@@ -262,5 +266,4 @@ public class SubscriptionBillingScheduleManageServiceImpl implements Subscriptio
 		resp.setMessage("Future schedule regeneration initiated successfully. Deleted rows = " + deleted);
 		return resp;
 	}
-
 }

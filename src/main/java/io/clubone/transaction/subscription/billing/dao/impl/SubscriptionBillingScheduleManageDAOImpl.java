@@ -87,6 +87,8 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
                     sum(amount) as total_adjustment_amount
                 from client_subscription_billing.subscription_billing_schedule_adjustment
                 where is_active = true
+                  and reversed_on is null
+                  and reversal_reference_id is null
                 group by billing_schedule_id
             ) adj on adj.billing_schedule_id = s.billing_schedule_id
             where sp.client_agreement_id = ?::uuid
@@ -747,11 +749,13 @@ public class SubscriptionBillingScheduleManageDAOImpl implements SubscriptionBil
     public int recomputeManualAdjustmentAmount(UUID billingScheduleId, UUID modifiedBy) {
         String sql = """
             update client_subscription_billing.subscription_billing_schedule s
-            set manual_adjustment_amount = coalesce((
+            set system_adjustment_amount = coalesce((
                     select sum(a.amount)
                     from client_subscription_billing.subscription_billing_schedule_adjustment a
                     where a.billing_schedule_id = s.billing_schedule_id
                       and a.is_active = true
+                      and a.reversed_on is null
+                      and a.reversal_reference_id is null
                 ), 0),
                 modified_on = now(),
                 modified_by = ?::uuid
